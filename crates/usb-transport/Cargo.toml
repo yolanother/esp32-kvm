@@ -1,0 +1,13 @@
+# Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
+# Builds the isolated host USB discovery and handshake crate for ESP32 KVM.
+[package]
+name = "esp32-kvm-usb-transport"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+
+[dependencies]
+esp32-kvm-protocol = { path = "../protocol" }
+serialport = "=4.10.1"
+
+[workspace]
