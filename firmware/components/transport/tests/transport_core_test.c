@@ -10,6 +10,20 @@ static unsigned char sent[1024];
 static size_t sent_len;
 static unsigned sends;
 
+/* Decodes one captured frame independently of the transport implementation. */
+static size_t decode_sent(unsigned char *raw)
+{
+    size_t source = 0, target = 0;
+    assert(sent_len > 0 && sent[sent_len - 1] == 0);
+    while (source < sent_len - 1) {
+        unsigned code = sent[source++];
+        assert(code != 0 && source + code - 1 <= sent_len - 1);
+        for (unsigned i = 1; i < code; i++) raw[target++] = sent[source++];
+        if (code != 0xff && source < sent_len - 1) raw[target++] = 0;
+    }
+    return target;
+}
+
 static void capture(void *context, const unsigned char *bytes, size_t length)
 {
     (void)context;
@@ -56,6 +70,10 @@ int main(int argc, char **argv)
 
     assert(kvm_transport_core_device_select_request(&core, 1));
     assert(sends == 4 && sent[4] == KVM_MSG_DEVICE_SELECT_REQUEST);
+    length = decode_sent(bytes);
+    assert(length == KVM_PROTOCOL_HEADER_LEN + 5 + 4);
+    assert(bytes[4] == 5 && bytes[5] == 0);
+    assert(memcmp(bytes + KVM_PROTOCOL_HEADER_LEN, "\x01\x01\x00\x00\x00", 5) == 0);
 
     bytes[length - 2] ^= 1; /* Break the golden frame's CRC. */
     kvm_transport_core_feed(&core, bytes, length);

@@ -380,11 +380,9 @@ void kvm_transport_core_tick(kvm_transport_core_t *core)
 bool kvm_transport_core_device_select_request(kvm_transport_core_t *core, uint8_t slot)
 {
     if (!core || !core->session_open || slot > 1) return false;
-    uint8_t payload[12] = {0xa2, 0x00};
-    payload[2] = slot;
-    payload[3] = 0x01;
+    uint8_t payload[5] = {slot};
     uint32_t request_id = ++core->next_select_request_id;
-    size_t length = 4 + cbor_uint(payload + 4, request_id);
-    emit(core, KVM_MSG_DEVICE_SELECT_REQUEST, 0, payload, length);
+    put_u32(payload + 1, request_id);
+    emit(core, KVM_MSG_DEVICE_SELECT_REQUEST, 0, payload, sizeof(payload));
     return true;
 }
