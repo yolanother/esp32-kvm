@@ -13,7 +13,7 @@ BOOT GPIO0 is a recovery strap. A press held during startup is ignored until rel
 - `firmware/tests/display/run-msvc.ps1`: status labels, startup BOOT exclusion, PLUS debounce, and one-shot BOOT emergency.
 - `firmware/tests/router/run-msvc.ps1`: emergency fail-local release and stale-session rejection.
 - `firmware/tests/integration/run-msvc.ps1`: binary select request and existing USB/router fixture behavior.
-- ESP-IDF 5.5.1 build: pending native compile gate.
+- ESP-IDF 5.5.1 `idf.py -C firmware build`: passed after regenerating local `sdkconfig` from defaults. The image is `0xe26e0` bytes; the smallest app partition is 4 MB, with 78% free. The first parallel build hit an Xtensa GCC internal compiler segmentation fault in ESP-IDF's unused RGB LCD source; a retry compiled that object and the complete build passed. No flash was performed.
 - Physical acceptance: inspect PCB revision; test LCD pixels and backlight polarity at opt-in startup; confirm SPI mode/offset/rotation; probe CST816 address, touch axes, and interrupt; map PLUS without touching PWR; measure redraw time and free DMA memory while BLE input flows; repeat BOOT recovery and normal screen boot. Flash only after board recovery and identity gates are cleared by the coordinator.
 
 Reference: [Waveshare board resources](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54/Resources-And-Documents), [Waveshare factory BSP](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.54/tree/main/examples/ESP32-S3-Touch-LCD-1.54-demo/ESP-IDF-5.5.1/01_factory/components/esp_bsp), and [Espressif LVGL port](https://github.com/espressif/esp-bsp/tree/master/components/esp_lvgl_port).
