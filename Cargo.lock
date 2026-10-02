@@ -774,6 +774,10 @@ name = "esp32-kvm-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "esp32-kvm-topology-core"
+version = "0.1.0"
+
+[[package]]
 name = "esp32-kvm-usb-transport"
 version = "0.1.0"
 dependencies = [
