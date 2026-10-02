@@ -1,25 +1,92 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Verifies that optional NimBLE guest startup stays disarmed, advertises one
- * composite identity, and closes failed or unexpected security transitions. */
+ * Exercises HID guest admission, numeric consent, authenticated bonding,
+ * token persistence, and deliberate removal with mocked NimBLE and NVS. */
 #include <assert.h>
 #include <string.h>
-
 #include "hid_guest.h"
 #include "hid_gatt.h"
 #include "host/ble_gap.h"
 #include "host/ble_hs.h"
+#include "host/ble_sm.h"
+#include "nvs.h"
+#include "nimble/nimble_npl.h"
 
 struct ble_hs_cfg ble_hs_cfg;
-unsigned test_nvs_calls;
-unsigned test_advertisements;
-unsigned test_terminations;
-int (*test_gap_callback)(struct ble_gap_event *, void *);
 static hid_channel_t channel;
+static int (*gap_callback)(struct ble_gap_event *, void *);
+static ble_addr_t active_peer;
+static int64_t time_us;
+static unsigned terminations, advertisements, confirmations;
+static unsigned char saved[256];
+static size_t saved_size;
+static hid_guest_pairing_event_t last_event;
+static unsigned sent_reports;
+static struct ble_npl_eventq host_queue;
+static struct ble_npl_callout host_timeout;
+static bool hold_host;
 
-int nvs_flash_init(void) { test_nvs_calls++; return 0; }
+static void event_sink(const hid_guest_pairing_event_t *event, void *context)
+{ (void)context; last_event = *event; }
+static int send_report(void *context, uint16_t handle, uint8_t report,
+                       const uint8_t *bytes, size_t length)
+{
+    (void)context; (void)bytes;
+    assert(handle == 17 && report >= HID_REPORT_KEYBOARD && report <= HID_REPORT_CONSUMER);
+    assert(length == (report == HID_REPORT_KEYBOARD ? HID_KEYBOARD_REPORT_LEN :
+                      report == HID_REPORT_MOUSE ? HID_MOUSE_REPORT_LEN : HID_CONSUMER_REPORT_LEN));
+    sent_reports++;
+    return 0;
+}
+int nvs_flash_init(void) { return 0; }
+int nvs_open(const char *name, int mode, nvs_handle_t *handle)
+{ (void)mode; assert(strcmp(name, "kvm_bonds") == 0); *handle = 1; return 0; }
+int nvs_get_blob(nvs_handle_t handle, const char *key, void *value, size_t *length)
+{ (void)handle; (void)key; if (!saved_size) return ESP_ERR_NVS_NOT_FOUND;
+  assert(*length >= saved_size); memcpy(value, saved, saved_size); *length = saved_size; return 0; }
+int nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, size_t length)
+{ (void)handle; (void)key; assert(length <= sizeof(saved));
+  memcpy(saved, value, length); saved_size = length; return 0; }
+int nvs_commit(nvs_handle_t handle) { (void)handle; return 0; }
+void nvs_close(nvs_handle_t handle) { (void)handle; }
+uint32_t esp_random(void) { static uint32_t next = 0x1234; return ++next; }
+int64_t esp_timer_get_time(void) { return time_us; }
 int nimble_port_init(void) { return 0; }
 int nimble_port_deinit(void) { return 0; }
 void nimble_port_run(void) { }
+struct ble_npl_eventq *nimble_port_get_dflt_eventq(void) { return &host_queue; }
+void ble_npl_event_init(struct ble_npl_event *event,
+                        void (*callback)(struct ble_npl_event *), void *argument)
+{ event->callback = callback; event->argument = argument; }
+void ble_npl_eventq_put(struct ble_npl_eventq *queue, struct ble_npl_event *event)
+{ if (!queue->pending) queue->pending = event; else queue->next = event; }
+void ble_npl_callout_init(struct ble_npl_callout *callout, struct ble_npl_eventq *queue,
+                          void (*callback)(struct ble_npl_event *), void *argument)
+{ (void)queue; (void)argument; callout->callback = callback; host_timeout = *callout; }
+int ble_npl_callout_reset(struct ble_npl_callout *callout, uint32_t ticks)
+{ assert(callout->callback && ticks == 60000); return BLE_NPL_OK; }
+void ble_npl_callout_stop(struct ble_npl_callout *callout) { (void)callout; }
+uint32_t ble_npl_time_ms_to_ticks32(uint32_t ms) { return ms; }
+ble_npl_time_t ble_npl_time_get(void) { return (ble_npl_time_t)(time_us / 1000); }
+int ble_npl_mutex_init(struct ble_npl_mutex *mutex) { (void)mutex; return BLE_NPL_OK; }
+int ble_npl_mutex_pend(struct ble_npl_mutex *mutex, ble_npl_time_t timeout)
+{ (void)mutex; (void)timeout; return BLE_NPL_OK; }
+int ble_npl_mutex_release(struct ble_npl_mutex *mutex) { (void)mutex; return BLE_NPL_OK; }
+int ble_npl_sem_init(struct ble_npl_sem *semaphore, uint16_t tokens)
+{ semaphore->tokens = tokens; return BLE_NPL_OK; }
+int ble_npl_sem_pend(struct ble_npl_sem *semaphore, ble_npl_time_t timeout)
+{
+    if (semaphore->tokens) { semaphore->tokens--; return BLE_NPL_OK; }
+    if (timeout && host_queue.pending && !hold_host) {
+        struct ble_npl_event *event = host_queue.pending;
+        host_queue.pending = host_queue.next;
+        host_queue.next = NULL;
+        event->callback(event);
+        if (semaphore->tokens) { semaphore->tokens--; return BLE_NPL_OK; }
+    }
+    return 1;
+}
+int ble_npl_sem_release(struct ble_npl_sem *semaphore)
+{ semaphore->tokens++; return BLE_NPL_OK; }
 void nimble_port_freertos_init(void (*task)(void *)) { (void)task; }
 void nimble_port_freertos_deinit(void) { }
 void ble_svc_gap_init(void) { }
@@ -27,28 +94,28 @@ void ble_svc_gatt_init(void) { }
 int ble_svc_gap_device_name_set(const char *name) { return strcmp(name, "ESP32 KVM"); }
 int ble_svc_gap_device_appearance_set(uint16_t appearance) { return appearance == 0x03c0 ? 0 : -1; }
 void ble_store_config_init(void) { }
-void ble_store_util_status_rr(void) { }
 int ble_hs_util_ensure_addr(int privacy) { return privacy; }
 int ble_hs_id_infer_auto(int privacy, uint8_t *type) { *type = 0; return privacy; }
+int ble_store_util_bonded_peers(ble_addr_t *peers, int *count, int maximum)
+{ (void)peers; (void)maximum; *count = saved_size ? 1 : 0; return 0; }
+int ble_store_util_delete_peer(const ble_addr_t *peer) { (void)peer; return 0; }
+int ble_sm_inject_io(uint16_t handle, struct ble_sm_io *io)
+{ assert(handle == 17 && io->action == BLE_SM_IOACT_NUMCMP && io->numcmp_accept);
+  confirmations++; return 0; }
 int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *fields)
-{
-    assert(fields->num_uuids16 == 1 && fields->uuids16[0].value == 0x1812);
-    return 0;
-}
+{ assert(fields->num_uuids16 == 1 && fields->uuids16[0].value == 0x1812); return 0; }
 int ble_gap_adv_start(uint8_t type, const void *address, uint32_t duration,
-                      const struct ble_gap_adv_params *parameters,
-                      int (*callback)(struct ble_gap_event *, void *), void *argument)
-{
-    (void)type; (void)address; (void)duration; (void)parameters; (void)argument;
-    test_gap_callback = callback;
-    test_advertisements++;
-    return 0;
-}
+                     const struct ble_gap_adv_params *parameters,
+                     int (*callback)(struct ble_gap_event *, void *), void *argument)
+{ (void)type; (void)address; (void)duration; (void)parameters; (void)argument;
+  gap_callback = callback; advertisements++; return 0; }
 int ble_gap_terminate(uint16_t handle, uint8_t reason)
-{ (void)handle; (void)reason; test_terminations++; return 0; }
+{ (void)handle; (void)reason; terminations++; return 0; }
 int ble_gap_security_initiate(uint16_t handle) { return handle == 17 ? 0 : -1; }
 int ble_gap_conn_find(uint16_t handle, struct ble_gap_conn_desc *description)
-{ description->conn_handle = handle; description->sec_state.encrypted = 1; description->sec_state.bonded = 1; return 0; }
+{ description->conn_handle = handle; description->peer_id_addr = active_peer;
+  description->sec_state.encrypted = 1; description->sec_state.bonded = 1;
+  description->sec_state.authenticated = 1; return 0; }
 int hid_gatt_register(void) { hid_channel_init(&channel, NULL, NULL); return 0; }
 hid_channel_t *hid_gatt_channel(void) { return &channel; }
 bool hid_gatt_on_connect(uint16_t handle)
@@ -60,42 +127,84 @@ void hid_gatt_on_encryption(uint16_t handle, bool encrypted)
 void hid_gatt_on_subscribe(uint16_t handle, uint16_t value_handle, bool enabled)
 { (void)handle; (void)value_handle; (void)enabled; }
 
-extern unsigned test_nvs_calls;
-extern unsigned test_advertisements;
-extern unsigned test_terminations;
-extern int (*test_gap_callback)(struct ble_gap_event *, void *);
-
 int main(void)
 {
+    active_peer.type = 1; active_peer.val[0] = 42;
     assert(hid_guest_start() == 0);
-    assert(test_nvs_calls == 1);
-    assert(!hid_gatt_channel()->armed);
+    assert(ble_hs_cfg.sm_mitm == 1 && ble_hs_cfg.sm_sc == 1);
+    assert(ble_hs_cfg.sm_io_cap == BLE_SM_IO_CAP_DISP_YES_NO);
+    assert(ble_hs_cfg.store_status_cb(NULL, NULL) != 0);
     ble_hs_cfg.sync_cb();
-    assert(test_advertisements == 1);
-
+    assert(advertisements == 1 && !channel.armed);
     struct ble_gap_event connect = {.type = BLE_GAP_EVENT_CONNECT};
-    connect.connect.status = 0;
     connect.connect.conn_handle = 17;
-    assert(test_gap_callback(&connect, NULL) == 0);
-    assert(hid_gatt_channel()->connected && !hid_gatt_channel()->armed);
-    assert(test_advertisements == 1);
-    connect.connect.conn_handle = 18;
-    assert(test_gap_callback(&connect, NULL) == 0);
-    assert(test_terminations == 1);
-
+    gap_callback(&connect, NULL);
+    assert(terminations == 1 && !channel.connected);
+    hid_guest_pairing_set_events(event_sink, NULL);
+    assert(hid_guest_pairing_open() == 0 && last_event.type == HID_GUEST_PAIRING_OPENED);
+    time_us = 60000000;
+    host_timeout.callback(NULL);
+    assert(last_event.type == HID_GUEST_PAIRING_CLOSED);
+    gap_callback(&connect, NULL);
+    assert(terminations == 2 && !channel.connected);
+    assert(hid_guest_pairing_open() == 0);
+    gap_callback(&connect, NULL);
+    assert(channel.connected && !channel.armed);
+    struct ble_gap_event challenge = {.type = BLE_GAP_EVENT_PASSKEY_ACTION};
+    challenge.passkey.conn_handle = 17;
+    challenge.passkey.params.action = BLE_SM_IOACT_NUMCMP;
+    challenge.passkey.params.numcmp = 123456;
+    gap_callback(&challenge, NULL);
+    assert(last_event.type == HID_GUEST_PAIRING_CHALLENGE && last_event.number == 123456);
+    assert(hid_guest_pairing_confirm(17, true) == 0 && confirmations == 1);
     struct ble_gap_event encryption = {.type = BLE_GAP_EVENT_ENC_CHANGE};
     encryption.enc_change.conn_handle = 17;
-    encryption.enc_change.status = 1;
-    assert(test_gap_callback(&encryption, NULL) == 0);
-    assert(test_terminations == 2 && !hid_gatt_channel()->armed);
+    gap_callback(&encryption, NULL);
+    assert(channel.encrypted && !channel.armed && last_event.type == HID_GUEST_BONDED);
+    assert(!hid_guest_request_ready());
+    channel.send = send_report;
+    channel.subscribed[HID_REPORT_KEYBOARD] = true;
+    channel.subscribed[HID_REPORT_MOUSE] = true;
+    channel.subscribed[HID_REPORT_CONSUMER] = true;
+    assert(hid_guest_request_ready());
+    assert(hid_guest_request_arm());
+    const uint8_t keys[HID_KEYBOARD_REPORT_LEN] = {0, 0, 4};
+    assert(hid_guest_request_keyboard(keys));
+    assert(hid_guest_request_mouse(1, 10, -20, 0, 0));
+    assert(hid_guest_request_consumer(0x00e9));
+    assert(hid_guest_request_release() && sent_reports == 9);
+    assert(last_event.token && saved_size);
+    uint64_t token = last_event.token;
+    hid_pairing_t snapshot;
+    hid_guest_pairing_snapshot(&snapshot);
+    assert(snapshot.bond_count == 1 && snapshot.bonds[0].token == token);
     struct ble_gap_event disconnect = {.type = BLE_GAP_EVENT_DISCONNECT};
     disconnect.disconnect.conn.conn_handle = 17;
-    assert(test_gap_callback(&disconnect, NULL) == 0);
-    assert(test_advertisements == 2 && !hid_gatt_channel()->connected);
-    connect.connect.conn_handle = 17;
-    assert(test_gap_callback(&connect, NULL) == 0);
-    encryption.enc_change.status = 0;
-    assert(test_gap_callback(&encryption, NULL) == 0);
-    assert(hid_gatt_channel()->encrypted && !hid_gatt_channel()->armed);
+    gap_callback(&disconnect, NULL);
+    assert(advertisements == 2 && !channel.connected);
+    gap_callback(&connect, NULL);
+    assert(channel.connected && terminations == 2);
+    hold_host = true;
+    const uint8_t stale_keys[HID_KEYBOARD_REPORT_LEN] = {0};
+    unsigned sent_before_timeout = sent_reports;
+    assert(!hid_guest_request_keyboard(stale_keys));
+    assert(!hid_guest_request_ready());
+    assert(sent_reports == sent_before_timeout && host_queue.pending && host_queue.next);
+    hold_host = false;
+    struct ble_npl_event *expired = host_queue.pending;
+    host_queue.pending = host_queue.next; host_queue.next = NULL;
+    expired->callback(expired);
+    assert(sent_reports == sent_before_timeout);
+    host_queue.pending->callback(host_queue.pending);
+    host_queue.pending = NULL;
+    assert(terminations == 3);
+    assert(hid_guest_request_disconnect() == ESP_OK);
+    assert(terminations == 3 && host_queue.pending);
+    host_queue.pending->callback(host_queue.pending);
+    host_queue.pending = NULL;
+    assert(terminations == 4 && channel.needs_disconnect);
+    assert(hid_guest_pairing_forget(token, false) != 0);
+    assert(hid_guest_pairing_forget(token, true) == 0);
+    assert(terminations == 5 && !channel.armed && channel.needs_disconnect);
     return 0;
 }

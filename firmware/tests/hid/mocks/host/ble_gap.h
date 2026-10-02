@@ -12,6 +12,7 @@
 #define BLE_GAP_EVENT_NOTIFY_TX 5
 #define BLE_GAP_EVENT_ADV_COMPLETE 6
 #define BLE_GAP_EVENT_REPEAT_PAIRING 7
+#define BLE_GAP_EVENT_PASSKEY_ACTION 8
 #define BLE_HS_ADV_F_DISC_GEN 1
 #define BLE_HS_ADV_F_BREDR_UNSUP 4
 #define BLE_GAP_CONN_MODE_UND 1
@@ -19,6 +20,7 @@
 #define BLE_HS_FOREVER 0xffffffffu
 #define BLE_ERR_REM_USER_CONN_TERM 0x13
 typedef struct { uint16_t value; } ble_uuid16_t;
+typedef struct { uint8_t type; uint8_t val[6]; } ble_addr_t;
 #define BLE_UUID16_INIT(value) {value}
 struct ble_gap_adv_params { uint8_t conn_mode, disc_mode; };
 struct ble_hs_adv_fields {
@@ -32,7 +34,11 @@ struct ble_hs_adv_fields {
     uint16_t appearance;
     uint8_t appearance_is_present;
 };
-struct ble_gap_conn_desc { uint16_t conn_handle; struct { uint8_t encrypted, bonded; } sec_state; };
+struct ble_gap_conn_desc {
+    uint16_t conn_handle;
+    ble_addr_t peer_id_addr;
+    struct { uint8_t encrypted, bonded, authenticated; } sec_state;
+};
 struct ble_gap_event {
     int type;
     union {
@@ -42,6 +48,7 @@ struct ble_gap_event {
         struct { uint16_t conn_handle, attr_handle; uint8_t cur_notify; } subscribe;
         struct { int status; uint16_t conn_handle; } notify_tx;
         struct { uint16_t conn_handle; } repeat_pairing;
+        struct { uint16_t conn_handle; struct { uint8_t action; uint32_t numcmp; } params; } passkey;
     };
 };
 int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *fields);

@@ -1,27 +1,95 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Starts an optional single-identity NimBLE HID peripheral after explicit
  * firmware integration. It advertises a composite HID service, requires an
- * encrypted bonded link, and leaves routing disarmed until the host actor arms. */
+ * authenticated bonded link and explicit pairing consent, while routing stays
+ * disarmed until the host actor arms. */
 #include "hid_guest.h"
 
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_random.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_gap.h"
 #include "host/ble_hs.h"
+#include "host/ble_sm.h"
+#include "host/ble_store.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "hid_gatt.h"
+#include "hid_pairing_store.h"
+#include "hid_guest_rpc.h"
 
 /* ESP-IDF's NimBLE store configuration helper has no public header. */
 void ble_store_config_init(void);
 
 static const char *tag = "esp32-kvm-hid";
 static uint8_t own_address_type;
+static hid_pairing_t pairing;
+static hid_guest_pairing_event_fn pairing_events;
+static void *pairing_event_context;
+static bool started;
+static struct ble_npl_event disconnect_event;
+static struct ble_npl_callout pairing_timeout;
+
+static void disconnect_on_host(struct ble_npl_event *event)
+{
+    (void)event;
+    hid_guest_disconnect_current();
+}
+
+static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000; }
+
+static void publish(hid_guest_pairing_event_type_t type, uint16_t handle,
+                    uint32_t number, uint64_t token)
+{
+    if (!pairing_events) return;
+    hid_guest_pairing_event_t event = {type, handle, number, token};
+    pairing_events(&event, pairing_event_context);
+}
+
+static void expire_window(void)
+{
+    bool was_open = pairing.window_active;
+    bool pending = pairing.challenge_active || pairing.challenge_approved;
+    uint16_t handle = pairing.challenge_handle;
+    if (was_open && !hid_pairing_window_open(&pairing, now_ms())) {
+        if (pending) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+        publish(HID_GUEST_PAIRING_CLOSED, 0, 0, 0);
+    }
+}
+
+static void pairing_timeout_on_host(struct ble_npl_event *event)
+{
+    (void)event;
+    expire_window();
+}
+
+static hid_peer_t peer_identity(const ble_addr_t *address)
+{
+    hid_peer_t peer = {.type = address->type};
+    memcpy(peer.address, address->val, sizeof(peer.address));
+    return peer;
+}
+
+static ble_addr_t ble_identity(hid_peer_t peer)
+{
+    ble_addr_t address = {.type = peer.type};
+    memcpy(address.val, peer.address, sizeof(peer.address));
+    return address;
+}
+
+/* NimBLE's sample round-robin callback evicts a bond. Nonzero forbids retry. */
+static int reject_store_overflow(struct ble_store_status_event *event, void *argument)
+{
+    (void)event; (void)argument;
+    ESP_LOGE(tag, "Bond store full; no identity evicted");
+    return 1;
+}
 
 static int gap_event(struct ble_gap_event *event, void *argument);
 
@@ -75,6 +143,14 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status != 0) { advertise(); return 0; }
+        expire_window();
+        struct ble_gap_conn_desc incoming;
+        if (ble_gap_conn_find(event->connect.conn_handle, &incoming) != 0 ||
+            !hid_pairing_admit(&pairing, peer_identity(&incoming.peer_id_addr), now_ms())) {
+            publish(HID_GUEST_PAIRING_REJECTED, event->connect.conn_handle, 0, 0);
+            ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            return 0;
+        }
         if (!hid_gatt_on_connect(event->connect.conn_handle)) {
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
@@ -84,13 +160,38 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         hid_gatt_on_disconnect(event->disconnect.conn.conn_handle);
+        pairing.challenge_active = false;
+        pairing.challenge_approved = false;
         advertise();
         return 0;
     case BLE_GAP_EVENT_ENC_CHANGE: {
         struct ble_gap_conn_desc description;
         bool secure = event->enc_change.status == 0 &&
                       ble_gap_conn_find(event->enc_change.conn_handle, &description) == 0 &&
-                      description.sec_state.encrypted && description.sec_state.bonded;
+                      description.sec_state.encrypted && description.sec_state.bonded &&
+                      description.sec_state.authenticated;
+        if (secure) {
+            hid_peer_t peer = peer_identity(&description.peer_id_addr);
+            if (!hid_pairing_token(&pairing, peer)) {
+                expire_window();
+                secure = pairing.window_active && pairing.bond_count < HID_PAIRING_MAX_BONDS &&
+                         hid_pairing_consume_approval(&pairing, event->enc_change.conn_handle);
+                if (secure) {
+                    uint64_t token = ((uint64_t)esp_random() << 32) | esp_random();
+                    hid_pairing_t next = pairing;
+                    secure = hid_pairing_add_bond(&next, peer, token) &&
+                             hid_pairing_store_save(&next) == ESP_OK;
+                    if (secure) {
+                        pairing = next;
+                        ble_npl_callout_stop(&pairing_timeout);
+                        publish(HID_GUEST_BONDED, event->enc_change.conn_handle, 0, token);
+                    } else {
+                        ble_addr_t address = description.peer_id_addr;
+                        ble_store_util_delete_peer(&address);
+                    }
+                }
+            }
+        }
         hid_gatt_on_encryption(event->enc_change.conn_handle, secure);
         if (!secure) ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         return 0;
@@ -108,8 +209,23 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         }
         return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:
+        expire_window();
         advertise();
         return 0;
+    case BLE_GAP_EVENT_PASSKEY_ACTION: {
+        struct ble_gap_conn_desc description;
+        uint16_t handle = event->passkey.conn_handle;
+        if (event->passkey.params.action != BLE_SM_IOACT_NUMCMP ||
+            ble_gap_conn_find(handle, &description) != 0 ||
+            !hid_pairing_begin_challenge(&pairing, peer_identity(&description.peer_id_addr),
+                                         handle, event->passkey.params.numcmp, now_ms())) {
+            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, 0);
+            ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+            return 0;
+        }
+        publish(HID_GUEST_PAIRING_CHALLENGE, handle, pairing.challenge_number, 0);
+        return 0;
+    }
     case BLE_GAP_EVENT_REPEAT_PAIRING:
         /* Preserve the old bond; deletion requires explicit user intent. */
         ble_gap_terminate(event->repeat_pairing.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
@@ -127,17 +243,20 @@ static void host_task(void *argument)
 
 esp_err_t hid_guest_start(void)
 {
+    if (started) return ESP_ERR_INVALID_STATE;
     esp_err_t result = nvs_flash_init();
     if (result != ESP_OK) return result; /* Never erase stored bonds implicitly. */
+    result = hid_pairing_store_load(&pairing);
+    if (result != ESP_OK) return result;
     result = nimble_port_init();
     if (result != ESP_OK) return result;
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
-    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.store_status_cb = reject_store_overflow;
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_YES_NO;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_sc = 1;
-    ble_hs_cfg.sm_mitm = 0; /* Bring-up pairing is Just Works, pending UI approval. */
+    ble_hs_cfg.sm_mitm = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_svc_gap_init();
@@ -149,6 +268,99 @@ esp_err_t hid_guest_start(void)
     result = ble_svc_gap_device_appearance_set(0x03c0);
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
     ble_store_config_init();
+    result = hid_guest_rpc_init();
+    if (result != ESP_OK) { nimble_port_deinit(); return result; }
+    ble_npl_event_init(&disconnect_event, disconnect_on_host, NULL);
+    ble_npl_callout_init(&pairing_timeout, nimble_port_get_dflt_eventq(),
+                         pairing_timeout_on_host, NULL);
     nimble_port_freertos_init(host_task);
+    started = true;
+    return ESP_OK;
+}
+
+void hid_guest_pairing_set_events(hid_guest_pairing_event_fn callback, void *context)
+{
+    pairing_events = callback;
+    pairing_event_context = context;
+}
+
+esp_err_t hid_guest_pairing_open(void)
+{
+    if (!started || hid_gatt_channel()->connected || !pairing_events) return ESP_ERR_INVALID_STATE;
+    ble_addr_t bonds[HID_PAIRING_MAX_BONDS];
+    int count = 0;
+    if (ble_store_util_bonded_peers(bonds, &count, HID_PAIRING_MAX_BONDS) != 0 ||
+        count >= HID_PAIRING_MAX_BONDS || !hid_pairing_open(&pairing, now_ms()))
+        return ESP_ERR_INVALID_STATE;
+    if (ble_npl_callout_reset(&pairing_timeout,
+                             ble_npl_time_ms_to_ticks32(HID_PAIRING_WINDOW_MS)) != BLE_NPL_OK) {
+        hid_pairing_cancel(&pairing);
+        return ESP_FAIL;
+    }
+    publish(HID_GUEST_PAIRING_OPENED, 0, 0, 0);
+    return ESP_OK;
+}
+
+void hid_guest_pairing_cancel(void)
+{
+    bool pending = pairing.challenge_active || pairing.challenge_approved;
+    uint16_t handle = pairing.challenge_handle;
+    hid_pairing_cancel(&pairing);
+    ble_npl_callout_stop(&pairing_timeout);
+    if (pending) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+    publish(HID_GUEST_PAIRING_CLOSED, 0, 0, 0);
+}
+
+esp_err_t hid_guest_pairing_confirm(uint16_t connection_handle, bool approved)
+{
+    expire_window();
+    if (!pairing.challenge_active || pairing.challenge_handle != connection_handle)
+        return ESP_ERR_INVALID_STATE;
+    bool accepted = hid_pairing_confirm(&pairing, connection_handle, approved, now_ms());
+    struct ble_sm_io io = {.action = BLE_SM_IOACT_NUMCMP, .numcmp_accept = accepted};
+    if (ble_sm_inject_io(connection_handle, &io) != 0) return ESP_FAIL;
+    if (!accepted) ble_gap_terminate(connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+    return ESP_OK;
+}
+
+void hid_guest_pairing_snapshot(hid_pairing_t *output)
+{
+    expire_window();
+    *output = pairing;
+}
+
+esp_err_t hid_guest_pairing_forget(uint64_t token, bool confirmed)
+{
+    if (!started || !confirmed || !token) return ESP_ERR_INVALID_ARG;
+    hid_pairing_t next = pairing;
+    hid_peer_t peer = {0};
+    bool found = false;
+    for (size_t index = 0; index < next.bond_count; ++index)
+        if (next.bonds[index].token == token) { peer = next.bonds[index].peer; found = true; break; }
+    if (!found || !hid_pairing_forget(&next, token, true)) return ESP_ERR_NOT_FOUND;
+    ble_addr_t address = ble_identity(peer);
+    if (ble_store_util_delete_peer(&address) != 0) return ESP_FAIL;
+    esp_err_t result = hid_pairing_store_save(&next);
+    if (result == ESP_OK) {
+        pairing = next;
+        if (hid_gatt_channel()->connected) hid_guest_disconnect_current();
+    }
+    return result;
+}
+
+esp_err_t hid_guest_disconnect_current(void)
+{
+    hid_channel_t *channel = hid_gatt_channel();
+    channel->armed = false;
+    channel->needs_disconnect = true;
+    if (!channel->connected) return ESP_OK;
+    return ble_gap_terminate(channel->connection_handle,
+                             BLE_ERR_REM_USER_CONN_TERM) == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t hid_guest_request_disconnect(void)
+{
+    if (!started) return ESP_ERR_INVALID_STATE;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &disconnect_event);
     return ESP_OK;
 }

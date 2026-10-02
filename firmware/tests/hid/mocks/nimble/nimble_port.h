@@ -3,7 +3,9 @@
 #ifndef TEST_NIMBLE_PORT_H
 #define TEST_NIMBLE_PORT_H
 #include "esp_err.h"
+#include "nimble/nimble_npl.h"
 esp_err_t nimble_port_init(void);
 int nimble_port_deinit(void);
 void nimble_port_run(void);
+struct ble_npl_eventq *nimble_port_get_dflt_eventq(void);
 #endif

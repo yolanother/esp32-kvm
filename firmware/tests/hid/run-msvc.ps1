@@ -32,8 +32,11 @@ foreach ($name in @('test_hid_report', 'test_hid_gatt', 'test_hid_guest')) {
     }
     if ($name -eq 'test_hid_guest') {
         $sources += (Join-Path $repo 'firmware/components/hid/hid_guest.c')
+        $sources += (Join-Path $repo 'firmware/components/hid/hid_guest_rpc.c')
+        $sources += (Join-Path $repo 'firmware/components/hid/hid_pairing.c')
+        $sources += (Join-Path $repo 'firmware/components/hid/hid_pairing_store.c')
     }
-    & $compiler /nologo /W4 /WX /std:c11 @includes @sources "/Fo:$output/" "/Fe:$output/$name.exe" /link @libraries
+    & $compiler /nologo /W4 /WX /std:c11 /experimental:c11atomics @includes @sources "/Fo:$output/" "/Fe:$output/$name.exe" /link @libraries
     if ($LASTEXITCODE -ne 0) { throw "Compile failed: $name" }
     & (Join-Path $output "$name.exe")
     if ($LASTEXITCODE -ne 0) { throw "Test failed: $name" }
