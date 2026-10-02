@@ -735,10 +735,13 @@ dependencies = [
 name = "esp32-kvm-desktop"
 version = "0.1.0"
 dependencies = [
+ "esp32-kvm-host-actor",
  "esp32-kvm-input-core",
+ "esp32-kvm-platform-windows",
  "esp32-kvm-usb-transport",
  "serde",
  "serde_json",
+ "serialport",
  "tauri",
  "tauri-build",
 ]
