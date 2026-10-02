@@ -45,8 +45,6 @@ cargo clippy --offline --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The temporary crate-local `[workspace]` entry permits isolated checks; the
-coordinator must remove it and add this crate to the root Rust workspace when
-integrating. Windows monitor enumeration, live cursor crossing, dwell and
+The crate is a member of the root Rust workspace. Windows monitor enumeration, live cursor crossing, dwell and
 cooldown policy, hotplug event delivery, and physical display validation are
 separate native gates. No COM port or firmware flash was used.
