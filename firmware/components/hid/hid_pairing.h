@@ -10,11 +10,14 @@
 
 #define HID_PAIRING_MAX_BONDS 8
 #define HID_PAIRING_WINDOW_MS 60000ULL
+#define HID_PAIRING_TOKEN_LEN 16
 
 /** A resolved BLE peer identity; never use a rotating over-the-air address. */
 typedef struct { uint8_t type; uint8_t address[6]; } hid_peer_t;
+/** Exactly 16 opaque bytes in protocol v1 STATUS and FORGET_BOND. */
+typedef struct { uint8_t bytes[HID_PAIRING_TOKEN_LEN]; } hid_token_t;
 /** An identity and opaque application token persisted separately from BLE keys. */
-typedef struct { hid_peer_t peer; uint64_t token; } hid_bond_t;
+typedef struct { hid_peer_t peer; hid_token_t token; } hid_bond_t;
 /** Pairing policy state; only bonds are persisted. */
 typedef struct {
     hid_bond_t bonds[HID_PAIRING_MAX_BONDS];
@@ -47,10 +50,10 @@ bool hid_pairing_challenge_pending(const hid_pairing_t *state);
 /** Consumes approval for the specified connection after BLE authentication. */
 bool hid_pairing_consume_approval(hid_pairing_t *state, uint16_t handle);
 /** Adds a unique nonzero token for a new peer; never evicts an old bond. */
-bool hid_pairing_add_bond(hid_pairing_t *state, hid_peer_t peer, uint64_t token);
-/** Returns a peer's opaque token, or zero if no bond exists. */
-uint64_t hid_pairing_token(const hid_pairing_t *state, hid_peer_t peer);
+bool hid_pairing_add_bond(hid_pairing_t *state, hid_peer_t peer, hid_token_t token);
+/** Copies a peer's opaque token; returns false if no bond exists. */
+bool hid_pairing_token(const hid_pairing_t *state, hid_peer_t peer, hid_token_t *out);
 /** Forgets a token only after explicit confirmation. */
-bool hid_pairing_forget(hid_pairing_t *state, uint64_t token, bool confirmed);
+bool hid_pairing_forget(hid_pairing_t *state, hid_token_t token, bool confirmed);
 
 #endif

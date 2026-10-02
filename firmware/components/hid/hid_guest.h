@@ -23,7 +23,7 @@ typedef struct {
     hid_guest_pairing_event_type_t type;
     uint16_t connection_handle;
     uint32_t number;
-    uint64_t token;
+    hid_token_t token;
 } hid_guest_pairing_event_t;
 
 /** Receives short status events on the NimBLE host thread. */
@@ -42,7 +42,7 @@ esp_err_t hid_guest_pairing_confirm(uint16_t connection_handle, bool approved);
 /** Copies current pairing state for a host-thread status bridge. */
 void hid_guest_pairing_snapshot(hid_pairing_t *output);
 /** Removes one bond only after explicit confirmation on the host thread. */
-esp_err_t hid_guest_pairing_forget(uint64_t token, bool confirmed);
+esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed);
 /** Disarms and terminates the current guest after uncertain all-up delivery.
  * Call on the NimBLE host thread; a disconnected channel succeeds. */
 esp_err_t hid_guest_disconnect_current(void);

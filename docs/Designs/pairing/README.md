@@ -28,10 +28,12 @@ multi-guest workstream owns concurrent connections.
 ## Identity and storage
 
 NimBLE stores the BLE bond keys in NVS. The `kvm_bonds` NVS namespace stores a
-versioned table of resolved peer identities and random nonzero 64-bit tokens.
+versioned table of resolved peer identities and random nonzero 16-byte tokens.
 The host can use the token as a stable opaque identity for friendly labels;
 the token is not a BLE address or key. An absent table starts empty. A corrupt
-or unknown-version table fails service startup without erasing keys. New bond
+or unknown-version table fails service startup without erasing keys. The NVS
+format uses version 2 for 16-byte tokens; the earlier version 1 development
+format was never shipped and is rejected without erasing it. New bond
 metadata is committed before the connection's report gate opens. Save failure
 deletes the new NimBLE peer and disconnects. Reboot reloads the token table.
 

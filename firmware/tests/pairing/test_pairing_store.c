@@ -27,10 +27,16 @@ int main(void)
     hid_pairing_init(&original);
     assert(hid_pairing_store_load(&reloaded) == ESP_OK && reloaded.bond_count == 0);
     hid_peer_t identity = {.type = 1, .address = {1, 2, 3, 4, 5, 6}};
-    assert(hid_pairing_add_bond(&original, identity, 0x123456789ULL));
+    hid_token_t token = {{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}};
+    assert(hid_pairing_add_bond(&original, identity, token));
     assert(hid_pairing_store_save(&original) == ESP_OK && commits == 1);
     assert(hid_pairing_store_load(&reloaded) == ESP_OK);
-    assert(reloaded.bond_count == 1 && hid_pairing_token(&reloaded, identity) == 0x123456789ULL);
+    hid_token_t found;
+    assert(reloaded.bond_count == 1 && hid_pairing_token(&reloaded, identity, &found));
+    assert(memcmp(found.bytes, token.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+    blob[4] = 1; /* The unshipped 64-bit-token development format is rejected. */
+    assert(hid_pairing_store_load(&reloaded) == ESP_ERR_INVALID_STATE);
+    blob[4] = 2;
     blob[0] = 0;
     assert(hid_pairing_store_load(&reloaded) == ESP_ERR_INVALID_STATE);
     assert(commits == 1);

@@ -173,11 +173,14 @@ int main(void)
     assert(hid_guest_request_mouse(1, 10, -20, 0, 0));
     assert(hid_guest_request_consumer(0x00e9));
     assert(hid_guest_request_release() && sent_reports == 9);
-    assert(last_event.token && saved_size);
-    uint64_t token = last_event.token;
+    static const hid_token_t zero_token = {{0}};
+    assert(sizeof(last_event.token.bytes) == 16 &&
+           memcmp(last_event.token.bytes, zero_token.bytes, HID_PAIRING_TOKEN_LEN) != 0 && saved_size);
+    hid_token_t token = last_event.token;
     hid_pairing_t snapshot;
     hid_guest_pairing_snapshot(&snapshot);
-    assert(snapshot.bond_count == 1 && snapshot.bonds[0].token == token);
+    assert(snapshot.bond_count == 1 &&
+           memcmp(snapshot.bonds[0].token.bytes, token.bytes, HID_PAIRING_TOKEN_LEN) == 0);
     struct ble_gap_event disconnect = {.type = BLE_GAP_EVENT_DISCONNECT};
     disconnect.disconnect.conn.conn_handle = 17;
     gap_callback(&disconnect, NULL);

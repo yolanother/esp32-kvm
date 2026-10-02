@@ -45,10 +45,12 @@ static void disconnect_on_host(struct ble_npl_event *event)
 static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000; }
 
 static void publish(hid_guest_pairing_event_type_t type, uint16_t handle,
-                    uint32_t number, uint64_t token)
+                    uint32_t number, const hid_token_t *token)
 {
     if (!pairing_events) return;
-    hid_guest_pairing_event_t event = {type, handle, number, token};
+    hid_guest_pairing_event_t event = {.type = type, .connection_handle = handle,
+                                      .number = number};
+    if (token) event.token = *token;
     pairing_events(&event, pairing_event_context);
 }
 
@@ -59,7 +61,7 @@ static void expire_window(void)
     uint16_t handle = pairing.challenge_handle;
     if (was_open && !hid_pairing_window_open(&pairing, now_ms())) {
         if (pending) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
-        publish(HID_GUEST_PAIRING_CLOSED, 0, 0, 0);
+        publish(HID_GUEST_PAIRING_CLOSED, 0, 0, NULL);
     }
 }
 
@@ -147,7 +149,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         struct ble_gap_conn_desc incoming;
         if (ble_gap_conn_find(event->connect.conn_handle, &incoming) != 0 ||
             !hid_pairing_admit(&pairing, peer_identity(&incoming.peer_id_addr), now_ms())) {
-            publish(HID_GUEST_PAIRING_REJECTED, event->connect.conn_handle, 0, 0);
+            publish(HID_GUEST_PAIRING_REJECTED, event->connect.conn_handle, 0, NULL);
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
@@ -172,19 +174,24 @@ static int gap_event(struct ble_gap_event *event, void *argument)
                       description.sec_state.authenticated;
         if (secure) {
             hid_peer_t peer = peer_identity(&description.peer_id_addr);
-            if (!hid_pairing_token(&pairing, peer)) {
+            hid_token_t existing;
+            if (!hid_pairing_token(&pairing, peer, &existing)) {
                 expire_window();
                 secure = pairing.window_active && pairing.bond_count < HID_PAIRING_MAX_BONDS &&
                          hid_pairing_consume_approval(&pairing, event->enc_change.conn_handle);
                 if (secure) {
-                    uint64_t token = ((uint64_t)esp_random() << 32) | esp_random();
+                    hid_token_t token;
+                    for (size_t index = 0; index < HID_PAIRING_TOKEN_LEN; index += 4) {
+                        uint32_t random = esp_random();
+                        memcpy(&token.bytes[index], &random, sizeof(random));
+                    }
                     hid_pairing_t next = pairing;
                     secure = hid_pairing_add_bond(&next, peer, token) &&
                              hid_pairing_store_save(&next) == ESP_OK;
                     if (secure) {
                         pairing = next;
                         ble_npl_callout_stop(&pairing_timeout);
-                        publish(HID_GUEST_BONDED, event->enc_change.conn_handle, 0, token);
+                        publish(HID_GUEST_BONDED, event->enc_change.conn_handle, 0, &token);
                     } else {
                         ble_addr_t address = description.peer_id_addr;
                         ble_store_util_delete_peer(&address);
@@ -219,11 +226,11 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             ble_gap_conn_find(handle, &description) != 0 ||
             !hid_pairing_begin_challenge(&pairing, peer_identity(&description.peer_id_addr),
                                          handle, event->passkey.params.numcmp, now_ms())) {
-            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, 0);
+            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, NULL);
             ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
-        publish(HID_GUEST_PAIRING_CHALLENGE, handle, pairing.challenge_number, 0);
+        publish(HID_GUEST_PAIRING_CHALLENGE, handle, pairing.challenge_number, NULL);
         return 0;
     }
     case BLE_GAP_EVENT_REPEAT_PAIRING:
@@ -297,7 +304,7 @@ esp_err_t hid_guest_pairing_open(void)
         hid_pairing_cancel(&pairing);
         return ESP_FAIL;
     }
-    publish(HID_GUEST_PAIRING_OPENED, 0, 0, 0);
+    publish(HID_GUEST_PAIRING_OPENED, 0, 0, NULL);
     return ESP_OK;
 }
 
@@ -308,7 +315,7 @@ void hid_guest_pairing_cancel(void)
     hid_pairing_cancel(&pairing);
     ble_npl_callout_stop(&pairing_timeout);
     if (pending) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
-    publish(HID_GUEST_PAIRING_CLOSED, 0, 0, 0);
+    publish(HID_GUEST_PAIRING_CLOSED, 0, 0, NULL);
 }
 
 esp_err_t hid_guest_pairing_confirm(uint16_t connection_handle, bool approved)
@@ -329,14 +336,17 @@ void hid_guest_pairing_snapshot(hid_pairing_t *output)
     *output = pairing;
 }
 
-esp_err_t hid_guest_pairing_forget(uint64_t token, bool confirmed)
+esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed)
 {
-    if (!started || !confirmed || !token) return ESP_ERR_INVALID_ARG;
+    static const hid_token_t zero = {{0}};
+    if (!started || !confirmed || memcmp(token.bytes, zero.bytes, HID_PAIRING_TOKEN_LEN) == 0)
+        return ESP_ERR_INVALID_ARG;
     hid_pairing_t next = pairing;
     hid_peer_t peer = {0};
     bool found = false;
     for (size_t index = 0; index < next.bond_count; ++index)
-        if (next.bonds[index].token == token) { peer = next.bonds[index].peer; found = true; break; }
+        if (memcmp(next.bonds[index].token.bytes, token.bytes, HID_PAIRING_TOKEN_LEN) == 0)
+            { peer = next.bonds[index].peer; found = true; break; }
     if (!found || !hid_pairing_forget(&next, token, true)) return ESP_ERR_NOT_FOUND;
     ble_addr_t address = ble_identity(peer);
     if (ble_store_util_delete_peer(&address) != 0) return ESP_FAIL;

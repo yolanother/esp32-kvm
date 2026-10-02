@@ -6,7 +6,7 @@
 #include "nvs.h"
 
 #define TABLE_MAGIC 0x4b564d42u
-#define TABLE_VERSION 1u
+#define TABLE_VERSION 2u
 typedef struct {
     uint32_t magic;
     uint32_t version;
