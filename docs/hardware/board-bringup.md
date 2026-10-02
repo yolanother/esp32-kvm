@@ -7,9 +7,12 @@ This record separates observations of the attached device from Waveshare's refer
 | Check | Result | What it establishes |
 | --- | --- | --- |
 | PlatformIO `device list --json-output` | `COM7`, `USB VID:PID=303A:1001`, serial `28:84:85:8D:30:FC` | An Espressif USB serial/JTAG interface is attached; this does not identify a Waveshare SKU. |
-| `esptool.py v4.11.0 --chip esp32s3 --port COM7 flash_id` | Succeeded twice; ESP32-S3 QFN56 silicon revision `v0.2`, 40 MHz crystal, 8 MB embedded PSRAM, USB-Serial/JTAG mode; flash manufacturer `0x20`, device `0x4018`, detected 16 MB, quad, 3.3 V | ROM/tool access and flash capacity are repeatable. `v0.2` is **chip** revision, not PCB revision. No flash contents were read, erased, or written. |
+| `esptool.py v4.11.0 --chip esp32s3 --port COM7 flash_id` | Succeeded twice; ESP32-S3 QFN56 silicon revision `v0.2`, 40 MHz crystal, 8 MB embedded PSRAM, USB-Serial/JTAG mode; flash manufacturer `0x20`, device `0x4018`, detected 16 MB, quad, 3.3 V | ROM/tool access and flash capacity are repeatable. `v0.2` is **chip** revision, not PCB revision. |
 | `esptool.py v4.11.0 --chip esp32s3 --port COM7 get_security_info` | Succeeded; security flags `0x00000000`, Secure Boot disabled, Flash Encryption disabled, SPI boot crypt count `0x0` | Software-initiated ROM connection is available with the current eFuse state. This does not prove physical BOOT button recovery, and future eFuse programming can change these properties. |
 | User-supplied enclosure label photo | Reads `ESP32-S3-Touch-LCD-1.54`, Waveshare, `Touch CST816`, `Display ST7789`, `8MB PSRAM`, `16MB FLASH`, and `USB-C`; button labels include `+/KEY`, `PWR`, and `BOOT/-` | Confirms the sold touch-model enclosure and matches the probed memory capacities. The PCB revision and actual touch response are not visible or measured. The photo is retained outside the repository. |
+| `esptool.py v4.12.0 read_flash 0x0 0x1000000` | Completed on COM7 in download mode; local ignored file `.tools/board-factory-backup.bin` is exactly 16,777,216 bytes, SHA-256 `7AAC67A6CB06ECAB5AC4B4D4AD9209ABE772E5E946C6D2951B8848E90DAFC300` | Preserves a byte-for-byte recovery source before any write. The backup may contain device configuration; keep it local and do not upload or commit it. COM7 re-enumerated after esptool's RTS reset. |
+
+The backed-up factory partition table has NVS at `0x9000` (16 KiB), OTA data at `0xd000` (8 KiB), PHY data at `0xf000` (4 KiB), factory app at `0x20000` (6464 KiB), OTA app at `0x670000` (4 MiB), and assets at `0xa70000` (4416 KiB). The project partition CSV mirrors these offsets. This does not establish compatibility with factory NVS or assets.
 
 `flash_id` uses a RAM stub and ends with an RTS hard reset. Both executions returned exit code 0. The identifier in the tool output is a device MAC; keep it out of user-facing diagnostic exports unless needed for support.
 
@@ -37,13 +40,13 @@ The factory BSP creates an ST7789 panel with 16-bit RGB pixels and display inver
 
 The [Waveshare user guide](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54/Instructions-For-Use) says to hold BOOT while connecting USB, then release BOOT to enter download mode when the port is not recognized; power cycle after programming. It also suggests holding BOOT and power cycling if a flashing tool waits for synchronization. This is the documented manual recovery procedure, **not a completed test on this board**.
 
-Automatic ROM access via esptool succeeded on three read-only queries (two `flash_id`, one `get_security_info`) on COM7. Manual BOOT-at-power-on recovery and return to the factory application still need a person to operate the button while observing USB enumeration. Do not claim repeatable manual recovery until both entry and normal reboot are logged. No firmware was flashed during this check.
+Automatic ROM access via esptool succeeded on three read-only queries (two `flash_id`, one `get_security_info`) and a full read-only backup on COM7. The user reported performing the BOOT-held reconnect sequence and returning the board to BOOT mode; COM7 was readable afterward. The responses did not explicitly confirm COM enumeration on *both* manual cycles or that the usual factory screen returned after ordinary boot. Do not claim repeatable manual recovery until both entry and normal reboot are logged. No firmware has been flashed.
 
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
 2. With the factory image intact, observe display output and touch response. Record whether CST816 is present, its I²C address, screen offset/orientation, and backlight behavior with a non-destructive probe or vendor demo.
-3. Perform and log two manual BOOT-entry cycles, then ordinary boot, including COM port/VID:PID changes and the exact button sequence. Confirm PLUS and PWR behavior separately without repurposing PWR.
+3. Finish logging the two reported manual BOOT-entry cycles and an ordinary boot: record whether COM7 appeared after each and whether the usual factory screen returned. Confirm PLUS and PWR behavior separately without repurposing PWR.
 4. Only after identity and pins match, use these values in a board configuration and run the CDC, BLE, and display coexistence test.
 
 ## Commands and source files
