@@ -1,10 +1,16 @@
 /* Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
- * Starts a deliberately disarmed ESP32-S3 firmware image. Input transport, BLE HID,
- * routing and display initialization are separate bring-up tasks after board verification. */
+ * Starts the one-guest BLE service and binary USB routing transport on ESP32-S3.
+ * Startup selects local with no armed HID output; routing requires a validated
+ * session, READY encrypted guest, explicit switch, and explicit arm. */
 #include "esp_log.h"
+#include "hid_guest.h"
+#include "transport_usb_serial_jtag.h"
 
-/** Keep the device disarmed until validated transports and routing are implemented. */
+/** Starts services; any startup error leaves the routing gate disarmed. */
 void app_main(void)
 {
-    ESP_LOGI("esp32-kvm", "Scaffold firmware booted; input routing is disabled");
+    esp_err_t hid_result = hid_guest_start();
+    if (hid_result != ESP_OK) ESP_LOGE("esp32-kvm", "HID startup failed: %d", hid_result);
+    esp_err_t usb_result = kvm_transport_usb_serial_jtag_start();
+    if (usb_result != ESP_OK) ESP_LOGE("esp32-kvm", "USB startup failed: %d", usb_result);
 }
