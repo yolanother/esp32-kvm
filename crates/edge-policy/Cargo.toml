@@ -1,0 +1,10 @@
+[package]
+name = "esp32-kvm-edge-policy"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+
+[dependencies]
+esp32-kvm-topology-core = { path = "../topology-core" }
+
+[workspace]
