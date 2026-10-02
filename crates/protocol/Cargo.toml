@@ -1,0 +1,10 @@
+[package]
+name = "esp32-kvm-protocol"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+description = "Version-one USB wire framing and validation for ESP32 KVM"
+
+[lib]
+name = "esp32_kvm_protocol"
+path = "src/lib.rs"
