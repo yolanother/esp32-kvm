@@ -22,6 +22,7 @@ typedef enum {
 typedef struct {
     hid_guest_pairing_event_type_t type;
     uint16_t connection_handle;
+    uint32_t challenge_id;
     uint32_t number;
     hid_token_t token;
 } hid_guest_pairing_event_t;
@@ -38,7 +39,7 @@ esp_err_t hid_guest_pairing_open(void);
 /** Cancels pairing; caller must run on the NimBLE host thread. */
 void hid_guest_pairing_cancel(void);
 /** Confirms or rejects the pending numeric comparison on the host thread. */
-esp_err_t hid_guest_pairing_confirm(uint16_t connection_handle, bool approved);
+esp_err_t hid_guest_pairing_confirm(uint32_t challenge_id, bool approved);
 /** Copies current pairing state for a host-thread status bridge. */
 void hid_guest_pairing_snapshot(hid_pairing_t *output);
 /** Removes one bond only after explicit confirmation on the host thread. */

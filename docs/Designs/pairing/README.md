@@ -13,8 +13,10 @@ multi-guest workstream owns concurrent connections.
   from an unknown resolved identity is terminated outside the window.
 - The host configuration requires Secure Connections and MITM protection with
   Display Yes/No capability. Only numeric-comparison challenges are accepted.
-  The status sink receives the six-digit number and connection handle;
-  `hid_guest_pairing_confirm(handle, approved)` injects the answer. Any other
+  The status sink receives the six-digit number and a fresh nonzero 32-bit
+  challenge ID; `hid_guest_pairing_confirm(challenge_id, approved)` injects the
+  answer for the internally bound connection. Wrong, stale, or repeated IDs
+  are refused. The NimBLE connection handle is never the protocol challenge ID. Any other
   pairing action is rejected. The sink must copy the short event and return
   promptly; no UI work belongs on the BLE callback thread.
 - Encryption opens the report gate only after NimBLE reports encrypted,

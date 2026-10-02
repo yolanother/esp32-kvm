@@ -29,6 +29,7 @@ bool hid_pairing_open(hid_pairing_t *state, uint64_t now_ms)
     state->window_active = true;
     state->challenge_active = false;
     state->challenge_approved = false;
+    state->challenge_id = 0;
     return true;
 }
 
@@ -37,6 +38,7 @@ void hid_pairing_cancel(hid_pairing_t *state)
     state->window_active = false;
     state->challenge_active = false;
     state->challenge_approved = false;
+    state->challenge_id = 0;
 }
 
 bool hid_pairing_window_open(hid_pairing_t *state, uint64_t now_ms)
@@ -63,24 +65,29 @@ bool hid_pairing_admit(hid_pairing_t *state, hid_peer_t peer, uint64_t now_ms)
 }
 
 bool hid_pairing_begin_challenge(hid_pairing_t *state, hid_peer_t peer, uint16_t handle,
-                                 uint32_t number, uint64_t now_ms)
+                                 uint32_t challenge_id, uint32_t number, uint64_t now_ms)
 {
     hid_token_t token;
     if (!hid_pairing_window_open(state, now_ms) || hid_pairing_token(state, peer, &token) ||
-        state->challenge_active || number > 999999) return false;
+        state->challenge_active || !challenge_id || challenge_id == state->last_challenge_id ||
+        number > 999999) return false;
     state->challenge_handle = handle;
+    state->challenge_id = challenge_id;
+    state->last_challenge_id = challenge_id;
     state->challenge_number = number;
     state->challenge_active = true;
     state->challenge_approved = false;
     return true;
 }
 
-bool hid_pairing_confirm(hid_pairing_t *state, uint16_t handle, bool approved, uint64_t now_ms)
+bool hid_pairing_confirm(hid_pairing_t *state, uint32_t challenge_id,
+                         bool approved, uint64_t now_ms)
 {
     if (!hid_pairing_window_open(state, now_ms) || !state->challenge_active ||
-        state->challenge_handle != handle) return false;
+        !challenge_id || state->challenge_id != challenge_id) return false;
     state->challenge_active = false;
     state->challenge_approved = approved;
+    state->challenge_id = 0;
     return approved;
 }
 

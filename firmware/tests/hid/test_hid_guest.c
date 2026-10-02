@@ -156,7 +156,9 @@ int main(void)
     challenge.passkey.params.numcmp = 123456;
     gap_callback(&challenge, NULL);
     assert(last_event.type == HID_GUEST_PAIRING_CHALLENGE && last_event.number == 123456);
-    assert(hid_guest_pairing_confirm(17, true) == 0 && confirmations == 1);
+    assert(last_event.challenge_id != 0);
+    assert(hid_guest_pairing_confirm(last_event.challenge_id + 1, true) != 0);
+    assert(hid_guest_pairing_confirm(last_event.challenge_id, true) == 0 && confirmations == 1);
     struct ble_gap_event encryption = {.type = BLE_GAP_EVENT_ENC_CHANGE};
     encryption.enc_change.conn_handle = 17;
     gap_callback(&encryption, NULL);

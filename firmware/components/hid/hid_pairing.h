@@ -24,6 +24,8 @@ typedef struct {
     size_t bond_count;
     uint64_t deadline_ms;
     uint16_t challenge_handle;
+    uint32_t challenge_id;
+    uint32_t last_challenge_id;
     uint32_t challenge_number;
     bool window_active;
     bool challenge_active;
@@ -42,9 +44,10 @@ bool hid_pairing_window_open(hid_pairing_t *state, uint64_t now_ms);
 bool hid_pairing_admit(hid_pairing_t *state, hid_peer_t peer, uint64_t now_ms);
 /** Begins a numeric comparison challenge for an admitted, unknown peer. */
 bool hid_pairing_begin_challenge(hid_pairing_t *state, hid_peer_t peer, uint16_t handle,
-                                 uint32_t number, uint64_t now_ms);
-/** Accepts one matching challenge before expiry; rejection closes it. */
-bool hid_pairing_confirm(hid_pairing_t *state, uint16_t handle, bool approved, uint64_t now_ms);
+                                 uint32_t challenge_id, uint32_t number, uint64_t now_ms);
+/** Accepts one matching nonzero challenge ID before expiry; rejection closes it. */
+bool hid_pairing_confirm(hid_pairing_t *state, uint32_t challenge_id,
+                         bool approved, uint64_t now_ms);
 /** Reports whether a challenge awaits user confirmation. */
 bool hid_pairing_challenge_pending(const hid_pairing_t *state);
 /** Consumes approval for the specified connection after BLE authentication. */

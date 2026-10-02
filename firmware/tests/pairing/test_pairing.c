@@ -34,9 +34,9 @@ int main(void)
     assert(!hid_pairing_admit(&state, peer(1), 61000));
     assert(!hid_pairing_window_open(&state, 61000));
     assert(hid_pairing_open(&state, 70000));
-    assert(hid_pairing_begin_challenge(&state, peer(1), 17, 123456, 70001));
-    assert(!hid_pairing_confirm(&state, 18, true, 70002));
-    assert(hid_pairing_confirm(&state, 17, true, 70002));
+    assert(hid_pairing_begin_challenge(&state, peer(1), 17, 0x12345678, 123456, 70001));
+    assert(!hid_pairing_confirm(&state, 0x12345679, true, 70002));
+    assert(hid_pairing_confirm(&state, 0x12345678, true, 70002));
     assert(!hid_pairing_challenge_pending(&state));
     assert(hid_pairing_consume_approval(&state, 17));
     assert(!hid_pairing_consume_approval(&state, 17));
@@ -58,10 +58,13 @@ int main(void)
     assert(hid_pairing_forget(&state, token(1), true));
     assert(!hid_pairing_admit(&state, peer(1), 90000));
     assert(hid_pairing_open(&state, 90000));
-    assert(hid_pairing_begin_challenge(&state, peer(9), 19, 654321, 90000));
-    assert(!hid_pairing_confirm(&state, 19, true, 150000));
+    assert(hid_pairing_begin_challenge(&state, peer(9), 19, 0xabcdef01, 654321, 90000));
+    assert(!hid_pairing_confirm(&state, 0xabcdef01, true, 150000));
     assert(!hid_pairing_consume_approval(&state, 19));
     assert(!hid_pairing_challenge_pending(&state));
+    assert(hid_pairing_open(&state, 160000));
+    assert(!hid_pairing_begin_challenge(&state, peer(9), 19, 0xabcdef01, 654321, 160001));
+    assert(!hid_pairing_begin_challenge(&state, peer(9), 19, 0, 654321, 160001));
     hid_pairing_t reloaded = state;
     assert(hid_pairing_token(&reloaded, peer(2), &found));
     expected = token(2);
