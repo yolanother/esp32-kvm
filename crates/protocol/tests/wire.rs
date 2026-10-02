@@ -2,7 +2,9 @@
 // These independent wire fixtures guard framing, corruption handling, and control
 // replay semantics against changes to the protocol implementation.
 
-use esp32_kvm_protocol::{Frame, FrameDecoder, MessageKind, ProtocolError, RetryCache, crc32c, cobs_decode};
+use esp32_kvm_protocol::{
+    Frame, FrameDecoder, MessageKind, ProtocolError, RetryCache, cobs_decode, crc32c,
+};
 
 #[test]
 fn crc32c_standard_check_value() {
@@ -12,20 +14,36 @@ fn crc32c_standard_check_value() {
 #[test]
 fn independent_fixtures_cover_every_message_kind() {
     let fixtures: &[(&str, u8)] = &[
-        ("hello-v1", 0x01), ("caps", 0x02), ("session-open", 0x03),
-        ("heartbeat", 0x10), ("get-status", 0x11), ("status", 0x12),
-        ("switch", 0x20), ("release-all", 0x21), ("arm", 0x22),
-        ("key-state", 0x30), ("pointer", 0x31), ("consumer-state", 0x32),
-        ("pair-begin", 0x40), ("pair-cancel", 0x41), ("forget-bond", 0x42),
-        ("pair-reply", 0x43), ("device-select-request", 0x50),
-        ("update-prepare", 0x60), ("ack", 0x70), ("nack", 0x71),
+        ("hello-v1", 0x01),
+        ("caps", 0x02),
+        ("session-open", 0x03),
+        ("heartbeat", 0x10),
+        ("get-status", 0x11),
+        ("status", 0x12),
+        ("switch", 0x20),
+        ("release-all", 0x21),
+        ("arm", 0x22),
+        ("key-state", 0x30),
+        ("pointer", 0x31),
+        ("consumer-state", 0x32),
+        ("pair-begin", 0x40),
+        ("pair-cancel", 0x41),
+        ("forget-bond", 0x42),
+        ("pair-reply", 0x43),
+        ("device-select-request", 0x50),
+        ("update-prepare", 0x60),
+        ("ack", 0x70),
+        ("nack", 0x71),
         ("input-progress", 0x72),
     ];
     for (name, kind) in fixtures {
-        let path = format!("{}/../../tests/vectors/{name}.cobs", env!("CARGO_MANIFEST_DIR"));
+        let path = format!(
+            "{}/../../tests/vectors/{name}.cobs",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let wire = std::fs::read(path).unwrap();
         assert_eq!(wire.last(), Some(&0), "{name}");
-        let frame = Frame::decode_decoded(&cobs_decode(&wire[..wire.len()-1]).unwrap()).unwrap();
+        let frame = Frame::decode_decoded(&cobs_decode(&wire[..wire.len() - 1]).unwrap()).unwrap();
         assert_eq!(frame.kind as u8, *kind, "{name}");
         assert_eq!(frame.encode().unwrap(), wire, "{name}");
     }
@@ -35,7 +53,10 @@ fn independent_fixtures_cover_every_message_kind() {
 fn hello_golden_wire_round_trip_across_split_reads() {
     let frame = Frame::new(MessageKind::Hello, 0, 7, 0, vec![0, 0, 0, 0, 0, 0]);
     let encoded = frame.encode().unwrap();
-    assert_eq!(encoded, include_bytes!("../../../tests/vectors/hello-v1.cobs"));
+    assert_eq!(
+        encoded,
+        include_bytes!("../../../tests/vectors/hello-v1.cobs")
+    );
     let mut decoder = FrameDecoder::new();
     for byte in &encoded[..encoded.len() - 1] {
         assert!(decoder.push(*byte).is_none());
@@ -45,16 +66,31 @@ fn hello_golden_wire_round_trip_across_split_reads() {
 
 #[test]
 fn coalesced_frames_and_invalid_lengths_are_isolated() {
-    let one = Frame::new(MessageKind::Heartbeat, 5, 1, 2, 42_u64.to_le_bytes().to_vec());
+    let one = Frame::new(
+        MessageKind::Heartbeat,
+        5,
+        1,
+        2,
+        42_u64.to_le_bytes().to_vec(),
+    );
     let two = Frame::new(MessageKind::GetStatus, 5, 2, 2, vec![]);
     let mut decoder = FrameDecoder::new();
-    let results: Vec<_> = one.encode().unwrap().into_iter().chain(two.encode().unwrap())
-        .filter_map(|byte| decoder.push(byte)).collect();
+    let results: Vec<_> = one
+        .encode()
+        .unwrap()
+        .into_iter()
+        .chain(two.encode().unwrap())
+        .filter_map(|byte| decoder.push(byte))
+        .collect();
     assert_eq!(results, vec![Ok(one), Ok(two)]);
 
     // The payload length field is deliberately inconsistent with the body.
     let malformed = include_bytes!("../../../tests/vectors/bad-length.cobs").to_vec();
-    let result = malformed.into_iter().filter_map(|byte| decoder.push(byte)).next().unwrap();
+    let result = malformed
+        .into_iter()
+        .filter_map(|byte| decoder.push(byte))
+        .next()
+        .unwrap();
     assert_eq!(result, Err(ProtocolError::Length));
 }
 
@@ -63,25 +99,40 @@ fn stale_generation_and_duplicate_switch_are_rejected_without_reexecution() {
     let mut cache = RetryCache::new(8);
     assert_eq!(cache.observe(9, 10, MessageKind::Switch, 3, 3), Ok(true));
     assert_eq!(cache.observe(9, 10, MessageKind::Switch, 3, 3), Ok(false));
-    assert_eq!(cache.observe(9, 11, MessageKind::Switch, 2, 3), Err(ProtocolError::StaleRoute));
-    assert_eq!(cache.observe(8, 12, MessageKind::Switch, 3, 3), Err(ProtocolError::StaleSession));
-    assert_eq!(cache.observe(9, 10, MessageKind::Arm, 3, 3), Err(ProtocolError::StaleSequence));
+    assert_eq!(
+        cache.observe(9, 11, MessageKind::Switch, 2, 3),
+        Err(ProtocolError::StaleRoute)
+    );
+    assert_eq!(
+        cache.observe(8, 12, MessageKind::Switch, 3, 3),
+        Err(ProtocolError::StaleSession)
+    );
+    assert_eq!(
+        cache.observe(9, 10, MessageKind::Arm, 3, 3),
+        Err(ProtocolError::StaleSequence)
+    );
 }
 
 #[test]
 fn sequence_wrap_and_evicted_replay_follow_modular_order() {
     let mut cache = RetryCache::new(2);
-    assert_eq!(cache.observe(9, u32::MAX - 1, MessageKind::Switch, 0, 0), Ok(true));
+    assert_eq!(
+        cache.observe(9, u32::MAX - 1, MessageKind::Switch, 0, 0),
+        Ok(true)
+    );
     assert_eq!(cache.observe(9, u32::MAX, MessageKind::Arm, 0, 0), Ok(true));
     assert_eq!(cache.observe(9, 0, MessageKind::ReleaseAll, 0, 0), Ok(true));
-    assert_eq!(cache.observe(9, u32::MAX - 1, MessageKind::Switch, 0, 0), Err(ProtocolError::StaleSequence));
+    assert_eq!(
+        cache.observe(9, u32::MAX - 1, MessageKind::Switch, 0, 0),
+        Err(ProtocolError::StaleSequence)
+    );
 }
 
 #[test]
 fn canonical_cbor_rejects_missing_keys_duplicates_and_trailing_data() {
     let samples: &[&[u8]] = &[
-        &[0xa0],                          // required fields absent
-        &[0xa2, 1, 0x61, b'1', 1, 0],  // repeated key
+        &[0xa0],                         // required fields absent
+        &[0xa2, 1, 0x61, b'1', 1, 0],    // repeated key
         &[0xa2, 1, 0x61, b'1', 2, 0, 0], // trailing byte
         &[0xa2, 1, 0x78, 1, b'1', 2, 0], // non-minimal length
         &[0xa2, 1, 0x61, b'1', 2, 0x9f], // indefinite array
@@ -95,10 +146,20 @@ fn canonical_cbor_rejects_missing_keys_duplicates_and_trailing_data() {
 #[test]
 fn bounded_decoder_drains_oversize_and_recovers_after_delimiter() {
     let mut decoder = FrameDecoder::new();
-    for _ in 0..1024 { assert!(decoder.push(1).is_none()); }
+    for _ in 0..1024 {
+        assert!(decoder.push(1).is_none());
+    }
     assert_eq!(decoder.push(0), Some(Err(ProtocolError::Length)));
     let valid = Frame::new(MessageKind::GetStatus, 5, 2, 0, vec![]);
-    assert_eq!(valid.encode().unwrap().into_iter().filter_map(|byte| decoder.push(byte)).next(), Some(Ok(valid)));
+    assert_eq!(
+        valid
+            .encode()
+            .unwrap()
+            .into_iter()
+            .filter_map(|byte| decoder.push(byte))
+            .next(),
+        Some(Ok(valid))
+    );
 }
 
 #[test]
@@ -113,7 +174,15 @@ fn deterministic_random_bytes_cannot_panic_and_later_frame_recovers() {
     }
     decoder.push(0);
     let valid = Frame::new(MessageKind::GetStatus, 5, 3, 0, vec![]);
-    assert_eq!(valid.encode().unwrap().into_iter().filter_map(|byte| decoder.push(byte)).next(), Some(Ok(valid)));
+    assert_eq!(
+        valid
+            .encode()
+            .unwrap()
+            .into_iter()
+            .filter_map(|byte| decoder.push(byte))
+            .next(),
+        Some(Ok(valid))
+    );
 }
 
 #[test]
@@ -121,10 +190,20 @@ fn unplug_discards_partial_frame_and_crc_error_recovers() {
     let frame = Frame::new(MessageKind::GetStatus, 5, 3, 2, vec![]);
     let bytes = frame.encode().unwrap();
     let mut decoder = FrameDecoder::new();
-    for byte in &bytes[..8] { decoder.push(*byte); }
+    for byte in &bytes[..8] {
+        decoder.push(*byte);
+    }
     decoder.reset();
-    for byte in &bytes[8..] { assert!(decoder.push(*byte).is_none() || *byte == 0); }
+    for byte in &bytes[8..] {
+        assert!(decoder.push(*byte).is_none() || *byte == 0);
+    }
     let bad = include_bytes!("../../../tests/vectors/bad-crc.cobs");
-    assert_eq!(bad.iter().filter_map(|byte| decoder.push(*byte)).next(), Some(Err(ProtocolError::Crc)));
-    assert_eq!(bytes.iter().filter_map(|byte| decoder.push(*byte)).next(), Some(Ok(frame)));
+    assert_eq!(
+        bad.iter().filter_map(|byte| decoder.push(*byte)).next(),
+        Some(Err(ProtocolError::Crc))
+    );
+    assert_eq!(
+        bytes.iter().filter_map(|byte| decoder.push(*byte)).next(),
+        Some(Ok(frame))
+    );
 }

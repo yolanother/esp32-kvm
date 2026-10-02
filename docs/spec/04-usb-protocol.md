@@ -1,5 +1,6 @@
 # Protocol v1 design contract
 Status: implementation baseline; verify golden vectors before coding both ends.
+The implemented v1 payload keys, ranges, and fixed layouts are recorded in [protocol/schema/v1.md](../../protocol/schema/v1.md); the Rust codec and C constants follow that schema.
 Transport: native USB CDC byte stream, binary frames only; logs are typed diagnostics, not unframed text. Use a separate debug interface or bounded protocol diagnostics. Baud setting has no assumed throughput meaning on native CDC.
 
 ## Framing
@@ -37,4 +38,3 @@ Pairing passkeys are never treated as normal forwarded keystrokes. UI logs metad
 
 ## Required tests
 Golden bytes/CRC/COBS for every message; split/coalesced frames; malformed length/CRC; random byte fuzzing; duplicate SWITCH; stale session; stale generation; seq boundaries; unplug in partial frame; queue overflow; heartbeat expiry; delayed ACK; board reset; no replay; delta coalescing conservation; one-target delivery.
-
