@@ -17,6 +17,11 @@ pub struct RequestActor {
 impl RequestActor {
     /// Creates a local actor with guest slots in their configured cycle order.
     pub fn new(order: Vec<u8>) -> Self {
+        Self::with_generation(order, 0)
+    }
+
+    /// Creates a local actor after firmware STATUS confirms its current generation.
+    pub fn with_generation(order: Vec<u8>, generation: u32) -> Self {
         let mut unique = Vec::new();
         for slot in order {
             if slot != 0 && !unique.contains(&slot) {
@@ -24,7 +29,7 @@ impl RequestActor {
             }
         }
         Self {
-            router: Router::new(),
+            router: Router::with_generation(generation),
             order: unique,
             ready: Vec::new(),
             pending: None,

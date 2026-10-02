@@ -11,8 +11,13 @@ pub const SWITCH_TIMEOUT_MS: u64 = 500;
 pub enum Command {
     /// Clear input on the old target and disarm forwarding.
     ReleaseAll { generation: u32 },
-    /// Select a ready target after release has been acknowledged.
-    Select { slot: u8, generation: u32 },
+    /// Select a ready target with the firmware's post-release generation and
+    /// a strictly newer generation for the selected route.
+    Select {
+        slot: u8,
+        expected_generation: u32,
+        new_generation: u32,
+    },
     /// Arm the selected target after selection has been acknowledged.
     Arm { slot: u8, generation: u32 },
 }
@@ -54,9 +59,14 @@ impl Default for Router {
 impl Router {
     /// Creates a disarmed local router with no active guest.
     pub fn new() -> Self {
+        Self::with_generation(0)
+    }
+
+    /// Creates a disarmed router at a generation confirmed by firmware STATUS.
+    pub fn with_generation(generation: u32) -> Self {
         Self {
             phase: Phase::Local,
-            generation: 0,
+            generation,
             held_suppressed: true,
         }
     }
@@ -92,13 +102,20 @@ impl Router {
     }
 
     /// Advances to selection only for the current release acknowledgment.
+    /// Firmware increments its generation when RELEASE_ALL succeeds, so the
+    /// following SWITCH must request a newer generation.
     pub fn release_ack(&mut self, generation: u32) -> Option<Command> {
         if generation != self.generation {
             return None;
         }
         if let Phase::Release { slot, deadline } = self.phase {
             self.phase = Phase::Select { slot, deadline };
-            return Some(Command::Select { slot, generation });
+            self.generation = self.generation.wrapping_add(1);
+            return Some(Command::Select {
+                slot,
+                expected_generation: generation,
+                new_generation: self.generation,
+            });
         }
         None
     }

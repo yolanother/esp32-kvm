@@ -21,7 +21,11 @@ It includes local control in the cycle, skips offline guests, and accepts only
 one switch transaction at a time. The latest non-local request waits behind a
 transaction; local return preempts it. A direct offline selection fails local.
 `Router` emits release, then selection after release ACK, then arm after
-selection ACK. An arm ACK is required before a guest becomes active. The actor
+selection ACK. Firmware `RELEASE_ALL` advances its route generation: from a
+confirmed generation 0, its ACK reports 1, `SWITCH` expects 1 and requests 2,
+and `ARM` uses 2. `with_generation` seeds the actor from a confirmed nonzero
+firmware STATUS after session negotiation. An arm ACK is required before a
+guest becomes active. The actor
 rejects stale generations, fails local on disconnect/timeout, and withholds
 input until the caller confirms all physical keys and buttons were released.
 It never queues pointer deltas for replay.
@@ -29,11 +33,13 @@ It never queues pointer deltas for replay.
 The native host I/O loop must consume capture events and issue these abstract
 commands on a confirmed USB session. It must validate the session, sequence,
 ACK kind and resulting firmware generation before calling the corresponding
-actor ACK method; call `tick` before processing late ACKs. It must disarm
+actor ACK method; call `tick` before processing late ACKs. A mismatched
+resulting generation requires local failover and session resynchronization.
+It must disarm
 capture on transition or fault, arm with the acknowledged generation only
 after readiness and an all-up baseline, and call `observe_all_released` only
-from a verified physical state ledger. Wire generation reconciliation and the
-live host I/O loop are pending integration with the firmware contract. The
+from a verified physical state ledger. The live host I/O loop and asynchronous
+release ACK reconciliation are pending integration with the firmware contract. The
 current source tests prove policy order, not delivery to a physical guest.
 
 Verify on Windows 11 with a real keyboard and mouse: both Ctrl sides, left and

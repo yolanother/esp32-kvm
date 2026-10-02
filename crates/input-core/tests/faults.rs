@@ -58,19 +58,20 @@ fn switch_requires_ordered_acks_and_all_up_before_input() {
         wire.0.last(),
         Some(&Command::Select {
             slot: 2,
-            generation
+            expected_generation: generation,
+            new_generation: generation + 1,
         })
     );
-    wire.send(router.switch_ack(generation));
+    wire.send(router.switch_ack(generation + 1));
     assert_eq!(
         wire.0.last(),
         Some(&Command::Arm {
             slot: 2,
-            generation
+            generation: generation + 1,
         })
     );
     assert!(!router.can_forward_input());
-    assert_eq!(router.arm_ack(generation), Some(State::Guest(2)));
+    assert_eq!(router.arm_ack(generation + 1), Some(State::Guest(2)));
     assert_eq!(router.state(), State::Guest(2));
     assert!(!router.can_forward_input());
     router.observe_all_released();
@@ -83,8 +84,8 @@ fn link_loss_reset_and_overflow_disarm_without_replay() {
     router.begin_switch(1, 0);
     let old = router.generation();
     router.release_ack(old);
-    router.switch_ack(old);
-    router.arm_ack(old);
+    router.switch_ack(old + 1);
+    router.arm_ack(old + 1);
     router.observe_all_released();
     assert!(router.can_forward_input());
     let release = router.link_lost();
@@ -106,8 +107,8 @@ fn link_loss_reset_and_overflow_disarm_without_replay() {
     router.begin_switch(1, 20);
     let next = router.generation();
     router.release_ack(next);
-    router.switch_ack(next);
-    router.arm_ack(next);
+    router.switch_ack(next + 1);
+    router.arm_ack(next + 1);
     assert!(!router.can_forward_input());
     assert_eq!(
         router.queue_overflow(),
@@ -129,7 +130,7 @@ fn stale_generation_and_not_ready_target_do_not_arm() {
     assert_eq!(router.switch_ack(generation), None);
     router.release_ack(generation);
     assert_eq!(
-        router.target_not_ready(generation),
+        router.target_not_ready(generation + 1),
         Some(Command::ReleaseAll {
             generation: router.generation()
         })
