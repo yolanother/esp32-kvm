@@ -741,6 +741,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp32-kvm-host-actor"
+version = "0.1.0"
+dependencies = [
+ "esp32-kvm-input-core",
+ "esp32-kvm-platform-windows",
+ "esp32-kvm-protocol",
+ "esp32-kvm-usb-transport",
+ "serialport",
+]
+
+[[package]]
 name = "esp32-kvm-input-core"
 version = "0.1.0"
 
