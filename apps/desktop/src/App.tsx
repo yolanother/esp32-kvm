@@ -1,9 +1,12 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
-// Renders the five desktop configuration destinations with accessible navigation and explicit
-// disconnected/preview states. This webview displays status and examples; native workers own input.
+// Renders five desktop destinations and an explicit setup wizard with accessible
+// navigation. Native status owns device truth; the webview never routes input.
 import { useEffect, useRef, useState, type KeyboardEvent, type JSX } from "react";
 import { destinations, moveSelection, type Destination } from "./navigation";
 import { exampleGuests, exampleMappings } from "./preview-fixtures";
+import SetupWizard from "./SetupWizard";
+import { setupSnapshot, unavailableSnapshot } from "./setup-api";
+import { profileState, type SetupSnapshot } from "./setup-model";
 
 /** A readable text badge whose label also carries its meaning. */
 function StatusPill({ children, tone = "neutral" }: { children: string; tone?: "neutral" | "warning" | "accent" }): JSX.Element {
@@ -26,13 +29,13 @@ function PageIntro({ title, description, headingRef }: { title: string; descript
 }
 
 /** Systems destination with truthful local state and optional sample guest cards. */
-function SystemsPage({ preview, headingRef }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null> }): JSX.Element {
+function SystemsPage({ preview, headingRef, snapshot, onAddGuest }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: () => void }): JSX.Element {
   return <>
     <PageIntro title="Systems" description="Choose where your keyboard and mouse go after setup." headingRef={headingRef} />
-    <div className="toolbar"><StatusPill>Local control only</StatusPill><span className="muted">Standard BLE mode is not active.</span><button disabled title="Pairing is not available in this build">Add guest</button></div>
+    <div className="toolbar"><StatusPill>Local control only</StatusPill><span className="muted">Setup starts disarmed.</span><button type="button" onClick={onAddGuest}>Add guest</button></div>
     <div className="card-grid">
       <article className="card card--local"><div className="card-heading"><h2>This computer</h2><StatusPill tone="accent">Local host</StatusPill></div><p>Keyboard and mouse remain with Windows.</p><div className="card-tail"><span className="small muted">No active guest route</span><span className="small">Current state</span></div></article>
-      {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : <article className="card card--empty"><h2>No guest profiles yet</h2><p>Device setup and pairing will appear here when the native connection is available.</p><StatusPill tone="warning">Device unverified</StatusPill></article>}
+      {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : snapshot.profiles.length ? snapshot.profiles.map((guest) => <article className="card" key={guest.bondToken}><div className="card-heading"><h2>{guest.name}</h2><StatusPill tone={profileState(snapshot.profiles, guest.bondToken, snapshot.readyTokens) === "ready" ? "accent" : "warning"}>{profileState(snapshot.profiles, guest.bondToken, snapshot.readyTokens) === "ready" ? "Ready" : "Offline"}</StatusPill></div><p>{guest.os} · {guest.profile === "unchanged" ? "Unchanged keys" : "Windows shortcuts to Mac"}</p><div className="card-tail"><span className="small muted">Saved identity</span><span className="small muted">Input selection unavailable</span></div></article>) : <article className="card card--empty"><h2>No guest profiles yet</h2><p>Connect the device and pair a guest to add a saved profile.</p><StatusPill tone="warning">Device unverified</StatusPill></article>}
     </div>
     {preview && <PreviewNotice />}
     <div className="notice"><strong>Stay in control</strong><span>Routing starts only after the firmware and guest report ready. This shell cannot arm input capture.</span></div>
@@ -78,11 +81,11 @@ function ShortcutsPage({ headingRef }: { headingRef: React.RefObject<HTMLHeading
 }
 
 /** Device destination reports only facts available without a native handshake. */
-function DevicePage({ headingRef }: { headingRef: React.RefObject<HTMLHeadingElement | null> }): JSX.Element {
+function DevicePage({ headingRef, snapshot, onSetup }: { headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onSetup: () => void }): JSX.Element {
   return <>
     <PageIntro title="Device" description="Connection health, firmware and diagnostics will appear here." headingRef={headingRef} />
-    <div className="card card-heading"><div><h2>ESP32-S3 input bridge</h2><p>Planned Waveshare 1.54-inch board; attached variant and revision are unverified.</p></div><StatusPill tone="warning">Not verified</StatusPill></div>
-    <div className="card-grid device-grid"><section className="card"><h2>Connection</h2><dl className="detail-list"><div><dt>USB session</dt><dd>Unavailable</dd></div><div><dt>BLE guests</dt><dd>Unavailable</dd></div><div><dt>Input destination</dt><dd>Local host only</dd></div><div><dt>Guest latency</dt><dd>Not measured</dd></div></dl></section><section className="card"><h2>Firmware</h2><p>Version, board identity and capabilities require a device handshake.</p><dl className="detail-list"><div><dt>Installed version</dt><dd>Unknown</dd></div><div><dt>Protocol</dt><dd>Unverified</dd></div></dl></section></div>
+    <div className="card card-heading"><div><h2>ESP32-S3 input bridge</h2><p>{snapshot.device.kind === "verified" ? `Firmware reports ${snapshot.device.boardId}.` : "Attached variant and revision are unverified."}</p></div><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Verified" : "Not verified"}</StatusPill></div>
+    <div className="card-grid device-grid"><section className="card"><h2>Connection</h2><dl className="detail-list"><div><dt>USB session</dt><dd>{snapshot.device.kind === "verified" ? "Verified" : snapshot.device.kind === "candidate" ? "Candidate only" : "Unavailable"}</dd></div><div><dt>BLE guests ready</dt><dd>{snapshot.device.kind === "verified" ? snapshot.readyTokens.length : "Unavailable"}</dd></div><div><dt>Input destination</dt><dd>Not reported</dd></div><div><dt>Guest latency</dt><dd>Not measured</dd></div></dl></section><section className="card"><h2>Firmware</h2><p>Board identity and capabilities require a device handshake.</p><dl className="detail-list"><div><dt>Installed version</dt><dd>{snapshot.device.kind === "verified" ? snapshot.device.firmwareVersion ?? "Unavailable" : "Unknown"}</dd></div><div><dt>Protocol</dt><dd>{snapshot.device.kind === "verified" ? "Verified" : "Unverified"}</dd></div></dl><button type="button" onClick={onSetup}>Open setup</button></section></div>
     <div className="notice"><strong>Diagnostics</strong><span>Connection events and aggregate counters will be available later. Typed keys, pairing codes and bond secrets must never appear in exports.</span></div>
   </>;
 }
@@ -91,6 +94,8 @@ function DevicePage({ headingRef }: { headingRef: React.RefObject<HTMLHeadingEle
 export default function App(): JSX.Element {
   const [page, setPage] = useState<Destination>("systems");
   const [preview, setPreview] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [snapshot, setSnapshot] = useState<SetupSnapshot>(unavailableSnapshot());
   const headingRef = useRef<HTMLHeadingElement>(null);
   const focusHeading = useRef(false);
   const navRefs = useRef<Record<Destination, HTMLButtonElement | null>>({ systems: null, layout: null, mappings: null, shortcuts: null, device: null });
@@ -100,7 +105,16 @@ export default function App(): JSX.Element {
     focusHeading.current = false;
   }, [page]);
 
+  useEffect(() => {
+    let active = true;
+    async function refresh(): Promise<void> { const next = await setupSnapshot(); if (active) setSnapshot(next); }
+    void refresh();
+    const timer = window.setInterval(() => { void refresh(); }, 2000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+
   function selectPage(destination: Destination): void {
+    setSetupOpen(false);
     focusHeading.current = true;
     if (page === destination) headingRef.current?.focus();
     else setPage(destination);
@@ -122,12 +136,12 @@ export default function App(): JSX.Element {
       <aside className="sidebar" aria-label="Application sidebar">
         <div className="brand"><span className="brand-mark" aria-hidden="true" />ESP32 KVM</div>
         <nav className="nav-list" aria-label="Main navigation">{destinations.map(({ id, label }) => <button key={id} type="button" ref={(node) => { navRefs.current[id] = node; }} className={`nav-item${page === id ? " nav-item--selected" : ""}`} aria-current={page === id ? "page" : undefined} onClick={() => selectPage(id)} onKeyDown={(event) => handleNavKey(event, id)}>{label}</button>)}</nav>
-        <div className="sidebar-bottom"><span className="sidebar-caption">WINDOWS HOST</span><strong>This computer</strong><StatusPill tone="warning">Connection unavailable</StatusPill></div>
+        <div className="sidebar-bottom"><span className="sidebar-caption">WINDOWS HOST</span><strong>This computer</strong><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "Connection unavailable"}</StatusPill></div>
       </aside>
       <div className="workspace">
-        <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone="warning">No device status</StatusPill></div></header>
-        <div className="connection-status" role="status" aria-live="polite">Device connection is unavailable. Input stays with this computer.</div>
-        <main id="main-content" className="content" tabIndex={-1}>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} />}{page === "layout" && <LayoutPage preview={preview} headingRef={headingRef} />}{page === "mappings" && <MappingsPage preview={preview} headingRef={headingRef} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} />}</main>
+        <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "No verified device"}</StatusPill></div></header>
+        <div className="connection-status" role="status" aria-live="polite">{snapshot.device.kind === "verified" ? "Device verified. Guest control still requires an acknowledged route." : snapshot.device.kind === "candidate" ? "USB interface detected; firmware is not verified. Input stays with this computer." : "Device connection is unavailable. Input stays with this computer."}</div>
+        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} />}{page === "layout" && <LayoutPage preview={preview} headingRef={headingRef} />}{page === "mappings" && <MappingsPage preview={preview} headingRef={headingRef} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
         <footer className="footer"><span>Local control only · Proposed return shortcut <KeyChord keys={["Ctrl", "Alt", "F10"]} /> is inactive</span><span>Emergency shortcut is not active yet</span></footer>
       </div>
     </div>

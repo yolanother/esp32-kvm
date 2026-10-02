@@ -1,6 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
  * Defines semantic design tokens and responsive, keyboard-visible styling for the five-page
- * desktop shell. Preview content and unavailable device states remain readable without color. */
+ * desktop shell and setup wizard. Preview content and unavailable device
+ * states remain readable without color. */
 :root {
   font-family: "Segoe UI", system-ui, sans-serif;
   font-size: 100%;
@@ -20,10 +21,10 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .58; }
-button:focus-visible, input:focus-visible, a:focus-visible, [tabindex="-1"]:focus-visible {
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible, [tabindex="-1"]:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
@@ -92,6 +93,24 @@ th, td { padding: .75rem .55rem; border-bottom: 1px solid var(--border); vertica
 th { font-size: .75rem; font-weight: 600; color: var(--muted); }
 tr:last-child td { border-bottom: 0; }
 .emergency-card { margin-top: 1rem; }
+.setup { max-width: 50rem; }
+.setup h3 { margin: 0 0 .6rem; font-size: 1.05rem; }
+.eyebrow { color: var(--accent); font-size: .7rem; font-weight: 700; letter-spacing: .1em; margin-bottom: .25rem; }
+.setup-steps { list-style: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem; padding: 0; margin: 1.4rem 0; }
+.setup-steps li { border: 1px solid var(--border); border-radius: .5rem; padding: .65rem; color: var(--muted); font-size: .82rem; }
+.setup-steps li[aria-current="step"] { border-color: var(--accent); color: var(--text); background: #203a35; font-weight: 700; }
+.setup-panel { border-top: 1px solid var(--border); padding-top: 1.25rem; }
+.setup-actions { display: flex; gap: .65rem; flex-wrap: wrap; margin-top: 1.1rem; }
+.setup button { min-height: 2.5rem; padding: .45rem .8rem; border: 1px solid #78938f; border-radius: .4rem; background: #24443c; color: var(--text); }
+.setup button:hover:not(:disabled) { background: #315b50; }
+.setup button:disabled { border-color: var(--border); background: var(--raised); }
+.setup-challenge { margin-top: 1rem; padding: 1rem; border: 2px solid var(--accent); border-radius: .6rem; background: #162b2c; }
+.setup-challenge > span { display: block; color: var(--muted); }
+.setup-challenge > strong { display: block; margin: .6rem 0; font: 700 clamp(1.8rem, 5vw, 2.6rem)/1 Consolas, monospace; letter-spacing: .18em; }
+.setup-details { display: grid; gap: .9rem; margin-top: 1.2rem; padding-top: 1.2rem; border-top: 1px solid var(--border); }
+.setup-details label { display: grid; gap: .3rem; font-weight: 600; }
+.setup-details input, .setup-details select { width: 100%; min-height: 2.55rem; padding: .5rem .6rem; border: 1px solid #78938f; border-radius: .4rem; background: #0d1820; color: var(--text); }
+.setup-details button { justify-self: start; }
 .device-grid { margin-top: 1rem; }
 .detail-list { margin: 0; }
 .detail-list div { display: flex; justify-content: space-between; gap: 1rem; padding: .65rem 0; border-bottom: 1px solid var(--border); }
@@ -116,5 +135,6 @@ tr:last-child td { border-bottom: 0; }
   .workspace { min-height: 0; }
   .content { overflow: visible; }
   .notice { flex-direction: column; gap: .2rem; }
+  .setup-steps { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
