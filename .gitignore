@@ -1,0 +1,13 @@
+# ESP32 KVM generated build products and local editor state.
+/target/
+node_modules/
+/.npm-cache/
+**/.npm-cache/
+/apps/desktop/dist/
+/apps/desktop/src-tauri/gen/
+/firmware/build/
+/firmware/sdkconfig
+/firmware/sdkconfig.old
+/.idea/
+/.vscode/
+*.log

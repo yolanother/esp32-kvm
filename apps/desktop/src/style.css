@@ -1,0 +1,7 @@
+/* Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
+ * Provides minimal readable desktop shell styling; full screen design is a separate task. */
+:root { font-family: "Segoe UI", sans-serif; color: #eef5f7; background: #0b1116; }
+body { margin: 0; }
+main { padding: 32px; }
+h1 { font-size: 28px; }
+.status { color: #b4c5ce; }

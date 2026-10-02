@@ -1,0 +1,8 @@
+[workspace]
+members = ["apps/desktop/src-tauri", "crates/input-core", "crates/platform-windows"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license-file = "LICENSE"
+rust-version = "1.85"

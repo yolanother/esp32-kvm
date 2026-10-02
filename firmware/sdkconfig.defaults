@@ -1,0 +1,2 @@
+# ESP32 KVM baseline target; board revision and peripheral pins require verification before use.
+CONFIG_IDF_TARGET="esp32s3"

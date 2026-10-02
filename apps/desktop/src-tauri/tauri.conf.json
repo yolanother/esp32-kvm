@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ESP32 KVM",
+  "version": "0.1.0",
+  "identifier": "ai.doubtech.esp32-kvm",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "ESP32 KVM", "width": 1120, "height": 760, "minWidth": 900, "minHeight": 640 }],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false }
+}
