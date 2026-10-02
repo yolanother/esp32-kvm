@@ -8,12 +8,15 @@ This record separates observations of the attached device from Waveshare's refer
 | --- | --- | --- |
 | PlatformIO `device list --json-output` | `COM7`, `USB VID:PID=303A:1001`, serial `28:84:85:8D:30:FC` | An Espressif USB serial/JTAG interface is attached; this does not identify a Waveshare SKU. |
 | `esptool.py v4.11.0 --chip esp32s3 --port COM7 flash_id` | Succeeded twice; ESP32-S3 QFN56 silicon revision `v0.2`, 40 MHz crystal, 8 MB embedded PSRAM, USB-Serial/JTAG mode; flash manufacturer `0x20`, device `0x4018`, detected 16 MB, quad, 3.3 V | ROM/tool access and flash capacity are repeatable. `v0.2` is **chip** revision, not PCB revision. No flash contents were read, erased, or written. |
+| `esptool.py v4.11.0 --chip esp32s3 --port COM7 get_security_info` | Succeeded; security flags `0x00000000`, Secure Boot disabled, Flash Encryption disabled, SPI boot crypt count `0x0` | Software-initiated ROM connection is available with the current eFuse state. This does not prove physical BOOT button recovery, and future eFuse programming can change these properties. |
 
 `flash_id` uses a RAM stub and ends with an RTS hard reset. Both executions returned exit code 0. The identifier in the tool output is a device MAC; keep it out of user-facing diagnostic exports unless needed for support.
 
 ## Vendor reference, conditional on board match
 
 Waveshare lists non-touch SKUs 33866/33867 and touch SKUs 33868/33869. The vendor describes the touch version as adding a CST816 touch controller to the shared ESP32-S3R8, 16 MB flash, 8 MB PSRAM, 240×240 ST7789 design. The [official schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.54/ESP32-S3-LCD-1.54-Schematic.pdf) was downloaded and inspected; its SHA-256 on this date is `3F551B71E2E80EAA4A766F3AA6CBA623332554068524E42DF629A51835C87102`. The PDF remains at the vendor URL because its separate redistribution terms were not established. The [Waveshare examples repository](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.54) states Apache-2.0 for its code; bundled third-party components require their own license review before copying.
+
+The supplied [purchase listing](https://www.amazon.com/dp/B0GV472MH4) is ASIN `B0GV472MH4`. An attempted direct fetch returned a generic Amazon page, and search did not expose the product title or selected variation. Its advertised touch/non-touch option therefore could not be matched to Waveshare SKU 33866–33869. An order variation or legible package/board marking is still needed; an advertised variation would not establish PCB revision or actual touch assembly by itself.
 
 The following GPIOs come from the vendor's [ESP-IDF 5.5.1 factory BSP](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.54/tree/main/examples/ESP32-S3-Touch-LCD-1.54-demo/ESP-IDF-5.5.1/01_factory/components/esp_bsp). They are **reference mappings**, not proof that the attached assembly has these connections.
 
@@ -33,7 +36,7 @@ The factory BSP creates an ST7789 panel with 16-bit RGB pixels and display inver
 
 The [Waveshare user guide](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54/Instructions-For-Use) says to hold BOOT while connecting USB, then release BOOT to enter download mode when the port is not recognized; power cycle after programming. It also suggests holding BOOT and power cycling if a flashing tool waits for synchronization. This is the documented manual recovery procedure, **not a completed test on this board**.
 
-Automatic ROM access via esptool succeeded twice on COM7. Manual BOOT-at-power-on recovery and return to the factory application still need a person to operate the button while observing USB enumeration. Do not claim repeatable manual recovery until both entry and normal reboot are logged. No firmware was flashed during this check.
+Automatic ROM access via esptool succeeded on three read-only queries (two `flash_id`, one `get_security_info`) on COM7. Manual BOOT-at-power-on recovery and return to the factory application still need a person to operate the button while observing USB enumeration. Do not claim repeatable manual recovery until both entry and normal reboot are logged. No firmware was flashed during this check.
 
 ## Next hardware checks
 
@@ -47,6 +50,7 @@ Automatic ROM access via esptool succeeded twice on COM7. Manual BOOT-at-power-o
 ```text
 C:/Users/yolan/.platformio/penv/Scripts/platformio.exe device list --json-output
 C:/Users/yolan/.platformio/penv/Scripts/python.exe C:/Users/yolan/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM7 flash_id
+C:/Users/yolan/.platformio/penv/Scripts/python.exe C:/Users/yolan/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM7 get_security_info
 ```
 
 Reference files: `bsp_display.h`, `bsp_display.c`, `bsp_touch.h`, `bsp_touch.c`, `bsp_i2c.h`, and the vendor `02_button_example.ino` under the touch example tree. See the [vendor resources page](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54/Resources-And-Documents) for current originals.
