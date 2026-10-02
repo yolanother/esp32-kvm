@@ -749,6 +749,7 @@ name = "esp32-kvm-platform-windows"
 version = "0.1.0"
 dependencies = [
  "esp32-kvm-input-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
