@@ -1,0 +1,221 @@
+/* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
+ * Registers a single composite HID-over-GATT service with keyboard, mouse,
+ * consumer and keyboard LED reports. Notifications target one encrypted BLE
+ * connection by handle; CCCD state and held reports stay connection-local. */
+#include "hid_gatt.h"
+
+#include <string.h>
+
+#include "host/ble_att.h"
+#include "host/ble_gatt.h"
+#include "host/ble_hs.h"
+#include "os/os_mbuf.h"
+
+enum attribute {
+    ATTR_HID_INFO = 1,
+    ATTR_REPORT_MAP,
+    ATTR_CONTROL_POINT,
+    ATTR_PROTOCOL_MODE,
+    ATTR_KEYBOARD_INPUT,
+    ATTR_MOUSE_INPUT,
+    ATTR_CONSUMER_INPUT,
+    ATTR_KEYBOARD_OUTPUT,
+    ATTR_KEYBOARD_REFERENCE,
+    ATTR_MOUSE_REFERENCE,
+    ATTR_CONSUMER_REFERENCE,
+    ATTR_LED_REFERENCE
+};
+
+static hid_channel_t channel;
+static uint16_t keyboard_handle;
+static uint16_t mouse_handle;
+static uint16_t consumer_handle;
+static uint16_t led_handle;
+
+static int access_attribute(uint16_t connection_handle, uint16_t attribute_handle,
+                            struct ble_gatt_access_ctxt *context, void *argument);
+
+static struct ble_gatt_dsc_def keyboard_reference[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
+     .access_cb = access_attribute, .arg = (void *)ATTR_KEYBOARD_REFERENCE},
+    {0}
+};
+static struct ble_gatt_dsc_def mouse_reference[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
+     .access_cb = access_attribute, .arg = (void *)ATTR_MOUSE_REFERENCE},
+    {0}
+};
+static struct ble_gatt_dsc_def consumer_reference[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
+     .access_cb = access_attribute, .arg = (void *)ATTR_CONSUMER_REFERENCE},
+    {0}
+};
+static struct ble_gatt_dsc_def led_reference[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
+     .access_cb = access_attribute, .arg = (void *)ATTR_LED_REFERENCE},
+    {0}
+};
+
+static const struct ble_gatt_chr_def characteristics[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2a4a), .access_cb = access_attribute,
+     .arg = (void *)ATTR_HID_INFO, .flags = BLE_GATT_CHR_F_READ},
+    {.uuid = BLE_UUID16_DECLARE(0x2a4b), .access_cb = access_attribute,
+     .arg = (void *)ATTR_REPORT_MAP, .flags = BLE_GATT_CHR_F_READ},
+    {.uuid = BLE_UUID16_DECLARE(0x2a4c), .access_cb = access_attribute,
+     .arg = (void *)ATTR_CONTROL_POINT,
+     .flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC},
+    {.uuid = BLE_UUID16_DECLARE(0x2a4e), .access_cb = access_attribute,
+     .arg = (void *)ATTR_PROTOCOL_MODE,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
+              BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC},
+    {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
+     .arg = (void *)ATTR_KEYBOARD_INPUT, .descriptors = keyboard_reference,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
+     .val_handle = &keyboard_handle},
+    {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
+     .arg = (void *)ATTR_MOUSE_INPUT, .descriptors = mouse_reference,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
+     .val_handle = &mouse_handle},
+    {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
+     .arg = (void *)ATTR_CONSUMER_INPUT, .descriptors = consumer_reference,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
+     .val_handle = &consumer_handle},
+    {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
+     .arg = (void *)ATTR_KEYBOARD_OUTPUT, .descriptors = led_reference,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
+              BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC,
+     .val_handle = &led_handle},
+    {0}
+};
+
+static const struct ble_gatt_svc_def services[] = {
+    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x1812),
+     .characteristics = characteristics},
+    {0}
+};
+
+static int append(struct ble_gatt_access_ctxt *context, const uint8_t *bytes, size_t length)
+{
+    return os_mbuf_append(context->om, bytes, length) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+static int read_attribute(struct ble_gatt_access_ctxt *context, enum attribute attribute)
+{
+    static const uint8_t info[] = {0x11, 0x01, 0x00, 0x02};
+    static const uint8_t keyboard_ref[] = {HID_REPORT_KEYBOARD, 1};
+    static const uint8_t mouse_ref[] = {HID_REPORT_MOUSE, 1};
+    static const uint8_t consumer_ref[] = {HID_REPORT_CONSUMER, 1};
+    static const uint8_t led_ref[] = {HID_REPORT_KEYBOARD, 2};
+    static const uint8_t zero_keyboard[HID_KEYBOARD_REPORT_LEN] = {0};
+    uint8_t mouse[HID_MOUSE_REPORT_LEN] = {0};
+    uint8_t consumer[HID_CONSUMER_REPORT_LEN] = {0};
+    switch (attribute) {
+    case ATTR_HID_INFO: return append(context, info, sizeof(info));
+    case ATTR_REPORT_MAP: return append(context, hid_report_map, hid_report_map_len);
+    case ATTR_PROTOCOL_MODE: return append(context, &channel.protocol_mode, 1);
+    case ATTR_KEYBOARD_INPUT:
+        return append(context, channel.armed ? channel.keyboard : zero_keyboard,
+                      HID_KEYBOARD_REPORT_LEN);
+    case ATTR_MOUSE_INPUT:
+        mouse[0] = channel.armed ? channel.mouse_buttons : 0;
+        return append(context, mouse, sizeof(mouse));
+    case ATTR_CONSUMER_INPUT:
+        if (channel.armed) {
+            consumer[0] = (uint8_t)channel.consumer_usage;
+            consumer[1] = (uint8_t)(channel.consumer_usage >> 8);
+        }
+        return append(context, consumer, sizeof(consumer));
+    case ATTR_KEYBOARD_OUTPUT: return append(context, &channel.keyboard_leds, 1);
+    case ATTR_KEYBOARD_REFERENCE: return append(context, keyboard_ref, sizeof(keyboard_ref));
+    case ATTR_MOUSE_REFERENCE: return append(context, mouse_ref, sizeof(mouse_ref));
+    case ATTR_CONSUMER_REFERENCE: return append(context, consumer_ref, sizeof(consumer_ref));
+    case ATTR_LED_REFERENCE: return append(context, led_ref, sizeof(led_ref));
+    default: return BLE_ATT_ERR_UNLIKELY;
+    }
+}
+
+static int write_attribute(struct ble_gatt_access_ctxt *context, enum attribute attribute)
+{
+    uint8_t value;
+    if (OS_MBUF_PKTLEN(context->om) != 1 ||
+        os_mbuf_copydata(context->om, 0, 1, &value) != 0) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    switch (attribute) {
+    case ATTR_CONTROL_POINT:
+        if (value == 0) return hid_channel_release(&channel) ? 0 : BLE_ATT_ERR_UNLIKELY;
+        if (value == 1) return 0; /* exit suspend remains disarmed */
+        return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    case ATTR_PROTOCOL_MODE:
+        return hid_channel_set_protocol_mode(&channel, value) ? 0 : BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    case ATTR_KEYBOARD_OUTPUT:
+        return hid_channel_led_output(&channel, value) ? 0 : BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    default: return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+}
+
+static int access_attribute(uint16_t connection_handle, uint16_t attribute_handle,
+                            struct ble_gatt_access_ctxt *context, void *argument)
+{
+    (void)attribute_handle;
+    enum attribute attribute = (enum attribute)(uintptr_t)argument;
+    if (attribute != ATTR_HID_INFO && attribute != ATTR_REPORT_MAP &&
+        attribute != ATTR_KEYBOARD_REFERENCE && attribute != ATTR_MOUSE_REFERENCE &&
+        attribute != ATTR_CONSUMER_REFERENCE && attribute != ATTR_LED_REFERENCE &&
+        (!channel.connected || channel.connection_handle != connection_handle || !channel.encrypted))
+        return BLE_ATT_ERR_INSUFFICIENT_ENC;
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR ||
+        context->op == BLE_GATT_ACCESS_OP_READ_DSC) return read_attribute(context, attribute);
+    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR) return write_attribute(context, attribute);
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int send_report(void *unused, uint16_t connection_handle, uint8_t report_id,
+                       const uint8_t *bytes, size_t length)
+{
+    (void)unused;
+    if (!channel.connected || !channel.encrypted || channel.connection_handle != connection_handle ||
+        report_id < HID_REPORT_KEYBOARD || report_id > HID_REPORT_CONSUMER ||
+        !channel.subscribed[report_id]) return -1;
+    uint16_t value_handle = report_id == HID_REPORT_KEYBOARD ? keyboard_handle :
+                            report_id == HID_REPORT_MOUSE ? mouse_handle : consumer_handle;
+    if (value_handle == 0) return -1;
+    struct os_mbuf *packet = ble_hs_mbuf_from_flat(bytes, length);
+    if (packet == NULL) return -1;
+    return ble_gatts_notify_custom(connection_handle, value_handle, packet);
+}
+
+int hid_gatt_register(void)
+{
+    hid_channel_init(&channel, send_report, NULL);
+    int result = ble_gatts_count_cfg(services);
+    if (result != 0) return result;
+    return ble_gatts_add_svcs(services);
+}
+
+hid_channel_t *hid_gatt_channel(void) { return &channel; }
+
+bool hid_gatt_on_connect(uint16_t connection_handle)
+{
+    if (channel.connected) return false;
+    hid_channel_connected(&channel, connection_handle);
+    return true;
+}
+
+void hid_gatt_on_disconnect(uint16_t connection_handle)
+{
+    if (channel.connected && channel.connection_handle == connection_handle)
+        hid_channel_disconnected(&channel);
+}
+
+void hid_gatt_on_encryption(uint16_t connection_handle, bool encrypted)
+{
+    if (channel.connected && channel.connection_handle == connection_handle)
+        hid_channel_encrypted(&channel, encrypted);
+}
+
+void hid_gatt_on_subscribe(uint16_t connection_handle, uint16_t value_handle, bool enabled)
+{
+    if (!channel.connected || channel.connection_handle != connection_handle) return;
+    if (value_handle == keyboard_handle) hid_channel_subscribed(&channel, HID_REPORT_KEYBOARD, enabled);
+    if (value_handle == mouse_handle) hid_channel_subscribed(&channel, HID_REPORT_MOUSE, enabled);
+    if (value_handle == consumer_handle) hid_channel_subscribed(&channel, HID_REPORT_CONSUMER, enabled);
+}

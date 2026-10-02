@@ -1,0 +1,3 @@
+# Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
+# Ignores local MSVC objects and executables from the portable HID tests.
+build/
