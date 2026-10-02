@@ -5,6 +5,8 @@
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "router_hid_bridge.h"
+#include "display.h"
+#include "hid_guest.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -28,6 +30,28 @@
 static kvm_transport_core_t core;
 static kvm_router_t router;
 static bool started;
+static TaskHandle_t usb_task;
+
+void kvm_transport_button_event(kvm_display_event_t event)
+{
+    if (!usb_task) return;
+    uint32_t bit = event == KVM_DISPLAY_EMERGENCY_RELEASE ? 2u :
+                   event == KVM_DISPLAY_NEXT_REQUEST ? 1u : 0u;
+    if (bit) (void)xTaskNotify(usb_task, bit, eSetBits);
+}
+
+static void publish_status(bool connected, bool guest_ready)
+{
+    kvm_display_status_t status = {
+        .usb_connected = connected,
+        .armed = router.armed,
+        .guest_ready = guest_ready,
+        .fault = router.fault,
+        .selected_slot = router.slot,
+        .generation = router.generation,
+    };
+    kvm_display_post_status(&status);
+}
 
 static uint64_t now_ms(void *context)
 {
@@ -61,11 +85,26 @@ static void usb_worker(void *context)
     (void)context;
     uint8_t bytes[128];
     bool was_connected = false;
+    bool guest_ready = false;
+    uint64_t last_ready_ms = 0;
     for (;;) {
+        uint32_t button_bits = 0;
+        (void)xTaskNotifyWait(0, UINT32_MAX, &button_bits, 0);
+        if (button_bits & 2u) {
+            kvm_router_emergency_release(&router);
+            kvm_transport_core_reset(&core);
+            was_connected = false;
+        }
         bool connected = usb_serial_jtag_is_connected();
+        uint64_t time_ms = now_ms(NULL);
+        if (time_ms < last_ready_ms || time_ms - last_ready_ms >= 1000) {
+            guest_ready = hid_guest_request_ready();
+            last_ready_ms = time_ms;
+        }
         if (!connected) {
             if (was_connected) kvm_transport_core_reset(&core);
             was_connected = false;
+            publish_status(false, guest_ready);
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -78,6 +117,9 @@ static void usb_worker(void *context)
         int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(20));
         if (read > 0) kvm_transport_core_feed(&core, bytes, (size_t)read);
         kvm_transport_core_tick(&core);
+        if ((button_bits & 1u) && !(button_bits & 2u))
+            (void)kvm_transport_core_device_select_request(&core, router.slot ? 0 : 1);
+        publish_status(true, guest_ready);
     }
 }
 
@@ -91,7 +133,7 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     esp_err_t result = usb_serial_jtag_driver_install(&config);
     if (result != ESP_OK) return result;
     kvm_router_init(&router, kvm_router_hid_output(), NULL);
-    if (xTaskCreate(usb_worker, "kvm_usb_loopback", KVM_USB_TASK_STACK, NULL, 10, NULL) != pdPASS) {
+    if (xTaskCreate(usb_worker, "kvm_usb_loopback", KVM_USB_TASK_STACK, NULL, 10, &usb_task) != pdPASS) {
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }

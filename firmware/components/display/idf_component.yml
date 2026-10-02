@@ -1,0 +1,5 @@
+# Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
+# Pins the Espressif LVGL port and LVGL 9 for the opt-in device status panel.
+dependencies:
+  espressif/esp_lvgl_port: "^2.9.0"
+  lvgl/lvgl: "^9.2.0"

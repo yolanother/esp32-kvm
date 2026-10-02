@@ -54,18 +54,21 @@ int main(int argc, char **argv)
     kvm_transport_core_feed(&core, bytes, length);
     assert(sends == 3 && sent[4] == KVM_MSG_STATUS);
 
+    assert(kvm_transport_core_device_select_request(&core, 1));
+    assert(sends == 4 && sent[4] == KVM_MSG_DEVICE_SELECT_REQUEST);
+
     bytes[length - 2] ^= 1; /* Break the golden frame's CRC. */
     kvm_transport_core_feed(&core, bytes, length);
-    assert(sends == 3);
+    assert(sends == 4);
     kvm_transport_core_reset(&core);
     assert(!kvm_transport_core_session_open(&core));
     memset(bytes, 0x55, sizeof(bytes));
     bytes[sizeof(bytes) - 1] = 0;
     kvm_transport_core_feed(&core, bytes, sizeof(bytes));
-    assert(sends == 3); /* Drain an oversized frame through its delimiter. */
+    assert(sends == 4); /* Drain an oversized frame through its delimiter. */
     length = read_fixture(argv[1], bytes, sizeof(bytes));
     kvm_transport_core_feed(&core, bytes, length);
-    assert(sends == 4 && sent[4] == KVM_MSG_CAPS);
+    assert(sends == 5 && sent[4] == KVM_MSG_CAPS);
     assert(!kvm_transport_core_session_open(&core));
     puts("transport core fixture tests passed");
     return 0;

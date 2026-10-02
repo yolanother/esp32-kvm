@@ -38,6 +38,7 @@ typedef struct {
     uint8_t status_slot;
     bool status_armed;
     bool status_fault;
+    uint32_t next_select_request_id;
 } kvm_transport_core_t;
 
 /** Initializes a disarmed loopback core with a nonzero, caller-generated session. */
@@ -58,5 +59,7 @@ void kvm_transport_core_bind_router(kvm_transport_core_t *core, kvm_router_t *ro
                                     kvm_transport_now_fn now, void *now_context);
 /** Drains router input and enforces the lease while USB is idle. */
 void kvm_transport_core_tick(kvm_transport_core_t *core);
+/** Sends an arbitration request for a physical PLUS press in an open USB session. */
+bool kvm_transport_core_device_select_request(kvm_transport_core_t *core, uint8_t slot);
 
 #endif /* ESP32_KVM_TRANSPORT_CORE_H */

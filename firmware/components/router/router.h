@@ -106,6 +106,8 @@ void kvm_router_init(kvm_router_t *router, kvm_router_output_t output, void *con
 void kvm_router_session_open(kvm_router_t *router, uint64_t session, uint64_t now_ms);
 /** Handles USB disconnect or board reset and returns to disarmed local state. */
 void kvm_router_reset(kvm_router_t *router);
+/** Releases the selected output after a physical emergency, closing the host session. */
+void kvm_router_emergency_release(kvm_router_t *router);
 /** Refreshes the lease only for the active session and a monotonic host tick. */
 kvm_router_result_t kvm_router_heartbeat(kvm_router_t *router, uint64_t session,
                                          uint64_t host_tick, uint64_t now_ms);

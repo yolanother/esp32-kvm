@@ -99,6 +99,16 @@ void kvm_router_reset(kvm_router_t *r)
     r->has_input_seq = false;
 }
 
+void kvm_router_emergency_release(kvm_router_t *r)
+{
+    if (!r) return;
+    if (r->slot) fail_local(r, true);
+    r->armed = false;
+    r->queued = 0;
+    r->session_open = false;
+    r->fault = true;
+}
+
 void kvm_router_session_open(kvm_router_t *r, uint64_t session, uint64_t now_ms)
 {
     if (!r) return;

@@ -4,6 +4,7 @@
  * session, READY encrypted guest, explicit switch, and explicit arm. */
 #include "esp_log.h"
 #include "hid_guest.h"
+#include "display.h"
 #include "transport_usb_serial_jtag.h"
 
 /** Starts services; any startup error leaves the routing gate disarmed. */
@@ -13,4 +14,6 @@ void app_main(void)
     if (hid_result != ESP_OK) ESP_LOGE("esp32-kvm", "HID startup failed: %d", hid_result);
     esp_err_t usb_result = kvm_transport_usb_serial_jtag_start();
     if (usb_result != ESP_OK) ESP_LOGE("esp32-kvm", "USB startup failed: %d", usb_result);
+    esp_err_t display_result = kvm_display_start(false, kvm_transport_button_event);
+    if (display_result != ESP_OK) ESP_LOGE("esp32-kvm", "Display/button startup failed: %d", display_result);
 }

@@ -157,6 +157,16 @@ static void reset_each_stage_and_replay(void)
     assert(kvm_router_release_all(&r, 9, UINT32_MAX, 23) == KVM_ROUTER_BAD_PAYLOAD);
     assert(kvm_router_release_all(&r, 9, UINT32_MAX - 1, 23) == KVM_ROUTER_STALE_ROUTE);
 }
+static void physical_emergency_release(void)
+{
+    kvm_router_t r; fake_t f; active(&r, &f);
+    kvm_router_emergency_release(&r);
+    assert(!r.armed && r.slot == 0 && r.queued == 0 && r.fault);
+    assert(r.generation == 2 && f.releases == 1);
+    assert(kvm_router_input(&r, 7, 1, 10, (kvm_router_input_t){0}, 10) == KVM_ROUTER_STALE_SESSION);
+    kvm_router_emergency_release(&r);
+    assert(r.generation == 2 && f.releases == 1);
+}
 int main(void)
 {
     switching_and_fencing();
@@ -165,5 +175,6 @@ int main(void)
     queue_and_backpressure();
     release_failure();
     reset_each_stage_and_replay();
+    physical_emergency_release();
     return 0;
 }

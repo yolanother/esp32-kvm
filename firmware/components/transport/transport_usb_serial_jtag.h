@@ -6,8 +6,11 @@
 #define ESP32_KVM_TRANSPORT_USB_SERIAL_JTAG_H
 
 #include "esp_err.h"
+#include "display_model.h"
 
 /** Installs fixed USB CDC and starts the disarmed router worker. */
 esp_err_t kvm_transport_usb_serial_jtag_start(void);
+/** Queues a physical button request for the serialized USB/router task. */
+void kvm_transport_button_event(kvm_display_event_t event);
 
 #endif /* ESP32_KVM_TRANSPORT_USB_SERIAL_JTAG_H */
