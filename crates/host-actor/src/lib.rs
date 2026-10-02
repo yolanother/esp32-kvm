@@ -4,7 +4,13 @@
 
 #![forbid(unsafe_code)]
 
-use esp32_kvm_input_core::{Action, Command, RequestActor, State};
+mod set1;
+pub use set1::SetOneKeyMapper;
+
+use esp32_kvm_input_core::{
+    Action, Command, MappingEngine, MappingError, MappingProfile, RequestActor, Side, SourceKey,
+    State,
+};
 #[cfg(windows)]
 use esp32_kvm_platform_windows::CaptureService;
 use esp32_kvm_platform_windows::{
@@ -52,6 +58,8 @@ pub trait CaptureControl {
     fn generation(&self) -> u32;
     /// Reports a capture queue, hook, or input-device fault.
     fn fault(&self) -> Option<CaptureFault>;
+    /// Proves all non-injected physical keys and buttons are released.
+    fn physical_all_up(&self) -> bool;
 }
 
 impl CaptureControl for CaptureGate {
@@ -66,6 +74,9 @@ impl CaptureControl for CaptureGate {
     }
     fn fault(&self) -> Option<CaptureFault> {
         CaptureGate::fault(self)
+    }
+    fn physical_all_up(&self) -> bool {
+        CaptureGate::physical_all_up(self)
     }
 }
 
@@ -83,6 +94,9 @@ impl CaptureControl for CaptureService {
     fn fault(&self) -> Option<CaptureFault> {
         CaptureService::fault(self)
     }
+    fn physical_all_up(&self) -> bool {
+        CaptureService::physical_all_up(self)
+    }
 }
 
 impl<T: CaptureControl + ?Sized> CaptureControl for Arc<T> {
@@ -97,6 +111,9 @@ impl<T: CaptureControl + ?Sized> CaptureControl for Arc<T> {
     }
     fn fault(&self) -> Option<CaptureFault> {
         (**self).fault()
+    }
+    fn physical_all_up(&self) -> bool {
+        (**self).physical_all_up()
     }
 }
 
@@ -215,7 +232,9 @@ pub struct HostActor<S: Read + Write> {
     fault: Option<HostFault>,
     pairing: bool,
     slots: Vec<SlotSnapshot>,
-    keys: BTreeMap<(u32, bool), MappedKey>,
+    keys: BTreeMap<(u32, bool), SourceKey>,
+    mapping: MappingEngine,
+    profiles: BTreeMap<[u8; 16], MappingProfile>,
     buttons: u8,
     wheel_residual: i32,
     pan_residual: i32,
@@ -256,6 +275,8 @@ impl<S: Read + Write> HostActor<S> {
             pairing: false,
             slots: Vec::new(),
             keys: BTreeMap::new(),
+            mapping: MappingEngine::new(MappingProfile::default()).expect("empty profile is valid"),
+            profiles: BTreeMap::new(),
             buttons: 0,
             wheel_residual: 0,
             pan_residual: 0,
@@ -281,6 +302,26 @@ impl<S: Read + Write> HostActor<S> {
     /// Returns the terminal fault, if this session must be renegotiated.
     pub fn fault(&self) -> Option<HostFault> {
         self.fault
+    }
+
+    /// Installs a validated guest profile by its persistent opaque bond token.
+    /// Edits to the active guest defer until every physical key is released.
+    pub fn set_guest_profile(
+        &mut self,
+        bond_token: [u8; 16],
+        profile: MappingProfile,
+    ) -> Result<(), MappingError> {
+        MappingEngine::new(profile.clone())?;
+        if let HostState::Guest(slot) = self.state()
+            && self
+                .slots
+                .iter()
+                .any(|seen| seen.slot == slot && seen.bond_token == bond_token)
+        {
+            self.mapping.set_profile(profile.clone())?;
+        }
+        self.profiles.insert(bond_token, profile);
+        Ok(())
     }
 
     /// Returns the latest setup data without opening another serial connection.
@@ -403,7 +444,7 @@ impl<S: Read + Write> HostActor<S> {
         if self.fault.is_some() {
             return;
         }
-        self.all_up = true;
+        self.all_up = self.capture.physical_all_up();
         self.arm_capture_if_ready();
     }
 
@@ -571,6 +612,9 @@ impl<S: Read + Write> HostActor<S> {
                 }
             }
         }
+        if matches!(self.state(), HostState::Guest(_)) && self.capture.generation() == 0 {
+            self.observe_all_up();
+        }
     }
 
     fn handle_frame(&mut self, frame: Frame, now_ms: u64) {
@@ -699,7 +743,8 @@ impl<S: Read + Write> HostActor<S> {
         if let Some(command) = next {
             self.issue(command, now_ms);
         } else if kind == MessageKind::Arm {
-            self.arm_capture_if_ready();
+            self.load_profile_for_active_guest();
+            self.observe_all_up();
         }
     }
 
@@ -790,7 +835,10 @@ impl<S: Read + Write> HostActor<S> {
     }
 
     fn arm_capture_if_ready(&mut self) {
-        if !self.all_up || !matches!(self.state(), HostState::Guest(_)) {
+        if !self.all_up
+            || !self.capture.physical_all_up()
+            || !matches!(self.state(), HostState::Guest(_))
+        {
             return;
         }
         if !self.baseline_sent {
@@ -811,8 +859,29 @@ impl<S: Read + Write> HostActor<S> {
         };
         router.observe_all_released();
         if self.capture.generation() == 0 && !self.capture.arm(self.confirmed_generation) {
-            self.fail(HostFault::Capture);
+            if self.capture.physical_all_up() {
+                self.fail(HostFault::Capture);
+            } else {
+                self.all_up = false;
+            }
         }
+    }
+
+    fn load_profile_for_active_guest(&mut self) {
+        let profile = if let HostState::Guest(slot) = self.state() {
+            self.slots
+                .iter()
+                .find(|seen| seen.slot == slot)
+                .and_then(|seen| self.profiles.get(&seen.bond_token))
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            MappingProfile::default()
+        };
+        // Every profile was validated before storage, and clear_input ran at route start.
+        self.mapping
+            .set_profile(profile)
+            .expect("stored profile is valid");
     }
 
     fn update_key(&mut self, virtual_key: u32, scan_code: u32, extended: bool, down: bool) -> bool {
@@ -824,33 +893,32 @@ impl<S: Read + Write> HostActor<S> {
             let Some(mapped) = self.mapper.map_key(virtual_key, scan_code, extended) else {
                 return false;
             };
-            if mapped == MappedKey::Usage(0) || mapped == MappedKey::Modifier(0) {
-                return false;
-            }
-            self.keys.insert(identity, mapped);
+            let usage = match mapped {
+                MappedKey::Usage(usage) if usage != 0 => usage,
+                MappedKey::Modifier(bit) if bit.is_power_of_two() => {
+                    0xe0 + bit.trailing_zeros() as u8
+                }
+                _ => return false,
+            };
+            let side = match usage {
+                0xe0..=0xe3 => Side::Left,
+                0xe4..=0xe7 => Side::Right,
+                _ => Side::Unspecified,
+            };
+            let source = SourceKey { usage, side };
+            self.keys.insert(identity, source);
+            self.mapping.press(source);
+            true
+        } else if let Some(source) = self.keys.remove(&identity) {
+            self.mapping.release(source);
             true
         } else {
-            self.keys.remove(&identity).is_some()
+            false
         }
     }
 
     fn send_key_state(&mut self) {
-        let mut modifiers = 0_u8;
-        let mut usages = Vec::new();
-        for mapped in self.keys.values() {
-            match mapped {
-                MappedKey::Modifier(bit) => modifiers |= bit,
-                MappedKey::Usage(usage) if !usages.contains(usage) => usages.push(*usage),
-                _ => {}
-            }
-        }
-        let mut payload = vec![modifiers, 0];
-        if usages.len() > 6 {
-            payload.extend_from_slice(&[1; 6]);
-        } else {
-            payload.extend(usages);
-            payload.resize(8, 0);
-        }
+        let payload = self.mapping.report().bytes().to_vec();
         if self
             .send(MessageKind::KeyState, self.confirmed_generation, payload)
             .is_err()
@@ -888,6 +956,7 @@ impl<S: Read + Write> HostActor<S> {
 
     fn clear_input(&mut self) {
         self.keys.clear();
+        self.mapping.reset_for_route();
         self.buttons = 0;
         self.wheel_residual = 0;
         self.pan_residual = 0;

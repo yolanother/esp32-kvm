@@ -20,6 +20,7 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
     RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEMOUSE, RegisterRawInputDevices,
@@ -160,7 +161,7 @@ impl CaptureService {
 
     /// Arm a fresh route only when no capture fault is pending.
     pub fn arm(&self, generation: u32) -> bool {
-        self.gate.arm(generation)
+        os_all_up() && self.gate.arm(generation)
     }
     /// Restore local pass-through immediately.
     pub fn disarm(&self) {
@@ -173,6 +174,10 @@ impl CaptureService {
     /// Read the first capture fault; the actor must release remote state on faults.
     pub fn fault(&self) -> Option<CaptureFault> {
         self.gate.fault()
+    }
+    /// Returns true only when every observed physical key and mouse button is up.
+    pub fn physical_all_up(&self) -> bool {
+        self.gate.physical_all_up() && os_all_up()
     }
     /// Clear a diagnosed fault while disarmed before starting a new route.
     pub fn clear_fault(&self) -> bool {
@@ -190,6 +195,12 @@ impl CaptureService {
             .fetch_add(1, Ordering::Release);
         true
     }
+}
+
+// The hook cannot observe a key that was already held when it was installed.
+// A conservative OS state snapshot closes that startup gap before ARM.
+fn os_all_up() -> bool {
+    (1..=255).all(|virtual_key| unsafe { GetAsyncKeyState(virtual_key) as u16 & 0x8000 == 0 })
 }
 impl Drop for CaptureService {
     fn drop(&mut self) {
@@ -370,6 +381,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, param: LPARA
             let injected = input.flags & LLKHF_INJECTED != 0;
             let repeat = down && context.held[index];
             if !injected {
+                context.gate.record_physical_key(
+                    input.scanCode,
+                    input.flags & LLKHF_EXTENDED != 0,
+                    down,
+                );
                 if !context.refresh_hotkeys() {
                     return;
                 }
@@ -461,6 +477,11 @@ unsafe extern "system" fn mouse_proc(code: i32, message: WPARAM, param: LPARAM) 
         if let Ok(slot) = cell.try_borrow()
             && let Some(context) = slot.as_ref()
         {
+            if input.flags & LLMHF_INJECTED == 0
+                && let MouseInput::Button(button, down) = kind
+            {
+                context.gate.record_physical_button(button, down);
+            }
             let decision = classify_mouse(
                 context.gate.generation() != 0,
                 input.flags & LLMHF_INJECTED != 0,

@@ -3,9 +3,9 @@
 // Keyboard/buttons/wheels and physical shortcuts use hooks; relative motion
 // uses Raw Input, outside the webview.
 use esp32_kvm_input_core::Action;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex};
 
 #[cfg(windows)]
 mod windows;
@@ -176,6 +176,18 @@ pub enum CaptureFault {
 pub struct CaptureGate {
     state: AtomicU64,
     sender: SyncSender<CaptureEvent>,
+    physical: Mutex<PhysicalLedger>,
+}
+
+struct PhysicalLedger {
+    keys: [bool; 512],
+    buttons: u8,
+}
+
+impl PhysicalLedger {
+    fn all_up(&self) -> bool {
+        self.buttons == 0 && self.keys.iter().all(|held| !held)
+    }
 }
 impl CaptureGate {
     /// Create a disarmed gate and receiver with positive queue capacity.
@@ -186,13 +198,22 @@ impl CaptureGate {
             Arc::new(Self {
                 state: AtomicU64::new(0),
                 sender,
+                physical: Mutex::new(PhysicalLedger {
+                    keys: [false; 512],
+                    buttons: 0,
+                }),
             }),
             receiver,
         )
     }
     /// Arm a nonzero generation only from a fault-free disarmed state.
     pub fn arm(&self, generation: u32) -> bool {
+        let physical = self
+            .physical
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         generation != 0
+            && physical.all_up()
             && self
                 .state
                 .compare_exchange(
@@ -202,6 +223,45 @@ impl CaptureGate {
                     Ordering::Acquire,
                 )
                 .is_ok()
+    }
+    /// Records every non-injected physical key transition, including consumed shortcuts
+    /// and keys observed while the guest gate is disarmed.
+    pub fn record_physical_key(&self, scan_code: u32, extended: bool, down: bool) {
+        if scan_code > 255 {
+            self.mark_fault(CaptureFault::RawInputFailure);
+            return;
+        }
+        let index = scan_code as usize + if extended { 256 } else { 0 };
+        self.physical
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .keys[index] = down;
+    }
+    /// Records every non-injected physical mouse-button transition before suppression.
+    pub fn record_physical_button(&self, button: MouseButton, down: bool) {
+        let bit = match button {
+            MouseButton::Left => 1,
+            MouseButton::Right => 2,
+            MouseButton::Middle => 4,
+            MouseButton::X1 => 8,
+            MouseButton::X2 => 16,
+        };
+        let mut physical = self
+            .physical
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if down {
+            physical.buttons |= bit;
+        } else {
+            physical.buttons &= !bit;
+        }
+    }
+    /// Returns true only after all observed non-injected physical keys and buttons are up.
+    pub fn physical_all_up(&self) -> bool {
+        self.physical
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .all_up()
     }
     /// Stop suppression and forwarding immediately.
     pub fn disarm(&self) {

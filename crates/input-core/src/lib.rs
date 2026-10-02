@@ -4,11 +4,16 @@
 #![forbid(unsafe_code)]
 
 mod hotkeys;
+mod mapping;
 mod requests;
 mod routing;
 
 pub use hotkeys::{
     Action, HotkeyConfig, HotkeyMatcher, Key, KeyOutcome, Modifiers, Shortcut, ShortcutError,
+};
+pub use mapping::{
+    Destination, KeyboardReport, MappingEngine, MappingError, MappingProfile, MappingRule, Side,
+    SourceKey,
 };
 pub use requests::RequestActor;
 pub use routing::{Command, Router, SWITCH_TIMEOUT_MS, State};

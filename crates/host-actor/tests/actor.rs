@@ -3,7 +3,7 @@
 // verify exact control acknowledgments, retry bounds, local failover, and input safety.
 
 use esp32_kvm_host_actor::{HostActor, HostState, KeyMapper, MappedKey};
-use esp32_kvm_input_core::Action;
+use esp32_kvm_input_core::{Action, Destination, MappingProfile, MappingRule, Side, SourceKey};
 use esp32_kvm_platform_windows::{CaptureEvent, CaptureGate, PhysicalEvent};
 use esp32_kvm_protocol::{Frame, FrameDecoder, MessageKind};
 use esp32_kvm_usb_transport::ConfirmedDevice;
@@ -489,4 +489,79 @@ fn pairing_controls_share_session_and_snapshot_tracks_bonds() {
     actor.poll(6);
     actor.pair_cancel(7).unwrap();
     assert_eq!(wire.sent().last().unwrap().kind, MessageKind::PairCancel);
+}
+
+#[test]
+fn physical_hold_blocks_arm_even_if_all_up_is_claimed() {
+    let (mut actor, wire, gate) = setup();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    gate.record_physical_key(0x1d, false, true);
+    actor.request(Action::Direct(1), 2);
+    let release = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&release, 1));
+    actor.poll(3);
+    let select = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&select, 2));
+    actor.poll(4);
+    let arm = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&arm, 2));
+    actor.poll(5);
+    actor.observe_all_up();
+    assert_eq!(gate.generation(), 0);
+    gate.record_physical_key(0x1d, false, false);
+    actor.poll(6);
+    assert_eq!(gate.generation(), 2);
+}
+
+#[test]
+fn bonded_guest_profile_maps_physical_usage_before_key_state() {
+    let (mut actor, wire, gate) = setup();
+    let physical_a = SourceKey {
+        usage: 4,
+        side: Side::Unspecified,
+    };
+    actor
+        .set_guest_profile(
+            [1; 16],
+            MappingProfile {
+                preset: vec![],
+                rules: vec![MappingRule {
+                    source: vec![physical_a],
+                    target: vec![Destination::Usage(5)],
+                    priority: 0,
+                    enabled: true,
+                }],
+            },
+        )
+        .unwrap();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    actor.request(Action::Direct(1), 2);
+    let release = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&release, 1));
+    actor.poll(3);
+    let select = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&select, 2));
+    actor.poll(4);
+    let arm = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&arm, 2));
+    actor.poll(5);
+    assert_eq!(gate.generation(), 2);
+    actor.on_capture(
+        CaptureEvent {
+            generation: 2,
+            event: PhysicalEvent::Key {
+                virtual_key: 0x41,
+                scan_code: 0x1e,
+                extended: false,
+                down: true,
+                repeat: false,
+            },
+        },
+        6,
+    );
+    let key_state = wire.sent().last().unwrap().clone();
+    assert_eq!(key_state.kind, MessageKind::KeyState);
+    assert_eq!(key_state.payload[2], 5);
 }
