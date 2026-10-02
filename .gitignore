@@ -1,5 +1,6 @@
 # ESP32 KVM generated build products and local editor state.
 /target/
+/.worktrees/
 node_modules/
 /.npm-cache/
 **/.npm-cache/
