@@ -9,5 +9,3 @@ license-file = "../../LICENSE"
 [dependencies]
 esp32-kvm-protocol = { path = "../protocol" }
 serialport = "=4.10.1"
-
-[workspace]
