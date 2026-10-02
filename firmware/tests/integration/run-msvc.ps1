@@ -22,3 +22,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Legacy transport test compile failed' }
 & (Join-Path $output 'transport_core_test.exe') (Join-Path $repo 'tests/vectors/hello-v1.cobs') (Join-Path $repo 'tests/vectors/session-open.cobs') (Join-Path $repo 'tests/vectors/get-status.cobs')
 if ($LASTEXITCODE -ne 0) { throw 'Legacy transport test failed' }
 Write-Output 'PASS legacy transport fixtures'
+& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 "/I$repo/firmware/tests/integration/mocks" @includes (Join-Path $PSScriptRoot 'test_router_hid_bridge.c') (Join-Path $repo 'firmware/components/transport/router_hid_bridge.c') "/Fo:$output/" "/Fe:$output/test_router_hid_bridge.exe" /link @libraries
+if ($LASTEXITCODE -ne 0) { throw 'HID bridge test compile failed' }
+& (Join-Path $output 'test_router_hid_bridge.exe')
+if ($LASTEXITCODE -ne 0) { throw 'HID bridge test failed' }
+Write-Output 'PASS HID bridge adapter'

@@ -101,6 +101,10 @@ int main(void)
     expect_reply(KVM_MSG_CAPS, 0, 0);
     send_frame(&core, KVM_MSG_SESSION_OPEN, 7, 2, 0, open, sizeof(open));
     expect_reply(KVM_MSG_ACK, 0, 0);
+    uint8_t heartbeat[8] = {0};
+    int before_heartbeat = replies;
+    send_frame(&core, KVM_MSG_HEARTBEAT, 7, 20, 0, heartbeat, sizeof(heartbeat));
+    assert(replies == before_heartbeat);
     send_frame(&core, KVM_MSG_GET_STATUS, 7, 21, 0, NULL, 0);
     expect_reply(KVM_MSG_STATUS, 0, 0);
     command[0] = 1; u32(command + 1, 0); u32(command + 5, 1);

@@ -1,11 +1,13 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
- * Bridges framed, binary-only M0 loopback traffic through the ESP32-S3 fixed
- * USB Serial/JTAG CDC controller. It rotates the unarmed session after USB
- * disconnection and never forwards input or writes diagnostic text to CDC. */
+ * Bridges binary framed routing traffic through ESP32-S3 USB Serial/JTAG CDC.
+ * One worker serializes transport and router calls, rotates the session on
+ * disconnect, and ticks the fail-local lease even when USB input is idle. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
+#include "router_hid_bridge.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -24,7 +26,14 @@
 #define KVM_USB_TASK_STACK 4096
 
 static kvm_transport_core_t core;
+static kvm_router_t router;
 static bool started;
+
+static uint64_t now_ms(void *context)
+{
+    (void)context;
+    return (uint64_t)(esp_timer_get_time() / 1000);
+}
 
 static uint64_t new_session(void)
 {
@@ -61,12 +70,14 @@ static void usb_worker(void *context)
             continue;
         }
         if (!was_connected) {
-            (void)kvm_transport_core_init(&core, "esp32-kvm-loopback", "0.1.0-m0",
+            (void)kvm_transport_core_init(&core, "esp32-kvm-s3", "0.1.0-m1",
                                           new_session(), send_binary, NULL);
+            kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
             was_connected = true;
         }
         int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(20));
         if (read > 0) kvm_transport_core_feed(&core, bytes, (size_t)read);
+        kvm_transport_core_tick(&core);
     }
 }
 
@@ -79,6 +90,7 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     };
     esp_err_t result = usb_serial_jtag_driver_install(&config);
     if (result != ESP_OK) return result;
+    kvm_router_init(&router, kvm_router_hid_output(), NULL);
     if (xTaskCreate(usb_worker, "kvm_usb_loopback", KVM_USB_TASK_STACK, NULL, 10, NULL) != pdPASS) {
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;

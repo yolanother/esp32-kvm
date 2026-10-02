@@ -38,7 +38,6 @@ typedef struct {
     uint8_t status_slot;
     bool status_armed;
     bool status_fault;
-    bool status_ready;
 } kvm_transport_core_t;
 
 /** Initializes a disarmed loopback core with a nonzero, caller-generated session. */

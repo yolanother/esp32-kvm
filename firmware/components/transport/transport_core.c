@@ -173,7 +173,6 @@ static void send_status(kvm_transport_core_t *core, uint32_t seq)
     core->status_slot = r ? r->slot : 0;
     core->status_armed = r && r->armed;
     core->status_fault = r && r->fault;
-    core->status_ready = is_ready;
 }
 
 static bool utf8_valid(const uint8_t *p, size_t length)
@@ -262,7 +261,10 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
         uint64_t now_ms = firmware_ms(core);
         if (kind == KVM_MSG_HEARTBEAT) {
             if (payload_length == 8) result = kvm_router_heartbeat(r, session, get_u64(payload), now_ms);
-            if (result != KVM_ROUTER_OK) send_result(core, kind, seq, result);
+            if (result != KVM_ROUTER_OK) {
+                r->last_result_generation = r->generation;
+                send_result(core, kind, seq, result);
+            }
         } else if (kind == KVM_MSG_SWITCH) {
             if (payload_length == 9 && generation == get_u32(payload + 1))
                 result = kvm_router_switch(r, session, seq, payload[0], get_u32(payload + 1),
@@ -369,10 +371,8 @@ void kvm_transport_core_tick(kvm_transport_core_t *core)
     if (!core->session_open) return;
     kvm_router_t *r = core->router;
     uint64_t now_ms = firmware_ms(core);
-    bool is_ready = r->output.ready && r->output.ready(r->context, 1);
     if (now_ms < core->last_status_ms || now_ms - core->last_status_ms >= 1000 ||
         r->generation != core->status_generation || r->slot != core->status_slot ||
-        r->armed != core->status_armed || r->fault != core->status_fault ||
-        is_ready != core->status_ready)
+        r->armed != core->status_armed || r->fault != core->status_fault)
         send_status(core, 0);
 }

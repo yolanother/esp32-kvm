@@ -108,6 +108,7 @@ void kvm_router_session_open(kvm_router_t *r, uint64_t session, uint64_t now_ms)
     r->session_open = true;
     r->last_heartbeat_ms = now_ms;
     r->last_host_tick = 0;
+    r->has_host_tick = false;
     r->fault = false;
 }
 
@@ -116,8 +117,9 @@ kvm_router_result_t kvm_router_heartbeat(kvm_router_t *r, uint64_t session,
 {
     if (!r || !valid_session(r, session)) return KVM_ROUTER_STALE_SESSION;
     if (expired(r, now_ms)) return KVM_ROUTER_STALE_SESSION;
-    if (host_tick <= r->last_host_tick) return KVM_ROUTER_BAD_PAYLOAD;
+    if (r->has_host_tick && host_tick <= r->last_host_tick) return KVM_ROUTER_BAD_PAYLOAD;
     r->last_host_tick = host_tick;
+    r->has_host_tick = true;
     r->last_heartbeat_ms = now_ms;
     return KVM_ROUTER_OK;
 }

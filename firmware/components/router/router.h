@@ -86,6 +86,7 @@ typedef struct {
     uint32_t last_result_generation;
     uint8_t slot;
     bool session_open;
+    bool has_host_tick;
     bool armed;
     bool fault;
     bool congested;
