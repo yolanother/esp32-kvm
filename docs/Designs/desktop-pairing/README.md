@@ -9,24 +9,31 @@ as an example and isolated from all native calls.
 ## Native ownership
 
 `apps/desktop/src-tauri/src/setup.rs` defines typed Tauri commands and a
-`SetupBackend` boundary. The temporary `CandidateBackend` enumerates the
-Espressif USB VID/PID through `crates/usb-transport`, without opening the port.
-It reports a **candidate** only. It cannot mark firmware verified, start
-pairing, answer a challenge, or claim an HID test passed. Those calls fail
-closed. The single serial-owning host actor must implement this boundary;
-opening a second desktop COM session would race its heartbeat and input
-traffic. Firmware board ID, protocol, capacity, bond tokens and readiness
-must come from that actor's validated session and STATUS. The UI never treats
-a COM name or saved profile as a live connection.
+`SetupBackend` boundary. `actor_backend.rs` starts one worker that owns the
+verified host actor and its serial stream. It enumerates Espressif VID/PID
+candidates, then uses the actor's HELLO/CAPS/SESSION_OPEN handshake on that
+same open stream. The actor drives heartbeat and STATUS polling while Tauri
+reads a cached snapshot. Begin and cancel requests go through a bounded
+worker channel to that actor. Firmware board ID, capacity, bond tokens and
+readiness come from its validated session and STATUS. A failed session clears
+live readiness immediately; a saved profile or COM name cannot imply a live
+connection.
 
-The actor currently provides `pair_begin(60, now_ms)`, `pair_cancel(now_ms)`,
+The setup worker uses a disarmed `CaptureGate` and an inert mapper. It starts
+no Windows hook, observes no physical all-up ledger, and cannot arm guest
+input through this setup surface. This keeps pairing separate from guest
+switching until the native capture and routing integration is complete.
+
+The actor provides `pair_begin(60, now_ms)`, `pair_cancel(now_ms)`,
 `pair_reply(challenge_id, approved, now_ms)`, and a setup snapshot. The current
 wire schema omits the challenge number/ID, pairing deadline and detailed
 rejection status. Firmware version is parsed by CAPS but not yet exposed by
 the actor. The wizard displays unavailable states rather than inventing a
-countdown, code, firmware version or success. Protocol and firmware must add
-the challenge event before desktop confirmation can be enabled. A native
-all-up HID test action is also required before **Finish setup** can enable.
+countdown, code, firmware version or success. Numeric confirmation stays
+disabled even though the actor has a `pair_reply` method; protocol and
+firmware must add an authenticated challenge event before that command can
+be used. A native all-up HID test action is also required before **Finish
+setup** can enable.
 
 ## Local identities and safety
 
@@ -52,9 +59,9 @@ the numeric comparison includes a spaced spoken label.
   `apps/desktop` verifies the setup gates and offline identity behavior.
 - `npm run build` from `apps/desktop` checks TypeScript and the production UI.
 - `cargo test -p esp32-kvm-desktop --offline` from the repo root verifies
-  profile validation and last-good recovery.
+  snapshot mapping, fail-closed readiness, profile validation and last-good
+  recovery.
 
-The live Windows/Tauri screen, actor integration, BLE pairing confirmation,
-guest HID test, unplug recovery and keyboard-only visual pass remain physical
-or integration gates. A candidate USB port or passing source tests do not
-close those gates.
+The live Windows/Tauri screen, BLE pairing confirmation, guest HID test,
+unplug recovery and keyboard-only visual pass remain physical gates. A
+candidate USB port or passing source tests do not close those gates.

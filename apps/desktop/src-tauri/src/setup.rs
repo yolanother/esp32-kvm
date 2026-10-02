@@ -1,8 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Provides the Tauri setup boundary and crash-tolerant local guest labels.
-// The serial-owning host actor must supply verified bonds and pairing events;
-// a USB port candidate alone never enables pairing or HID test commands.
-use esp32_kvm_usb_transport::{available_usb_ports, candidate_ports};
+// The serial-owning host actor supplies verified bonds and pairing controls;
+// absent challenge events and all-up proof keep confirmation and testing closed.
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -54,25 +53,6 @@ pub enum PairingState {
         #[serde(rename = "deadlineMs")]
         deadline_ms: Option<u64>,
     },
-    /// Firmware supplied a numeric comparison challenge.
-    Challenge {
-        /// Fresh protocol challenge identifier.
-        #[serde(rename = "challengeId")]
-        challenge_id: u32,
-        /// Six-digit number compared with the guest display.
-        number: u32,
-        /// Firmware deadline if available.
-        #[serde(rename = "deadlineMs")]
-        deadline_ms: Option<u64>,
-    },
-    /// Bond storage is at capacity.
-    Full,
-    /// The explicit pairing window elapsed.
-    Expired,
-    /// Guest and firmware cannot negotiate protected pairing.
-    Unsupported { reason: String },
-    /// Pairing failed without an authenticated bond.
-    Failed { reason: String },
 }
 
 /// A user-editable label tied to a 16-byte opaque firmware identity.
@@ -107,12 +87,38 @@ pub struct SetupSnapshot {
     pub pairing_available: bool,
 }
 
+/// Actor facts before host-local labels are joined for Tauri serialization.
+#[derive(Clone)]
+pub struct BackendSnapshot {
+    /// Verified or candidate device state.
+    pub device: DeviceState,
+    /// Pairing window state supported by the current firmware contract.
+    pub pairing: PairingState,
+    /// Identities reported in firmware STATUS.
+    pub bond_tokens: Vec<String>,
+    /// Encrypted and subscribed live identities.
+    pub ready_tokens: Vec<String>,
+    /// Whether an actor-local pairing request can be accepted.
+    pub pairing_available: bool,
+}
+
+impl BackendSnapshot {
+    fn into_setup_snapshot(self, profiles: Vec<GuestProfile>) -> SetupSnapshot {
+        SetupSnapshot {
+            device: self.device,
+            pairing: self.pairing,
+            bond_tokens: self.bond_tokens,
+            ready_tokens: self.ready_tokens,
+            profiles,
+            pairing_available: self.pairing_available,
+        }
+    }
+}
+
 /// Device facts and controls provided by the single serial-owning host actor.
 pub trait SetupBackend: Send + Sync {
     /// Returns a current snapshot without opening a second serial stream.
-    fn snapshot(
-        &self,
-    ) -> Result<(DeviceState, PairingState, Vec<String>, Vec<String>, bool), String>;
+    fn snapshot(&self) -> Result<BackendSnapshot, String>;
     /// Requests a 60-second pairing window.
     fn begin(&self) -> Result<(), String> {
         Err("Verified pairing transport is unavailable.".into())
@@ -128,24 +134,6 @@ pub trait SetupBackend: Send + Sync {
     /// Runs an explicit test and sends all-up before returning success.
     fn test_controls(&self, _bond_token: &str) -> Result<(), String> {
         Err("Native HID test transport is unavailable.".into())
-    }
-}
-
-/// Candidate-only USB scan used until the host actor is installed in Tauri.
-pub struct CandidateBackend;
-
-impl SetupBackend for CandidateBackend {
-    fn snapshot(
-        &self,
-    ) -> Result<(DeviceState, PairingState, Vec<String>, Vec<String>, bool), String> {
-        let ports = available_usb_ports().map_err(|error| error.to_string())?;
-        let device = match candidate_ports(&ports).first() {
-            Some(port) => DeviceState::Candidate {
-                port: (*port).to_owned(),
-            },
-            None => DeviceState::Missing,
-        };
-        Ok((device, PairingState::Closed, Vec::new(), Vec::new(), false))
     }
 }
 
@@ -277,23 +265,19 @@ impl SetupService {
     }
 
     fn snapshot(&self) -> Result<SetupSnapshot, String> {
-        let (device, pairing, bond_tokens, ready_tokens, pairing_available) =
-            self.backend.snapshot()?;
+        let backend = self.backend.snapshot()?;
         let guard = self.profiles.lock().map_err(|error| error.to_string())?;
         let profiles = guard.as_ref().map_err(Clone::clone)?.profiles.clone();
-        Ok(SetupSnapshot {
-            device,
-            pairing,
-            bond_tokens,
-            ready_tokens,
-            profiles,
-            pairing_available,
-        })
+        Ok(backend.into_setup_snapshot(profiles))
     }
 
     fn save_profile(&self, profile: GuestProfile) -> Result<(), String> {
-        let (_, _, bond_tokens, _, _) = self.backend.snapshot()?;
-        if !bond_tokens.contains(&profile.bond_token) {
+        if !self
+            .backend
+            .snapshot()?
+            .bond_tokens
+            .contains(&profile.bond_token)
+        {
             return Err("Firmware has not reported this bond identity.".into());
         }
         let mut guard = self.profiles.lock().map_err(|error| error.to_string())?;
@@ -342,7 +326,12 @@ pub fn setup_test_controls(
     service: State<'_, SetupService>,
     bond_token: String,
 ) -> Result<(), String> {
-    if !service.backend.snapshot()?.3.contains(&bond_token) {
+    if !service
+        .backend
+        .snapshot()?
+        .ready_tokens
+        .contains(&bond_token)
+    {
         return Err("Guest is offline or HID is not ready.".into());
     }
     service.backend.test_controls(&bond_token)
@@ -352,23 +341,42 @@ pub fn setup_test_controls(
 mod tests {
     use super::*;
 
+    #[test]
+    fn backend_snapshot_keeps_verified_facts_and_local_pairing_distinct() {
+        let value = BackendSnapshot {
+            device: DeviceState::Verified {
+                board_id: "esp32-kvm-s3".into(),
+                firmware_version: None,
+                max_bonds: 8,
+                max_connections: 1,
+            },
+            pairing: PairingState::Closed,
+            bond_tokens: vec!["00112233445566778899aabbccddeeff".into()],
+            ready_tokens: Vec::new(),
+            pairing_available: true,
+        };
+        let json = serde_json::to_value(value.into_setup_snapshot(Vec::new())).unwrap();
+        assert_eq!(json["device"]["kind"], "verified");
+        assert_eq!(json["device"]["boardId"], "esp32-kvm-s3");
+        assert_eq!(json["pairing"]["kind"], "closed");
+        assert_eq!(json["readyTokens"], serde_json::json!([]));
+    }
+
     struct OneBondBackend;
     impl SetupBackend for OneBondBackend {
-        fn snapshot(
-            &self,
-        ) -> Result<(DeviceState, PairingState, Vec<String>, Vec<String>, bool), String> {
-            Ok((
-                DeviceState::Verified {
+        fn snapshot(&self) -> Result<BackendSnapshot, String> {
+            Ok(BackendSnapshot {
+                device: DeviceState::Verified {
                     board_id: "esp32-kvm-s3".into(),
                     firmware_version: None,
                     max_bonds: 8,
                     max_connections: 1,
                 },
-                PairingState::Closed,
-                vec!["00112233445566778899aabbccddeeff".into()],
-                Vec::new(),
-                false,
-            ))
+                pairing: PairingState::Closed,
+                bond_tokens: vec!["00112233445566778899aabbccddeeff".into()],
+                ready_tokens: Vec::new(),
+                pairing_available: false,
+            })
         }
     }
 

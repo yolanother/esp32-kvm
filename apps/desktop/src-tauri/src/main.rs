@@ -1,8 +1,9 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
-// Starts the native desktop shell and fail-closed setup command surface.
-// The serial-owning host actor must be installed before live pairing is enabled.
+// Starts the native desktop shell and one serial-owning setup actor thread.
+// Pairing requests use that actor; challenge confirmation and HID tests remain closed.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod actor_backend;
 mod setup;
 
 use tauri::Manager;
@@ -13,7 +14,7 @@ fn main() {
             let directory = app.path().app_config_dir()?;
             app.manage(setup::SetupService::new(
                 directory,
-                Box::new(setup::CandidateBackend),
+                Box::new(actor_backend::ActorBackend::start()),
             ));
             Ok(())
         })
