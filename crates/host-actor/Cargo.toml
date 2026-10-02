@@ -1,0 +1,14 @@
+[package]
+name = "esp32-kvm-host-actor"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+
+[dependencies]
+esp32-kvm-input-core = { path = "../input-core" }
+esp32-kvm-platform-windows = { path = "../platform-windows" }
+esp32-kvm-protocol = { path = "../protocol" }
+esp32-kvm-usb-transport = { path = "../usb-transport" }
+serialport = "4.10.1"
+
+[workspace]
