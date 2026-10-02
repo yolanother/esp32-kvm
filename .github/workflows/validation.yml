@@ -1,0 +1,60 @@
+# Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
+# Runs reproducible source checks for the Windows host, protocol vectors, and
+# ESP32-S3 firmware. Physical HID, BLE, and recovery gates require a separate lab.
+name: validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  desktop:
+    runs-on: windows-2022
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  protocol-vectors:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: pwsh -ExecutionPolicy Bypass -File ./tests/vectors/generate.ps1
+      - shell: pwsh
+        run: git diff --exit-code -- tests/vectors
+      - shell: pwsh
+        run: cargo test -p esp32-kvm-protocol
+
+  firmware:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.1
+          target: esp32s3
+          path: firmware
