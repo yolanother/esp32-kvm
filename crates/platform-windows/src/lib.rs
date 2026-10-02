@@ -1,6 +1,8 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
 // Defines bounded Windows physical-input capture and handoff to a native routing actor.
-// Keyboard/buttons/wheels use hooks; relative motion uses Raw Input, outside the webview.
+// Keyboard/buttons/wheels and physical shortcuts use hooks; relative motion
+// uses Raw Input, outside the webview.
+use esp32_kvm_input_core::Action;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -45,6 +47,8 @@ pub enum MouseInput {
 /// Physical input to be interpreted by the native routing actor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhysicalEvent {
+    /// Physical shortcut action, recognized before guest key mapping.
+    Hotkey(Action),
     /// Physical scan code and metadata, including repeated key-down events.
     Key {
         virtual_key: u32,
@@ -164,6 +168,8 @@ pub enum CaptureFault {
     RawInputFailure = 4,
     /// The capture message pump ended unexpectedly.
     MessagePumpFailure = 5,
+    /// Editable shortcut configuration was unavailable to the hook.
+    HotkeyConfigBusy = 6,
 }
 
 /// Atomic route gate and bounded sender shared by native callbacks.
@@ -213,6 +219,7 @@ impl CaptureGate {
             3 => Some(CaptureFault::UnsupportedAbsoluteInput),
             4 => Some(CaptureFault::RawInputFailure),
             5 => Some(CaptureFault::MessagePumpFailure),
+            6 => Some(CaptureFault::HotkeyConfigBusy),
             _ => None,
         }
     }
@@ -232,6 +239,24 @@ impl CaptureGate {
             return false;
         }
         match self.sender.try_send(CaptureEvent { generation, event }) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.mark_fault(CaptureFault::QueueOverflow);
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.mark_fault(CaptureFault::ReceiverClosed);
+                false
+            }
+        }
+    }
+    /// Send a recognized shortcut even when guest capture is locally disarmed.
+    pub fn offer_hotkey(&self, action: Action) -> bool {
+        let generation = self.generation();
+        match self.sender.try_send(CaptureEvent {
+            generation,
+            event: PhysicalEvent::Hotkey(action),
+        }) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 self.mark_fault(CaptureFault::QueueOverflow);

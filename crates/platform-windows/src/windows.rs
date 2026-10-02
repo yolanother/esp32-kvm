@@ -1,18 +1,22 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
 // Runs one Windows message-loop thread with low-level keyboard/mouse hooks and a message-only
 // Raw Input window. Hooks handle key/button/wheel transitions and local suppression; only Raw
-// Input supplies relative motion. The worker starts disarmed and never routes through the UI.
+// Input supplies relative motion. Physical shortcuts are recognized even while
+// guest capture is disarmed. The worker never routes through the UI.
 use crate::{
     CaptureEvent, CaptureFault, CaptureGate, MouseAxis, MouseButton, MouseInput, PhysicalEvent,
     RawMotionOutcome, classify_keyboard, classify_mouse, classify_raw_motion,
 };
+use esp32_kvm_input_core::{Action, HotkeyConfig, HotkeyMatcher, Key};
 use std::cell::RefCell;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 use windows_sys::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -26,6 +30,12 @@ const CLASS_NAME: &[u16] = &[
     69, 83, 80, 51, 50, 75, 86, 77, 67, 97, 112, 116, 117, 114, 101, 0,
 ];
 const SCAN_SLOTS: usize = 512;
+const HOTKEY_TIMER: usize = 1;
+
+struct HotkeySettings {
+    config: RwLock<HotkeyConfig>,
+    revision: AtomicU64,
+}
 
 /// Failure to start or retain the dedicated Windows capture worker.
 #[derive(Debug)]
@@ -55,12 +65,32 @@ struct ThreadContext {
     gate: Arc<CaptureGate>,
     held: [bool; SCAN_SLOTS],
     generation: u32,
+    hotkeys: HotkeyMatcher,
+    hotkey_settings: Arc<HotkeySettings>,
+    hotkey_revision: u64,
+    started: Instant,
+}
+impl ThreadContext {
+    fn refresh_hotkeys(&mut self) -> bool {
+        let revision = self.hotkey_settings.revision.load(Ordering::Acquire);
+        if revision == self.hotkey_revision {
+            return true;
+        }
+        let Ok(config) = self.hotkey_settings.config.try_read() else {
+            self.gate.mark_fault(CaptureFault::HotkeyConfigBusy);
+            return false;
+        };
+        self.hotkeys.set_config(config.clone());
+        self.hotkey_revision = revision;
+        true
+    }
 }
 thread_local! { static CONTEXT: RefCell<Option<ThreadContext>> = const { RefCell::new(None) }; }
 
 /// Owns the capture worker; dropping it disarms, unhooks, and joins the thread.
 pub struct CaptureService {
     gate: Arc<CaptureGate>,
+    hotkey_settings: Arc<HotkeySettings>,
     thread_id: u32,
     worker: Option<JoinHandle<()>>,
 }
@@ -72,11 +102,16 @@ impl CaptureService {
     ) -> Result<(Self, Receiver<CaptureEvent>), CaptureStartError> {
         let (gate, receiver) = CaptureGate::new(queue_capacity);
         let worker_gate = Arc::clone(&gate);
+        let hotkey_settings = Arc::new(HotkeySettings {
+            config: RwLock::new(HotkeyConfig::defaults()),
+            revision: AtomicU64::new(0),
+        });
+        let worker_hotkeys = Arc::clone(&hotkey_settings);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let worker = thread::Builder::new()
             .name("esp32-kvm-capture".into())
             .spawn(move || {
-                let result = Runtime::setup(Arc::clone(&worker_gate));
+                let result = Runtime::setup(Arc::clone(&worker_gate), worker_hotkeys);
                 match result {
                     Ok(runtime) => {
                         let thread_id = unsafe { GetCurrentThreadId() };
@@ -106,6 +141,7 @@ impl CaptureService {
             Ok(Ok(thread_id)) => Ok((
                 Self {
                     gate,
+                    hotkey_settings,
                     thread_id,
                     worker: Some(worker),
                 },
@@ -142,6 +178,18 @@ impl CaptureService {
     pub fn clear_fault(&self) -> bool {
         self.gate.clear_fault()
     }
+    /// Install a validated physical shortcut set for the capture worker.
+    pub fn set_hotkeys(&self, config: HotkeyConfig) -> bool {
+        let Ok(mut slot) = self.hotkey_settings.config.write() else {
+            self.gate.mark_fault(CaptureFault::HotkeyConfigBusy);
+            return false;
+        };
+        *slot = config;
+        self.hotkey_settings
+            .revision
+            .fetch_add(1, Ordering::Release);
+        true
+    }
 }
 impl Drop for CaptureService {
     fn drop(&mut self) {
@@ -164,7 +212,10 @@ struct Runtime {
     raw_registered: bool,
 }
 impl Runtime {
-    fn setup(gate: Arc<CaptureGate>) -> Result<Self, CaptureStartError> {
+    fn setup(
+        gate: Arc<CaptureGate>,
+        hotkey_settings: Arc<HotkeySettings>,
+    ) -> Result<Self, CaptureStartError> {
         let instance = unsafe { GetModuleHandleW(null()) };
         if instance.is_null() {
             return Err(win_error("GetModuleHandleW"));
@@ -211,8 +262,15 @@ impl Runtime {
                 gate,
                 held: [false; SCAN_SLOTS],
                 generation: 0,
+                hotkeys: HotkeyMatcher::new(HotkeyConfig::defaults()),
+                hotkey_settings,
+                hotkey_revision: 0,
+                started: Instant::now(),
             })
         });
+        if unsafe { SetTimer(runtime.window, HOTKEY_TIMER, 20, None) } == 0 {
+            return Err(win_error("SetTimer hotkey"));
+        }
         let device = RAWINPUTDEVICE {
             usUsagePage: 1,
             usUsage: 2,
@@ -237,6 +295,11 @@ impl Runtime {
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
+        if !self.window.is_null() {
+            unsafe {
+                KillTimer(self.window, HOTKEY_TIMER);
+            }
+        }
         CONTEXT.with(|cell| {
             if let Ok(mut context) = cell.try_borrow_mut() {
                 if let Some(context) = context.as_ref() {
@@ -306,6 +369,31 @@ unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, param: LPARA
                 };
             let injected = input.flags & LLKHF_INJECTED != 0;
             let repeat = down && context.held[index];
+            if !injected {
+                if !context.refresh_hotkeys() {
+                    return;
+                }
+                let outcome = context.hotkeys.on_key(
+                    Key {
+                        scan: input.scanCode as u16,
+                        extended: input.flags & LLKHF_EXTENDED != 0,
+                    },
+                    down,
+                    repeat,
+                    context.started.elapsed().as_millis() as u64,
+                );
+                if outcome.consume {
+                    if let Some(action) = outcome.action {
+                        if action == Action::Local {
+                            context.gate.disarm();
+                        }
+                        context.gate.offer_hotkey(action);
+                    }
+                    context.held[index] = down;
+                    suppress = true;
+                    return;
+                }
+            }
             let decision = classify_keyboard(
                 generation != 0,
                 injected,
@@ -396,6 +484,20 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_TIMER && wparam == HOTKEY_TIMER {
+        CONTEXT.with(|cell| {
+            if let Ok(mut slot) = cell.try_borrow_mut()
+                && let Some(context) = slot.as_mut()
+                && let Some(action) = context
+                    .hotkeys
+                    .tick(context.started.elapsed().as_millis() as u64)
+            {
+                context.gate.disarm();
+                context.gate.offer_hotkey(action);
+            }
+        });
+        return 0;
+    }
     if message == WM_INPUT {
         process_raw_input(lparam);
     }

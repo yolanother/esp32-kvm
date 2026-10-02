@@ -165,6 +165,11 @@ impl Router {
         self.fail_local()
     }
 
+    /// Preempts any transaction and returns local control unconditionally.
+    pub fn return_local(&mut self) -> Command {
+        self.fail_local()
+    }
+
     /// Reports whether fresh input may be forwarded to an armed guest.
     pub fn can_forward_input(&self) -> bool {
         matches!(self.phase, Phase::Guest(_)) && !self.held_suppressed

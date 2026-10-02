@@ -1,6 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
 // Specifies the Windows capture adapter's local pass-through, injected-input isolation,
 // one-path mouse delivery, routing-generation tagging, and bounded-queue fault behavior.
+use esp32_kvm_input_core::Action;
 use esp32_kvm_platform_windows::{
     CaptureFault, CaptureGate, MouseAxis, MouseButton, MouseInput, PhysicalEvent, RawMotionOutcome,
     classify_keyboard, classify_mouse, classify_raw_motion,
@@ -90,4 +91,14 @@ fn bounded_queue_disarms_on_overflow_and_tags_prior_events() {
     assert!(!gate.arm(8));
     gate.clear_fault();
     assert!(gate.arm(8));
+}
+
+#[test]
+fn hotkey_control_reaches_actor_while_capture_is_locally_disarmed() {
+    let (gate, receiver) = CaptureGate::new(1);
+    assert!(gate.offer_hotkey(Action::Next));
+    let control = receiver.try_recv().unwrap();
+    assert_eq!(control.generation, 0);
+    assert_eq!(control.event, PhysicalEvent::Hotkey(Action::Next));
+    assert_eq!(gate.generation(), 0);
 }
