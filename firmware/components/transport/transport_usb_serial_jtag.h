@@ -12,5 +12,7 @@
 esp_err_t kvm_transport_usb_serial_jtag_start(void);
 /** Queues a physical button request for the serialized USB/router task. */
 void kvm_transport_button_event(kvm_display_event_t event);
+/** Queues an exact local touch request without blocking the LVGL thread. */
+void kvm_transport_pairing_touch(kvm_display_pair_request_t request);
 
 #endif /* ESP32_KVM_TRANSPORT_USB_SERIAL_JTAG_H */

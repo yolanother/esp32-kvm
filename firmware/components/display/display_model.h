@@ -21,6 +21,7 @@ typedef struct {
     bool show_guest_list;
     bool touch_available;
     uint8_t pairing_state;
+    bool pairing_local_owner;
     uint32_t pairing_challenge_id;
     uint32_t pairing_number;
     uint64_t pairing_deadline_ms;
@@ -35,6 +36,18 @@ typedef enum {
     KVM_DISPLAY_PAIRING_CHALLENGE = 2, KVM_DISPLAY_PAIRING_REJECTED = 3,
     KVM_DISPLAY_PAIRING_CAPACITY = 4, KVM_DISPLAY_PAIRING_TIMEOUT = 5
 } kvm_display_pairing_state_t;
+
+/** Device touch actions sent to the USB worker for bounded HID handling. */
+typedef enum {
+    KVM_DISPLAY_PAIR_BEGIN, KVM_DISPLAY_PAIR_CANCEL,
+    KVM_DISPLAY_PAIR_APPROVE, KVM_DISPLAY_PAIR_REJECT
+} kvm_display_pair_action_t;
+
+/** Exact challenge identity captured with a displayed touch action. */
+typedef struct {
+    kvm_display_pair_action_t action;
+    uint32_t challenge_id;
+} kvm_display_pair_request_t;
 
 /** One of the five 240-by-240 device views. */
 typedef enum {
@@ -57,6 +70,14 @@ typedef struct {
 /** Derives visible text from confirmed status and a monotonic timestamp. */
 void kvm_display_make_view(const kvm_display_status_t *status, uint64_t now_ms,
                            kvm_display_view_t *view);
+/** Validates a touch action against the displayed state and captures its challenge ID. */
+bool kvm_display_pair_request(const kvm_display_status_t *status, uint64_t now_ms,
+                              kvm_display_pair_action_t action,
+                              kvm_display_pair_request_t *request);
+/** Maps a press in the visible action row to its specific pairing action. */
+bool kvm_display_pair_touch_action(const kvm_display_status_t *status,
+                                   uint16_t x, uint16_t y,
+                                   kvm_display_pair_action_t *action);
 /** Returns the ready slot touched in a guest row, or zero if unavailable. */
 uint8_t kvm_display_touch_slot(const kvm_display_view_t *view, uint16_t y);
 

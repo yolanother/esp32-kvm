@@ -2,6 +2,7 @@
  * Checks confirmed device screen priority, guest row eligibility, numeric
  * pairing expiry, and deterministic PLUS/BOOT button behavior. */
 #include "display_model.h"
+#include "display_pairing.h"
 #include <assert.h>
 #include <string.h>
 
@@ -52,6 +53,7 @@ int main(void)
     assert(kvm_display_touch_slot(&view, 240) == 0);
     status.show_guest_list = false;
     status.pairing_state = KVM_DISPLAY_PAIRING_CHALLENGE;
+    status.pairing_local_owner = true;
     status.pairing_challenge_id = 7;
     status.pairing_number = 123;
     status.pairing_deadline_ms = 61000;
@@ -78,6 +80,46 @@ int main(void)
     status.pairing_deadline_ms = 0;
     kvm_display_make_view(&status, 1000, &view);
     assert(strcmp(view.primary, "PAIRING EXPIRED") == 0);
+    status.usb_connected = false;
+    status.pairing_state = KVM_DISPLAY_PAIRING_CHALLENGE;
+    status.pairing_challenge_id = 91;
+    status.pairing_number = 123456;
+    status.pairing_deadline_ms = 61000;
+    status.touch_available = true;
+    kvm_display_make_view(&status, 1000, &view);
+    assert(view.screen == KVM_DISPLAY_PAIRING);
+    assert(strcmp(view.primary, "123456") == 0);
+    kvm_display_pair_request_t request;
+    assert(kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_APPROVE, &request));
+    assert(request.challenge_id == 91);
+    kvm_display_pair_action_t touched;
+    assert(kvm_display_pair_touch_action(&status, 40, 180, &touched));
+    assert(touched == KVM_DISPLAY_PAIR_REJECT);
+    assert(kvm_display_pair_touch_action(&status, 180, 180, &touched));
+    assert(touched == KVM_DISPLAY_PAIR_APPROVE);
+    assert(!kvm_display_pair_touch_action(&status, 180, 120, &touched));
+    assert(kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_REJECT, &request));
+    assert(request.challenge_id == 91);
+    status.pairing_local_owner = false;
+    assert(!kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_APPROVE, &request));
+    assert(!kvm_display_pair_touch_action(&status, 180, 180, &touched));
+    status.pairing_local_owner = true;
+    assert(!kvm_display_pair_request(&status, 61000, KVM_DISPLAY_PAIR_APPROVE, &request));
+    assert(request.challenge_id == 0);
+    status.touch_available = false;
+    assert(!kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_APPROVE, &request));
+    status.touch_available = true;
+    status.pairing_state = KVM_DISPLAY_PAIRING_CLOSED;
+    assert(kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_BEGIN, &request));
+    assert(request.challenge_id == 0);
+    assert(kvm_display_pair_touch_action(&status, 120, 180, &touched));
+    assert(touched == KVM_DISPLAY_PAIR_BEGIN);
+    status.pairing_state = KVM_DISPLAY_PAIRING_WAITING;
+    assert(kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_CANCEL, &request));
+    status.pairing_state = KVM_DISPLAY_PAIRING_CAPACITY;
+    assert(!kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_BEGIN, &request));
+    status.pairing_state = KVM_DISPLAY_PAIRING_CLOSED;
+    status.usb_connected = true;
     status.recovery_required = true;
     kvm_display_make_view(&status, 1000, &view);
     assert(view.screen == KVM_DISPLAY_RECOVERY);
@@ -101,5 +143,24 @@ int main(void)
     assert(kvm_display_buttons_sample(&b, false, true, 2335) == KVM_DISPLAY_NO_EVENT);
     assert(kvm_display_buttons_sample(&b, false, true, 3335) == KVM_DISPLAY_EMERGENCY_RELEASE);
     assert(kvm_display_buttons_sample(&b, false, true, 4335) == KVM_DISPLAY_NO_EVENT);
+
+    kvm_display_pairing_t pairing = {0};
+    kvm_display_pairing_started(&pairing, true, 1000);
+    assert(pairing.local_owner && pairing.state == KVM_DISPLAY_PAIRING_WAITING);
+    assert(pairing.deadline_ms == 61000);
+    assert(kvm_display_pairing_event(&pairing, KVM_DISPLAY_PAIRING_CHALLENGE,
+                                     91, 123456, 61000, 2000));
+    request = (kvm_display_pair_request_t){KVM_DISPLAY_PAIR_APPROVE, 90};
+    assert(!kvm_display_pairing_accept(&pairing, request, 2000));
+    request.challenge_id = 91;
+    assert(kvm_display_pairing_accept(&pairing, request, 2000));
+    assert(!kvm_display_pairing_accept(&pairing, request, 61000));
+    kvm_display_pairing_replied(&pairing, true);
+    assert(pairing.state == KVM_DISPLAY_PAIRING_WAITING && pairing.challenge_id == 0);
+    assert(!kvm_display_pairing_accept(&pairing, request, 2000));
+    kvm_display_pairing_expire(&pairing, 61000);
+    assert(pairing.state == KVM_DISPLAY_PAIRING_TIMEOUT && pairing.number == 0);
+    kvm_display_pairing_clear(&pairing);
+    assert(pairing.state == KVM_DISPLAY_PAIRING_CLOSED && !pairing.local_owner);
     return 0;
 }

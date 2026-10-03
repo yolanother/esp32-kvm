@@ -20,6 +20,7 @@ void app_main(void)
 #else
     const bool enable_panel = false;
 #endif
-    esp_err_t display_result = kvm_display_start(enable_panel, kvm_transport_button_event);
+    esp_err_t display_result = kvm_display_start(enable_panel, kvm_transport_button_event,
+                                                 kvm_transport_pairing_touch);
     if (display_result != ESP_OK) ESP_LOGE("esp32-kvm", "Display/button startup failed: %d", display_result);
 }

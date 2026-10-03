@@ -11,6 +11,7 @@
 #include "router_hid_bridge.h"
 #include "transport_display_status.h"
 #include "display.h"
+#include "display_pairing.h"
 #include "hid_guest.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
@@ -41,12 +42,33 @@ static kvm_router_t router;
 static bool started;
 static TaskHandle_t usb_task;
 static QueueHandle_t pairing_queue;
+static QueueHandle_t pairing_touch_queue;
 static atomic_bool pairing_overflow;
+static kvm_display_pairing_t display_pairing;
 
-static bool pair_begin(void *context) { (void)context; return hid_guest_request_pair_begin(); }
-static bool pair_cancel(void *context) { (void)context; return hid_guest_request_pair_cancel(); }
+static bool pair_begin(void *context)
+{
+    (void)context;
+    if (display_pairing.state == KVM_DISPLAY_PAIRING_WAITING ||
+        display_pairing.state == KVM_DISPLAY_PAIRING_CHALLENGE) return false;
+    if (!hid_guest_request_pair_begin()) return false;
+    kvm_display_pairing_started(&display_pairing, false, (uint64_t)esp_timer_get_time() / 1000);
+    return true;
+}
+static bool pair_cancel(void *context)
+{
+    (void)context;
+    if (display_pairing.local_owner || !hid_guest_request_pair_cancel()) return false;
+    kvm_display_pairing_clear(&display_pairing);
+    return true;
+}
 static bool pair_reply(void *context, uint32_t id, bool approved)
-{ (void)context; return hid_guest_request_pair_reply(id, approved); }
+{
+    (void)context;
+    if (display_pairing.local_owner || !hid_guest_request_pair_reply(id, approved)) return false;
+    kvm_display_pairing_replied(&display_pairing, approved);
+    return true;
+}
 static bool pair_forget(void *context, const uint8_t token[16])
 { (void)context; return hid_guest_request_forget_bond(token); }
 static bool pair_inventory(void *context, uint8_t tokens[8][16], uint8_t *count)
@@ -68,6 +90,7 @@ static bool drain_pairing_events(void)
         disconnected = true;
         if (router.slot || router.armed) kvm_router_emergency_release(&router);
         (void)hid_guest_request_pair_cancel();
+        kvm_display_pairing_clear(&display_pairing);
         kvm_transport_core_pairing_event(&core, KVM_PAIRING_REJECTED, 0, 0, 0);
         return disconnected;
     }
@@ -87,10 +110,50 @@ static bool drain_pairing_events(void)
         case HID_GUEST_PAIRING_TIMEOUT: state = KVM_PAIRING_TIMEOUT; break;
         default: state = KVM_PAIRING_CLOSED; break;
         }
+        if (event.type == HID_GUEST_PAIRING_OPENED) {
+            if (display_pairing.state == KVM_DISPLAY_PAIRING_CLOSED)
+                kvm_display_pairing_started(&display_pairing, false,
+                                            (uint64_t)esp_timer_get_time() / 1000);
+        } else {
+            (void)kvm_display_pairing_event(&display_pairing,
+                (kvm_display_pairing_state_t)state, event.challenge_id,
+                event.number, event.deadline_ms,
+                (uint64_t)esp_timer_get_time() / 1000);
+        }
         kvm_transport_core_pairing_event(&core, state, event.challenge_id,
                                          event.number, event.deadline_ms);
     }
     return disconnected;
+}
+
+void kvm_transport_pairing_touch(kvm_display_pair_request_t request)
+{
+    if (pairing_touch_queue) (void)xQueueSend(pairing_touch_queue, &request, 0);
+}
+
+static void drain_pairing_touch(uint64_t time_ms)
+{
+    kvm_display_pair_request_t request;
+    while (xQueueReceive(pairing_touch_queue, &request, 0) == pdTRUE) {
+        if (!kvm_display_pairing_accept(&display_pairing, request, time_ms)) continue;
+        switch (request.action) {
+        case KVM_DISPLAY_PAIR_BEGIN:
+            if (hid_guest_request_pair_begin())
+                kvm_display_pairing_started(&display_pairing, true, time_ms);
+            break;
+        case KVM_DISPLAY_PAIR_CANCEL:
+            if (hid_guest_request_pair_cancel()) kvm_display_pairing_clear(&display_pairing);
+            break;
+        case KVM_DISPLAY_PAIR_APPROVE:
+        case KVM_DISPLAY_PAIR_REJECT:
+            if (hid_guest_request_pair_reply(request.challenge_id,
+                    request.action == KVM_DISPLAY_PAIR_APPROVE))
+                kvm_display_pairing_replied(&display_pairing,
+                    request.action == KVM_DISPLAY_PAIR_APPROVE);
+            break;
+        default: break;
+        }
+    }
 }
 
 void kvm_transport_button_event(kvm_display_event_t event)
@@ -106,6 +169,13 @@ static void publish_status(bool connected, bool guest_ready)
     kvm_display_status_t status;
     kvm_transport_display_status(&core, &router, connected, guest_ready,
                                  (uint64_t)(esp_timer_get_time() / 1000), &status);
+    if (display_pairing.state != KVM_DISPLAY_PAIRING_CLOSED) {
+        status.pairing_state = display_pairing.state;
+        status.pairing_local_owner = display_pairing.local_owner;
+        status.pairing_challenge_id = display_pairing.challenge_id;
+        status.pairing_number = display_pairing.number;
+        status.pairing_deadline_ms = display_pairing.deadline_ms;
+    }
     kvm_display_post_status(&status);
 }
 
@@ -150,6 +220,8 @@ static void usb_worker(void *context)
         (void)xTaskNotifyWait(0, UINT32_MAX, &button_bits, 0);
         if (button_bits & 2u) {
             (void)hid_guest_request_pair_cancel();
+            (void)xQueueReset(pairing_touch_queue);
+            kvm_display_pairing_clear(&display_pairing);
             kvm_router_emergency_release(&router);
             kvm_transport_core_reset(&core);
             was_connected = false;
@@ -157,6 +229,8 @@ static void usb_worker(void *context)
         bool connected = usb_serial_jtag_is_connected();
         uint64_t time_ms = now_ms(NULL);
         if (drain_pairing_events()) ready_sampled = false;
+        kvm_display_pairing_expire(&display_pairing, time_ms);
+        if (!(button_bits & 2u)) drain_pairing_touch(time_ms);
         if (!ready_sampled || time_ms < last_ready_ms || time_ms - last_ready_ms >= 1000) {
             hid_guest_slot_snapshot_t sampled[HID_GATT_MAX_CONNECTIONS];
             bool valid = hid_guest_request_slots(sampled);
@@ -178,7 +252,10 @@ static void usb_worker(void *context)
         }
         if (!connected) {
             if (was_connected) {
-                (void)hid_guest_request_pair_cancel();
+                if (!display_pairing.local_owner) {
+                    (void)hid_guest_request_pair_cancel();
+                    kvm_display_pairing_clear(&display_pairing);
+                }
                 kvm_transport_core_reset(&core);
             }
             was_connected = false;
@@ -222,12 +299,21 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }
+    pairing_touch_queue = xQueueCreate(4, sizeof(kvm_display_pair_request_t));
+    if (!pairing_touch_queue) {
+        vQueueDelete(pairing_queue);
+        pairing_queue = NULL;
+        (void)usb_serial_jtag_driver_uninstall();
+        return ESP_ERR_NO_MEM;
+    }
     hid_guest_pairing_set_events(pairing_event, NULL);
     kvm_router_init(&router, kvm_router_hid_output(), NULL);
     if (xTaskCreate(usb_worker, "kvm_usb_loopback", KVM_USB_TASK_STACK, NULL, 10, &usb_task) != pdPASS) {
         hid_guest_pairing_set_events(NULL, NULL);
         vQueueDelete(pairing_queue);
+        vQueueDelete(pairing_touch_queue);
         pairing_queue = NULL;
+        pairing_touch_queue = NULL;
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }

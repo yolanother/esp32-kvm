@@ -12,7 +12,7 @@ $out = Join-Path $env:TEMP 'esp32-kvm-display-test'
 New-Item -ItemType Directory -Path $out -Force | Out-Null
 $includes = @("/I$($msvc.FullName)/include", "/I$($kit.FullName)/ucrt", "/I$repo/firmware/components/display")
 $libs = @("/LIBPATH:$($msvc.FullName)/lib/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/um/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/ucrt/x64")
-& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 @includes (Join-Path $PSScriptRoot 'test_display_model.c') (Join-Path $repo 'firmware/components/display/display_model.c') "/Fo:$out/" "/Fe:$out/test_display_model.exe" /link @libs
+& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 @includes (Join-Path $PSScriptRoot 'test_display_model.c') (Join-Path $repo 'firmware/components/display/display_model.c') (Join-Path $repo 'firmware/components/display/display_pairing.c') "/Fo:$out/" "/Fe:$out/test_display_model.exe" /link @libs
 if ($LASTEXITCODE -ne 0) { throw 'Display model compile failed' }
 & (Join-Path $out 'test_display_model.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Display model tests failed' }

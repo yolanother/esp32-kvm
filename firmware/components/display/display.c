@@ -2,15 +2,19 @@
  * Drives the Waveshare 240-by-240 ST7789 through ESP-IDF LCD and LVGL, using
  * small DMA draw buffers and a low-rate derived screen update. The panel stays
  * opt-in behind a validated board profile. A separate GPIO sampler emits BOOT
- * emergency events even if panel startup fails; PLUS and touch remain disabled. */
+ * emergency events even if panel startup fails. Validated CST816 touches send
+ * exact pairing requests through the transport worker; no touch routes HID. */
 #include "display.h"
 #include <stdio.h>
 #include <string.h>
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "driver/i2c_master.h"
 #include "esp_lcd_io_spi.h"
+#include "esp_lcd_io_i2c.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
+#include "esp_lcd_touch_cst816s.h"
 #include "esp_lvgl_port.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -24,16 +28,86 @@
 #define BACKLIGHT_GPIO GPIO_NUM_46
 
 static kvm_display_event_fn event_callback;
+static kvm_display_pair_fn pair_callback;
 static kvm_display_status_t latest_status;
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool started;
 static bool panel_started;
 static bool backlight_started;
+static bool touch_started;
+static esp_lcd_touch_handle_t touch_handle;
+static TaskHandle_t display_task;
 static lv_obj_t *title_label;
 static lv_obj_t *primary_label;
 static lv_obj_t *detail_label;
 static lv_obj_t *footer_label;
 static lv_obj_t *row_labels[3];
+static lv_obj_t *left_action;
+static lv_obj_t *right_action;
+
+static void touch_interrupt(esp_lcd_touch_handle_t touch)
+{
+    (void)touch;
+    if (!display_task) return;
+    BaseType_t wake = pdFALSE;
+    vTaskNotifyGiveFromISR(display_task, &wake);
+    if (wake) portYIELD_FROM_ISR();
+}
+
+static bool init_touch(void)
+{
+#if CONFIG_KVM_DISPLAY_CST816_TOUCH_VERIFIED
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_NUM_0, .sda_io_num = GPIO_NUM_42, .scl_io_num = GPIO_NUM_41,
+        .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t bus;
+    if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK) return false;
+    esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_CST816S_CONFIG();
+    esp_lcd_panel_io_handle_t io;
+    if (esp_lcd_new_panel_io_i2c(bus, &io_cfg, &io) != ESP_OK) return false;
+    esp_lcd_touch_config_t cfg = {
+        .x_max = LCD_WIDTH, .y_max = LCD_HEIGHT,
+        .rst_gpio_num = GPIO_NUM_47, .int_gpio_num = GPIO_NUM_48,
+        .levels = {.reset = 0, .interrupt = 0},
+        .flags = {.swap_xy = false, .mirror_x = false, .mirror_y = false},
+        .interrupt_callback = touch_interrupt,
+    };
+    if (esp_lcd_touch_new_i2c_cst816s(io, &cfg, &touch_handle) != ESP_OK)
+        return false;
+    return true;
+#else
+    return false;
+#endif
+}
+
+static lv_obj_t *make_action(lv_obj_t *screen, int16_t x, int16_t width)
+{
+    lv_obj_t *box = lv_obj_create(screen);
+    lv_obj_set_size(box, width, 46);
+    lv_obj_align(box, LV_ALIGN_TOP_LEFT, x, 160);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x193c48), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x75e2c3), 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_radius(box, 6, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    return box;
+}
+
+static void set_action(lv_obj_t *box, const char *label)
+{
+    lv_obj_clean(box);
+    if (!label) {
+        lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *text = lv_label_create(box);
+    lv_label_set_text(text, label);
+    lv_obj_set_style_text_color(text, lv_color_hex(0xeef5f7), 0);
+    lv_obj_center(text);
+}
 
 static lv_obj_t *make_label(lv_obj_t *screen, int16_t y, uint32_t color)
 {
@@ -119,7 +193,12 @@ static esp_err_t init_panel(void)
     footer_label = make_label(screen, 210, 0x75e2c3);
     for (unsigned i = 0; i < 3; ++i)
         row_labels[i] = make_label(screen, 64 + 44 * i, 0xeef5f7);
+    left_action = make_action(screen, 12, 103);
+    right_action = make_action(screen, 125, 103);
+    lv_obj_add_flag(left_action, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(right_action, LV_OBJ_FLAG_HIDDEN);
     lvgl_port_unlock();
+    touch_started = pair_callback && init_touch();
     panel_started = true;
     return ESP_OK;
 }
@@ -133,6 +212,7 @@ static void display_worker(void *context)
         portENTER_CRITICAL(&status_lock);
         next = latest_status;
         portEXIT_CRITICAL(&status_lock);
+        next.touch_available = touch_started;
         kvm_display_view_t view;
         kvm_display_make_view(&next, (uint64_t)esp_timer_get_time() / 1000, &view);
         if (panel_started && memcmp(&shown, &view, sizeof(view)) != 0 && lvgl_port_lock(20)) {
@@ -147,19 +227,62 @@ static void display_worker(void *context)
             lv_label_set_text(footer_label, view.footer);
             for (unsigned i = 0; i < 3; ++i)
                 lv_label_set_text(row_labels[i], view.rows[i]);
+            if (touch_started && !next.recovery_required && !next.updating &&
+                !next.fault && !next.armed) {
+                switch (next.pairing_state) {
+                case KVM_DISPLAY_PAIRING_CLOSED:
+                case KVM_DISPLAY_PAIRING_REJECTED:
+                case KVM_DISPLAY_PAIRING_TIMEOUT:
+                    set_action(left_action, "START PAIRING");
+                    set_action(right_action, NULL);
+                    lv_obj_set_width(left_action, 216);
+                    break;
+                case KVM_DISPLAY_PAIRING_WAITING:
+                    set_action(left_action, next.pairing_local_owner ? "CANCEL" : NULL);
+                    set_action(right_action, NULL);
+                    lv_obj_set_width(left_action, 216);
+                    break;
+                case KVM_DISPLAY_PAIRING_CHALLENGE:
+                    lv_obj_set_width(left_action, 103);
+                    set_action(left_action, next.pairing_local_owner ? "REJECT" : NULL);
+                    set_action(right_action, next.pairing_local_owner ? "APPROVE" : NULL);
+                    break;
+                default:
+                    set_action(left_action, NULL);
+                    set_action(right_action, NULL);
+                    break;
+                }
+            } else {
+                set_action(left_action, NULL);
+                set_action(right_action, NULL);
+            }
             shown = view;
             lvgl_port_unlock();
             if (!backlight_started && gpio_set_level(BACKLIGHT_GPIO, 1) == ESP_OK)
                 backlight_started = true;
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) && touch_started &&
+            esp_lcd_touch_read_data(touch_handle) == ESP_OK) {
+            esp_lcd_touch_point_data_t point;
+            uint8_t count = 0;
+            if (esp_lcd_touch_get_data(touch_handle, &point, &count, 1) == ESP_OK && count) {
+                kvm_display_pair_action_t action;
+                kvm_display_pair_request_t request;
+                if (kvm_display_pair_touch_action(&next, point.x, point.y, &action) &&
+                    kvm_display_pair_request(&next, (uint64_t)esp_timer_get_time() / 1000,
+                                             action, &request) && pair_callback)
+                    pair_callback(request);
+            }
+        }
     }
 }
 
-esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn)
+esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn,
+                            kvm_display_pair_fn pair_fn)
 {
     if (started) return ESP_ERR_INVALID_STATE;
     event_callback = event_fn;
+    pair_callback = pair_fn;
     gpio_config_t boot_cfg = {
         .pin_bit_mask = 1ULL << BOOT_GPIO, .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
@@ -171,7 +294,7 @@ esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn)
     started = true;
     if (!enable_panel) return ESP_OK;
     if ((err = init_panel()) != ESP_OK) return err;
-    if (xTaskCreate(display_worker, "kvm_display", 4096, NULL, 4, NULL) != pdPASS)
+    if (xTaskCreate(display_worker, "kvm_display", 4096, NULL, 4, &display_task) != pdPASS)
         return ESP_ERR_NO_MEM;
     return ESP_OK;
 }

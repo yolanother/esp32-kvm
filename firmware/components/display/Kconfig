@@ -13,4 +13,13 @@ menu "ESP32 KVM device screen"
             and GPIO46 backlight output. The default keeps the panel off while
             preserving BOOT emergency sampling and USB/BLE routing.
 
+    config KVM_DISPLAY_CST816_TOUCH_VERIFIED
+        bool "Enable physically validated CST816 touch for on-device pairing"
+        depends on KVM_DISPLAY_WAVESHARE_TOUCH_154_VERIFIED
+        default n
+        help
+            Select only after validating CST816 I2C pins, touch orientation,
+            and button hit regions on this PCB revision. Default-off touch
+            prevents an unvalidated press from approving a BLE challenge.
+
 endmenu

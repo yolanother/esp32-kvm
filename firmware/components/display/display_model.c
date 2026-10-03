@@ -29,7 +29,7 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         snprintf(v->primary, sizeof(v->primary), "%u%%",
                  s->update_percent > 100 ? 100u : s->update_percent);
         COPY_TEXT(v->detail, "Do not unplug");
-    } else if (!s->usb_connected || s->fault || (s->armed && !s->guest_ready)) {
+    } else if (s->fault || (s->armed && !s->guest_ready)) {
         v->screen = KVM_DISPLAY_PAUSED;
         COPY_TEXT(v->title, s->armed && !s->guest_ready ? "ROUTING FAULT" : "LOCAL CONTROL");
         COPY_TEXT(v->primary, "INPUT PAUSED");
@@ -46,7 +46,8 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
             snprintf(v->primary, sizeof(v->primary), "%06u", (unsigned)s->pairing_number);
             snprintf(v->detail, sizeof(v->detail), "%llus remaining",
                      (unsigned long long)((s->pairing_deadline_ms - now_ms + 999u) / 1000u));
-            COPY_TEXT(v->footer, "Compare on guest and host");
+            COPY_TEXT(v->footer, s->pairing_local_owner ?
+                      "Compare, then approve or reject" : "Compare and confirm on host");
         } else if (s->pairing_state == KVM_DISPLAY_PAIRING_WAITING &&
                    s->pairing_deadline_ms > now_ms) {
             COPY_TEXT(v->primary, "WAITING FOR GUEST");
@@ -55,14 +56,21 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
             COPY_TEXT(v->footer, "Open guest Bluetooth settings");
         } else if (s->pairing_state == KVM_DISPLAY_PAIRING_REJECTED) {
             COPY_TEXT(v->primary, "PAIRING REJECTED");
-            COPY_TEXT(v->detail, "Retry from host");
+            COPY_TEXT(v->detail, "Retry pairing");
         } else if (s->pairing_state == KVM_DISPLAY_PAIRING_CAPACITY) {
             COPY_TEXT(v->primary, "NO FREE SLOTS");
             COPY_TEXT(v->detail, "Manage guests on host");
         } else {
             COPY_TEXT(v->primary, "PAIRING EXPIRED");
-            COPY_TEXT(v->detail, "Retry from host");
+            COPY_TEXT(v->detail, "Retry pairing");
         }
+    } else if (!s->usb_connected) {
+        v->screen = KVM_DISPLAY_PAUSED;
+        COPY_TEXT(v->title, "LOCAL CONTROL");
+        COPY_TEXT(v->primary, "INPUT PAUSED");
+        COPY_TEXT(v->detail, "USB disconnected");
+        COPY_TEXT(v->footer, s->touch_available ? "Pair here or reconnect host" :
+                  "Reconnect host to resume");
     } else if (s->show_guest_list) {
         v->screen = KVM_DISPLAY_GUEST_LIST;
         COPY_TEXT(v->title, "GUESTS");
@@ -81,6 +89,61 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         snprintf(v->detail, sizeof(v->detail), "USB online | %u guest%s",
                  s->guest_slots, s->guest_slots == 1 ? "" : "s");
         COPY_TEXT(v->footer, "Control changes via host");
+    }
+}
+
+bool kvm_display_pair_request(const kvm_display_status_t *s, uint64_t now_ms,
+                              kvm_display_pair_action_t action,
+                              kvm_display_pair_request_t *request)
+{
+    if (!request) return false;
+    memset(request, 0, sizeof(*request));
+    if (!s || !s->touch_available || s->fault || s->recovery_required ||
+        s->updating || s->armed) return false;
+    switch (action) {
+    case KVM_DISPLAY_PAIR_BEGIN:
+        if (s->pairing_state != KVM_DISPLAY_PAIRING_CLOSED &&
+            s->pairing_state != KVM_DISPLAY_PAIRING_REJECTED &&
+            s->pairing_state != KVM_DISPLAY_PAIRING_TIMEOUT) return false;
+        break;
+    case KVM_DISPLAY_PAIR_CANCEL:
+        if (!s->pairing_local_owner || s->pairing_state != KVM_DISPLAY_PAIRING_WAITING ||
+            s->pairing_deadline_ms <= now_ms) return false;
+        break;
+    case KVM_DISPLAY_PAIR_APPROVE:
+    case KVM_DISPLAY_PAIR_REJECT:
+        if (!s->pairing_local_owner || s->pairing_state != KVM_DISPLAY_PAIRING_CHALLENGE ||
+            !s->pairing_challenge_id || s->pairing_number > 999999u ||
+            s->pairing_deadline_ms <= now_ms) return false;
+        request->challenge_id = s->pairing_challenge_id;
+        break;
+    default: return false;
+    }
+    request->action = action;
+    return true;
+}
+
+bool kvm_display_pair_touch_action(const kvm_display_status_t *s,
+                                   uint16_t x, uint16_t y,
+                                   kvm_display_pair_action_t *action)
+{
+    if (!s || !action || !s->touch_available || s->fault || s->armed ||
+        s->updating || s->recovery_required || x < 12u || x >= 228u ||
+        y < 160u || y >= 206u) return false;
+    switch (s->pairing_state) {
+    case KVM_DISPLAY_PAIRING_CLOSED:
+    case KVM_DISPLAY_PAIRING_REJECTED:
+    case KVM_DISPLAY_PAIRING_TIMEOUT:
+        *action = KVM_DISPLAY_PAIR_BEGIN; return true;
+    case KVM_DISPLAY_PAIRING_WAITING:
+        if (!s->pairing_local_owner) return false;
+        *action = KVM_DISPLAY_PAIR_CANCEL; return true;
+    case KVM_DISPLAY_PAIRING_CHALLENGE:
+        if (!s->pairing_local_owner) return false;
+        if (x >= 115u && x < 125u) return false;
+        *action = x < 115u ? KVM_DISPLAY_PAIR_REJECT : KVM_DISPLAY_PAIR_APPROVE;
+        return true;
+    default: return false;
     }
 }
 
