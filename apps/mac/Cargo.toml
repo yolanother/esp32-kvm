@@ -1,0 +1,12 @@
+# Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
+# Builds the macOS USB host command-line client that routes physical input through the shared host actor.
+[package]
+name = "esp32-kvm-mac"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+
+[dependencies]
+esp32-kvm-host-actor = { path = "../../crates/host-actor" }
+esp32-kvm-input-core = { path = "../../crates/input-core" }
+esp32-kvm-platform-windows = { path = "../../crates/platform-windows" }

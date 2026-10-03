@@ -776,6 +776,15 @@ name = "esp32-kvm-input-core"
 version = "0.1.0"
 
 [[package]]
+name = "esp32-kvm-mac"
+version = "0.1.0"
+dependencies = [
+ "esp32-kvm-host-actor",
+ "esp32-kvm-input-core",
+ "esp32-kvm-platform-windows",
+]
+
+[[package]]
 name = "esp32-kvm-platform-windows"
 version = "0.1.0"
 dependencies = [
