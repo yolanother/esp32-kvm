@@ -84,10 +84,8 @@ not present the sequence as verified until that drill passes.
 `python -B -m unittest discover -s tests/release -v` runs offline packaging
 tests for deterministic outputs/checksums, embedded image identity, valid ICO,
 and rejected invalid inputs. An unsigned Windows MSI was built locally with
-Tauri's `--ignore-version-mismatches` flag while Rust Tauri 2.12.0 and the
-installed JavaScript API 2.10.1 were out of alignment; align those packages
-and rebuild before any release. A real
-release additionally needs: pinned ESP-IDF app build, Windows installer build
+matching Rust and JavaScript Tauri 2.12.0 packages, without a version override.
+A real release additionally needs: pinned ESP-IDF app build, Windows installer build
 and clean-machine install/upgrade/uninstall test, code-signature verification
 or an explicit unsigned label, USB update/re-enumeration with bonds preserved,
 interrupted-update recovery, and physical BOOT recovery. M2 validation in
