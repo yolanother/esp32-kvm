@@ -10,8 +10,12 @@ publisher authenticity.
 ## Inputs and command
 
 Build the firmware with the pinned ESP-IDF toolchain and obtain the app binary
-from `firmware/build/esp32_kvm.bin`. Build the Windows desktop installer from
-the Tauri project and locate its `.msi` or `.exe` bundle. The installer filename
+from `firmware/build/esp32_kvm.bin`. The Tauri desktop configuration now enables
+an MSI bundle and uses the generated four-size `icons/icon.ico`. After restoring
+the frontend dependencies with the project's approved build workflow, run
+`cargo tauri build --bundles msi --ci --no-sign` from `apps/desktop` and locate
+its `.msi` bundle. `--no-sign` must be reflected in release notes; signing
+status in `release.json` remains `unverified`. The installer filename
 must contain the desktop Cargo version. Then run, for example:
 
 ```powershell
@@ -71,7 +75,10 @@ not present the sequence as verified until that drill passes.
 ## Verification and remaining gates
 
 `python -m unittest discover -s tests/release -v` runs offline packaging
-tests for deterministic outputs/checksums and rejected invalid inputs. A real
+tests for deterministic outputs/checksums, embedded image identity, valid ICO,
+and rejected invalid inputs. The isolated worktree's unsigned Tauri build
+reached `beforeBuildCommand` but stopped because frontend dependencies were
+absent (`tsc` was not found); it produced no MSI. A real
 release additionally needs: pinned ESP-IDF app build, Windows installer build
 and clean-machine install/upgrade/uninstall test, code-signature verification
 or an explicit unsigned label, USB update/re-enumeration with bonds preserved,
