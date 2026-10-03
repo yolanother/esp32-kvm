@@ -756,6 +756,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp32-kvm-helper-session"
+version = "0.1.0"
+
+[[package]]
 name = "esp32-kvm-host-actor"
 version = "0.1.0"
 dependencies = [

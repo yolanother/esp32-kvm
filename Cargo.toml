@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/desktop/src-tauri", "crates/edge-policy", "crates/host-actor", "crates/input-core", "crates/platform-windows", "crates/protocol", "crates/topology-core", "crates/update-core", "crates/usb-transport"]
+members = ["apps/desktop/src-tauri", "crates/edge-policy", "crates/helper-session", "crates/host-actor", "crates/input-core", "crates/platform-windows", "crates/protocol", "crates/topology-core", "crates/update-core", "crates/usb-transport"]
 resolver = "2"
 
 [workspace.package]

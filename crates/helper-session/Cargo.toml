@@ -5,6 +5,3 @@ name = "esp32-kvm-helper-session"
 version = "0.1.0"
 edition = "2024"
 license-file = "../../LICENSE"
-
-# This source-only leaf builds independently until the coordinator adds it to the root workspace.
-[workspace]
