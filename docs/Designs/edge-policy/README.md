@@ -50,5 +50,4 @@ cargo clippy --offline --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The crate-local `[workspace]` entry is for isolated source verification. The
-coordinator removes it and adds the crate to the root workspace on integration.
+The crate is a member of the root Rust workspace.
