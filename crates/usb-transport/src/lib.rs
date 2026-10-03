@@ -1,10 +1,11 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
 // Discovers USB serial candidates by hardware identity and confirms an ESP32 KVM
-// device through a bounded, framed protocol handshake before exposing a session.
+// device through a bounded, framed protocol handshake. It negotiates minor-one
+// pairing support and preserves the verified firmware version for setup UI.
 
 #![forbid(unsafe_code)]
 
-use esp32_kvm_protocol::{Frame, FrameDecoder, MessageKind, ProtocolError};
+use esp32_kvm_protocol::{Frame, FrameDecoder, MINOR, MessageKind, ProtocolError};
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
@@ -82,6 +83,10 @@ pub struct ConfirmedDevice {
     pub max_connections: u8,
     /// Maximum retained bonds advertised by firmware.
     pub max_bonds: u8,
+    /// Firmware version from validated CAPS.
+    pub firmware_version: String,
+    /// Explicitly selected compatible minor version for STATUS interpretation.
+    pub negotiated_minor: u16,
 }
 
 /// Outcome for one USB identity candidate, including mismatched firmware.
@@ -176,12 +181,40 @@ pub fn probe_stream<S: Read + Write + ?Sized>(
     if caps_frame.kind != MessageKind::Caps {
         return Err(ProbeError::UnexpectedResponse);
     }
-    let caps = parse_caps(&caps_frame)?;
+    let mut caps = parse_caps(&caps_frame)?;
     if caps.board_id != expected_board_id {
         return Err(ProbeError::BoardMismatch);
     }
     if caps.min_minor > 0 || caps.max_minor < caps.min_minor {
         return Err(ProbeError::VersionMismatch);
+    }
+    let negotiated_minor = u16::try_from(caps.max_minor.min(u64::from(MINOR)))
+        .map_err(|_| ProbeError::VersionMismatch)?;
+    if negotiated_minor > 0 {
+        send(
+            stream,
+            &Frame::new(
+                MessageKind::Hello,
+                0,
+                0,
+                0,
+                vec![negotiated_minor as u8, 0, 0, 0, 0, 0],
+            ),
+        )?;
+        let upgraded = receive(stream, deadline)?;
+        if upgraded.kind != MessageKind::Caps {
+            return Err(ProbeError::UnexpectedResponse);
+        }
+        let next = parse_caps(&upgraded)?;
+        if next.board_id != caps.board_id
+            || next.session_id != caps.session_id
+            || next.firmware_version != caps.firmware_version
+            || next.min_minor > u64::from(negotiated_minor)
+            || next.max_minor < u64::from(negotiated_minor)
+        {
+            return Err(ProbeError::VersionMismatch);
+        }
+        caps = next;
     }
 
     let mut payload = Vec::with_capacity(host_version.len() + 6);
@@ -205,6 +238,8 @@ pub fn probe_stream<S: Read + Write + ?Sized>(
         session_id: caps.session_id,
         max_connections: caps.max_connections,
         max_bonds: caps.max_bonds,
+        firmware_version: caps.firmware_version,
+        negotiated_minor,
     })
 }
 
@@ -251,6 +286,7 @@ fn map_io(e: io::Error) -> ProbeError {
 }
 
 struct Caps {
+    firmware_version: String,
     board_id: String,
     session_id: u64,
     min_minor: u64,
@@ -268,7 +304,7 @@ fn parse_caps(frame: &Frame) -> Result<Caps, ProbeError> {
         return Err(ProbeError::UnexpectedResponse);
     }
     c.key(1)?;
-    let _version = c.text()?;
+    let firmware_version = c.text()?.to_owned();
     c.key(2)?;
     let board_id = c.text()?.to_owned();
     c.key(3)?;
@@ -287,6 +323,7 @@ fn parse_caps(frame: &Frame) -> Result<Caps, ProbeError> {
         return Err(ProbeError::UnexpectedResponse);
     }
     Ok(Caps {
+        firmware_version,
         board_id,
         session_id,
         min_minor,

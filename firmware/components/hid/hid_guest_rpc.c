@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Serializes bounded HID ready, arm, release, and report requests from the
  * USB worker onto NimBLE's host loop. A timed-out request fails closed and
- * queues a disconnect; no HID channel state is read on the USB worker. */
+ * queues a disconnect; pairing commands use the same bounded host-loop bridge
+ * and no HID or pairing state is read on the USB worker. */
 #include "hid_guest.h"
 #include "hid_guest_rpc.h"
 #include <string.h>
@@ -10,8 +11,10 @@
 #include "hid_gatt.h"
 
 #define RPC_TIMEOUT_MS 20u
-typedef enum { RPC_READY, RPC_ARM, RPC_RELEASE, RPC_KEYBOARD, RPC_MOUSE, RPC_CONSUMER } rpc_op_t;
+typedef enum { RPC_READY, RPC_ARM, RPC_RELEASE, RPC_KEYBOARD, RPC_MOUSE, RPC_CONSUMER,
+               RPC_PAIR_BEGIN, RPC_PAIR_CANCEL, RPC_PAIR_REPLY } rpc_op_t;
 typedef struct { uint8_t buttons; int16_t dx, dy; int8_t wheel, pan; } mouse_args_t;
+typedef struct { uint32_t challenge_id; bool approved; } pair_reply_args_t;
 typedef struct {
     struct ble_npl_event event;
     struct ble_npl_mutex mutex;
@@ -28,6 +31,7 @@ typedef struct {
     int16_t dx, dy;
     int8_t wheel, pan;
     uint16_t usage;
+    pair_reply_args_t pair_reply;
 } rpc_state_t;
 static rpc_state_t rpc;
 
@@ -57,6 +61,12 @@ static void on_host(struct ble_npl_event *event)
         case RPC_MOUSE: rpc.result = hid_channel_mouse(channel, rpc.buttons, rpc.dx, rpc.dy,
                                                        rpc.wheel, rpc.pan); break;
         case RPC_CONSUMER: rpc.result = hid_channel_consumer(channel, rpc.usage); break;
+        case RPC_PAIR_BEGIN: rpc.result = hid_guest_pairing_open() == ESP_OK; break;
+        case RPC_PAIR_CANCEL: hid_guest_pairing_cancel(); rpc.result = true; break;
+        case RPC_PAIR_REPLY:
+            rpc.result = hid_guest_pairing_confirm(rpc.pair_reply.challenge_id,
+                                                    rpc.pair_reply.approved) == ESP_OK;
+            break;
         }
         if (channel->needs_disconnect && channel->connected)
             hid_guest_disconnect_current();
@@ -94,6 +104,7 @@ static bool request(rpc_op_t operation, const void *payload)
         rpc.buttons = mouse->buttons; rpc.dx = mouse->dx; rpc.dy = mouse->dy;
         rpc.wheel = mouse->wheel; rpc.pan = mouse->pan;
     } else if (operation == RPC_CONSUMER) rpc.usage = *(const uint16_t *)payload;
+    else if (operation == RPC_PAIR_REPLY) rpc.pair_reply = *(const pair_reply_args_t *)payload;
     ble_npl_mutex_release(&rpc.mutex);
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &rpc.event);
     bool completed = ble_npl_sem_pend(&rpc.completion,
@@ -125,3 +136,10 @@ bool hid_guest_request_mouse(uint8_t buttons, int16_t dx, int16_t dy,
     return request(RPC_MOUSE, &mouse);
 }
 bool hid_guest_request_consumer(uint16_t usage) { return request(RPC_CONSUMER, &usage); }
+bool hid_guest_request_pair_begin(void) { return request(RPC_PAIR_BEGIN, NULL); }
+bool hid_guest_request_pair_cancel(void) { return request(RPC_PAIR_CANCEL, NULL); }
+bool hid_guest_request_pair_reply(uint32_t challenge_id, bool approved)
+{
+    const pair_reply_args_t args = {challenge_id, approved};
+    return request(RPC_PAIR_REPLY, &args);
+}

@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
  * Bridges binary framed routing traffic through ESP32-S3 USB Serial/JTAG CDC.
  * One worker serializes transport and router calls, rotates the session on
- * disconnect, and ticks the fail-local lease even when USB input is idle. */
+ * disconnect, ticks the fail-local lease, and queues NimBLE pairing events
+ * for serialized minor-one STATUS without reading HID state on this task. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "router_hid_bridge.h"
@@ -11,7 +12,9 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
+#include <stdatomic.h>
 #include "sdkconfig.h"
 
 #if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) && CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
@@ -31,6 +34,44 @@ static kvm_transport_core_t core;
 static kvm_router_t router;
 static bool started;
 static TaskHandle_t usb_task;
+static QueueHandle_t pairing_queue;
+static atomic_bool pairing_overflow;
+
+static bool pair_begin(void *context) { (void)context; return hid_guest_request_pair_begin(); }
+static bool pair_cancel(void *context) { (void)context; return hid_guest_request_pair_cancel(); }
+static bool pair_reply(void *context, uint32_t id, bool approved)
+{ (void)context; return hid_guest_request_pair_reply(id, approved); }
+
+static void pairing_event(const hid_guest_pairing_event_t *event, void *context)
+{
+    (void)context;
+    if (!pairing_queue || xQueueSend(pairing_queue, event, 0) != pdTRUE)
+        atomic_store(&pairing_overflow, true);
+}
+
+static void drain_pairing_events(void)
+{
+    hid_guest_pairing_event_t event;
+    if (atomic_exchange(&pairing_overflow, false)) {
+        (void)xQueueReset(pairing_queue);
+        (void)hid_guest_request_pair_cancel();
+        kvm_transport_core_pairing_event(&core, KVM_PAIRING_REJECTED, 0, 0, 0);
+        return;
+    }
+    while (xQueueReceive(pairing_queue, &event, 0) == pdTRUE) {
+        kvm_transport_pairing_state_t state;
+        switch (event.type) {
+        case HID_GUEST_PAIRING_OPENED: state = KVM_PAIRING_WAITING; break;
+        case HID_GUEST_PAIRING_CHALLENGE: state = KVM_PAIRING_CHALLENGE; break;
+        case HID_GUEST_PAIRING_REJECTED: state = KVM_PAIRING_REJECTED; break;
+        case HID_GUEST_PAIRING_CAPACITY: state = KVM_PAIRING_CAPACITY; break;
+        case HID_GUEST_PAIRING_TIMEOUT: state = KVM_PAIRING_TIMEOUT; break;
+        default: state = KVM_PAIRING_CLOSED; break;
+        }
+        kvm_transport_core_pairing_event(&core, state, event.challenge_id,
+                                         event.number, event.deadline_ms);
+    }
+}
 
 void kvm_transport_button_event(kvm_display_event_t event)
 {
@@ -91,18 +132,23 @@ static void usb_worker(void *context)
         uint32_t button_bits = 0;
         (void)xTaskNotifyWait(0, UINT32_MAX, &button_bits, 0);
         if (button_bits & 2u) {
+            (void)hid_guest_request_pair_cancel();
             kvm_router_emergency_release(&router);
             kvm_transport_core_reset(&core);
             was_connected = false;
         }
         bool connected = usb_serial_jtag_is_connected();
         uint64_t time_ms = now_ms(NULL);
+        drain_pairing_events();
         if (time_ms < last_ready_ms || time_ms - last_ready_ms >= 1000) {
             guest_ready = hid_guest_request_ready();
             last_ready_ms = time_ms;
         }
         if (!connected) {
-            if (was_connected) kvm_transport_core_reset(&core);
+            if (was_connected) {
+                (void)hid_guest_request_pair_cancel();
+                kvm_transport_core_reset(&core);
+            }
             was_connected = false;
             publish_status(false, guest_ready);
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -112,6 +158,8 @@ static void usb_worker(void *context)
             (void)kvm_transport_core_init(&core, "esp32-kvm-s3", "0.1.0-m1",
                                           new_session(), send_binary, NULL);
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
+            kvm_transport_core_bind_pairing(&core,
+                (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply}, NULL);
             was_connected = true;
         }
         int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(20));
@@ -132,8 +180,17 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     };
     esp_err_t result = usb_serial_jtag_driver_install(&config);
     if (result != ESP_OK) return result;
+    pairing_queue = xQueueCreate(8, sizeof(hid_guest_pairing_event_t));
+    if (!pairing_queue) {
+        (void)usb_serial_jtag_driver_uninstall();
+        return ESP_ERR_NO_MEM;
+    }
+    hid_guest_pairing_set_events(pairing_event, NULL);
     kvm_router_init(&router, kvm_router_hid_output(), NULL);
     if (xTaskCreate(usb_worker, "kvm_usb_loopback", KVM_USB_TASK_STACK, NULL, 10, &usb_task) != pdPASS) {
+        hid_guest_pairing_set_events(NULL, NULL);
+        vQueueDelete(pairing_queue);
+        pairing_queue = NULL;
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }

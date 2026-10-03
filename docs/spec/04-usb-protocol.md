@@ -24,6 +24,7 @@ Discard malformed length/version/CRC/COBS frames without input effects; bounded 
 0x60 UPDATE_PREPARE: enter released/suspended state; actual flashing is toolchain-specific and negotiated separately.
 0x70 ACK; 0x71 NACK: original kind+seq, error code, resulting generation. Errors: VERSION, NOT_READY, STALE_SESSION, STALE_ROUTE, PAUSED, BAD_PAYLOAD, BUSY, UNSUPPORTED.
 0x72 INPUT_PROGRESS: highest input sequence accepted into router plus separately tracked last BLE-enqueued sequence; neither means the guest application consumed it.
+Minor 1 adds STATUS key 6, a canonical pairing map: state 0 closed, 1 waiting, 2 numeric challenge, 3 rejected, 4 bond capacity full, 5 timeout. Waiting and challenge include remaining milliseconds; challenge also includes a fresh nonzero ID and a value displayed as exactly six digits. The host derives its monotonic deadline from the remaining time, confirms only the currently displayed challenge ID, and discards the value after reply or expiry. The firmware executes pairing controls on NimBLE's host loop and sends pairing events through a bounded USB-worker queue. A queue overflow cancels pairing. Minor 0 hosts may continue routing but pairing controls are unsupported.
 Encode variable control payloads as canonical CBOR with integer-key schemas checked into protocol/schema; fixed input payloads use the layouts above. Limit maps/strings/counts as well as frame length. Reject missing required keys; ignore documented optional extension keys on compatible minor versions.
 
 ## Reliability

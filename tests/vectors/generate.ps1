@@ -58,11 +58,14 @@ function New-Frame([byte]$kind, [byte[]]$payload, [uint64]$session = 5, [uint32]
 
 $examples = @(
     @('hello-v1', 0x01, [byte[]](0,0,0,0,0,0), [uint64]0, [uint32]7, [uint32]0),
+    @('hello-m1', 0x01, [byte[]](1,0,0,0,0,0), [uint64]0, [uint32]8, [uint32]0),
     @('caps', 0x02, [byte[]](0xa8,1,0x61,0x31,2,0x61,0x62,3,0,4,0,5,1,6,1,7,0,8,5), [uint64]5, [uint32]1, [uint32]2),
+    @('caps-m1', 0x02, [byte[]](0xa8,1,0x61,0x31,2,0x61,0x62,3,0,4,1,5,1,6,8,7,0,8,5), [uint64]5, [uint32]8, [uint32]0),
     @('session-open', 0x03, [byte[]](0xa2,1,0x61,0x31,2,0), [uint64]5, [uint32]1, [uint32]2),
     @('heartbeat', 0x10, [byte[]](42,0,0,0,0,0,0,0), [uint64]5, [uint32]1, [uint32]2),
     @('get-status', 0x11, [byte[]]@(), [uint64]5, [uint32]1, [uint32]2),
     @('status', 0x12, [byte[]](0xa5,1,0,2,0,3,0x80,4,0,5,2), [uint64]5, [uint32]1, [uint32]2),
+    @('status-pairing-m1', 0x12, [byte[]](0xa6,1,5,2,0,3,0x80,4,0,5,0,6,0xa4,1,2,2,0x19,0xea,0x60,3,7,4,0x1a,0,1,0xe2,0x40), [uint64]5, [uint32]9, [uint32]0),
     @('switch', 0x20, [byte[]](1,2,0,0,0,3,0,0,0), [uint64]5, [uint32]1, [uint32]2),
     @('release-all', 0x21, [byte[]]@(), [uint64]5, [uint32]1, [uint32]2),
     @('arm', 0x22, [byte[]](1,2,0,0,0), [uint64]5, [uint32]1, [uint32]2),

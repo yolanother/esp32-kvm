@@ -16,6 +16,8 @@ pub const MAX_ENCODED: usize = MAX_FRAME + (MAX_FRAME / 254) + 2;
 pub const MAGIC: u16 = 0x4b56;
 /// Current incompatible protocol version.
 pub const MAJOR: u8 = 1;
+/// Highest compatible minor supported by this implementation.
+pub const MINOR: u16 = 1;
 
 /// Wire message kinds frozen for version one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +218,12 @@ pub fn validate_payload(kind: MessageKind, payload: &[u8]) -> Result<(), Protoco
         cbor::validate(kind, payload)?;
     }
     match kind {
+        Hello
+            if u16::from_le_bytes(payload[..2].try_into().unwrap()) > MINOR
+                || payload[2..] != [0, 0, 0, 0] =>
+        {
+            return Err(ProtocolError::Version);
+        }
         KeyState if payload[1] != 0 => return Err(ProtocolError::Payload),
         PairBegin if !(1..=60).contains(&u16::from_le_bytes(payload.try_into().unwrap())) => {
             return Err(ProtocolError::Payload);

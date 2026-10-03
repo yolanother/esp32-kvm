@@ -1,6 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
 // Owns the serialized native host USB session and routes capture events through
-// a verified protocol session, input policy, and fail-local capture gate.
+// a verified protocol session, input policy, fail-local capture gate, and
+// numeric pairing state reported by negotiated firmware STATUS.
 
 #![forbid(unsafe_code)]
 
@@ -134,6 +135,25 @@ pub enum HostState {
     Failed,
 }
 
+/// Pairing state reported by a minor-one firmware STATUS.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingStatus {
+    /// The device negotiated an older minor version.
+    Unsupported,
+    /// No pairing window is open.
+    Closed,
+    /// A bounded pairing window is open.
+    Waiting,
+    /// A fresh numeric comparison needs user approval.
+    Challenge,
+    /// The peer or user rejected pairing.
+    Rejected,
+    /// Bond storage has reached capacity.
+    Capacity,
+    /// The window or comparison expired.
+    Timeout,
+}
+
 /// Reason the host stopped trusting a USB session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostFault {
@@ -175,17 +195,19 @@ pub struct SetupSnapshot {
     pub max_connections: u8,
     /// Firmware advertised bond capacity.
     pub max_bonds: u8,
-    /// Firmware version is absent from the current CAPS schema.
+    /// Firmware version reported by verified CAPS.
     pub firmware_version: Option<String>,
+    /// Pairing state reported by STATUS after minor-one negotiation.
+    pub pairing_status: PairingStatus,
     /// Current actor state.
     pub state: HostState,
     /// Bond slots from the latest STATUS.
     pub slots: Vec<SlotSnapshot>,
-    /// Pairing deadline is absent from the current STATUS schema.
+    /// Host monotonic deadline derived from STATUS remaining time.
     pub pairing_deadline_ms: Option<u64>,
-    /// Challenge ID is absent from the current STATUS schema.
+    /// Fresh challenge ID when pairing status is Challenge.
     pub challenge_id: Option<u32>,
-    /// Six-digit numeric comparison is absent from the current STATUS schema.
+    /// Six-digit numeric comparison when pairing status is Challenge.
     pub comparison_value: Option<u32>,
     /// Terminal connection or protocol fault.
     pub fault: Option<HostFault>,
@@ -194,6 +216,8 @@ pub struct SetupSnapshot {
 /// A pairing command could not be safely sent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PairingError {
+    /// This device did not negotiate the pairing-status minor version.
+    Unsupported,
     /// A route or control transaction is already active.
     Busy,
     /// The actor is not in a local pairing-capable state.
@@ -231,6 +255,10 @@ pub struct HostActor<S: Read + Write> {
     baseline_sent: bool,
     fault: Option<HostFault>,
     pairing: bool,
+    pairing_status: PairingStatus,
+    pairing_deadline_ms: Option<u64>,
+    challenge_id: Option<u32>,
+    comparison_value: Option<u32>,
     slots: Vec<SlotSnapshot>,
     keys: BTreeMap<(u32, bool), SourceKey>,
     mapping: MappingEngine,
@@ -254,6 +282,7 @@ impl<S: Read + Write> HostActor<S> {
         if device.session_id == 0 {
             return Err(HostFault::Session);
         }
+        let pairing_supported = device.negotiated_minor >= 1;
         capture.disarm();
         let mut actor = Self {
             stream,
@@ -273,6 +302,14 @@ impl<S: Read + Write> HostActor<S> {
             baseline_sent: false,
             fault: None,
             pairing: false,
+            pairing_status: if pairing_supported {
+                PairingStatus::Closed
+            } else {
+                PairingStatus::Unsupported
+            },
+            pairing_deadline_ms: None,
+            challenge_id: None,
+            comparison_value: None,
             slots: Vec::new(),
             keys: BTreeMap::new(),
             mapping: MappingEngine::new(MappingProfile::default()).expect("empty profile is valid"),
@@ -330,19 +367,23 @@ impl<S: Read + Write> HostActor<S> {
             board_id: self.device.board_id.clone(),
             max_connections: self.device.max_connections,
             max_bonds: self.device.max_bonds,
-            firmware_version: None,
+            firmware_version: Some(self.device.firmware_version.clone()),
+            pairing_status: self.pairing_status,
             state: self.state(),
             slots: self.slots.clone(),
-            pairing_deadline_ms: None,
-            challenge_id: None,
-            comparison_value: None,
+            pairing_deadline_ms: self.pairing_deadline_ms,
+            challenge_id: self.challenge_id,
+            comparison_value: self.comparison_value,
             fault: self.fault,
         }
     }
 
     /// Begins a local pairing window through the actor's verified USB session.
     pub fn pair_begin(&mut self, duration_seconds: u16, now_ms: u64) -> Result<(), PairingError> {
-        if !(1..=60).contains(&duration_seconds) {
+        if self.device.negotiated_minor < 1 {
+            return Err(PairingError::Unsupported);
+        }
+        if duration_seconds != 60 {
             return Err(PairingError::InvalidArgument);
         }
         if self.state() != HostState::Local {
@@ -365,7 +406,16 @@ impl<S: Read + Write> HostActor<S> {
         approved: bool,
         now_ms: u64,
     ) -> Result<(), PairingError> {
-        if challenge_id == 0 {
+        if self.device.negotiated_minor < 1 {
+            return Err(PairingError::Unsupported);
+        }
+        if challenge_id == 0
+            || self.challenge_id != Some(challenge_id)
+            || self.pairing_status != PairingStatus::Challenge
+            || self
+                .pairing_deadline_ms
+                .is_none_or(|deadline| now_ms >= deadline)
+        {
             return Err(PairingError::InvalidArgument);
         }
         if self.state() != HostState::Pairing {
@@ -377,11 +427,17 @@ impl<S: Read + Write> HostActor<S> {
         let mut payload = vec![0xa3, 1];
         encode_cbor_u32(challenge_id, &mut payload);
         payload.extend_from_slice(&[2, 0, 3, if approved { 0xf5 } else { 0xf4 }]);
-        self.issue_aux(MessageKind::PairReply, payload, now_ms)
+        self.issue_aux(MessageKind::PairReply, payload, now_ms)?;
+        self.challenge_id = None;
+        self.comparison_value = None;
+        Ok(())
     }
 
     /// Cancels the current pairing window on the same session.
     pub fn pair_cancel(&mut self, now_ms: u64) -> Result<(), PairingError> {
+        if self.device.negotiated_minor < 1 {
+            return Err(PairingError::Unsupported);
+        }
         if self.state() != HostState::Pairing {
             return Err(PairingError::NotLocal);
         }
@@ -524,6 +580,16 @@ impl<S: Read + Write> HostActor<S> {
         if self.fault.is_some() {
             return;
         }
+        if self
+            .pairing_deadline_ms
+            .is_some_and(|deadline| now_ms >= deadline)
+        {
+            self.pairing_status = PairingStatus::Timeout;
+            self.pairing_deadline_ms = None;
+            self.challenge_id = None;
+            self.comparison_value = None;
+            self.pairing = false;
+        }
         if self.capture.fault().is_some() {
             self.fail(HostFault::Capture);
             return;
@@ -640,7 +706,7 @@ impl<S: Read + Write> HostActor<S> {
     }
 
     fn handle_status(&mut self, frame: Frame, now_ms: u64) {
-        let Ok(status) = Status::parse(&frame.payload) else {
+        let Ok(status) = Status::parse(&frame.payload, self.device.negotiated_minor) else {
             self.fail(HostFault::Protocol);
             return;
         };
@@ -675,6 +741,12 @@ impl<S: Read + Write> HostActor<S> {
             }
         }
         self.pairing = status.state == 5;
+        self.pairing_status = status.pairing_status;
+        self.pairing_deadline_ms = status
+            .pairing_remaining_ms
+            .map(|remaining| now_ms.saturating_add(u64::from(remaining)));
+        self.challenge_id = status.challenge_id;
+        self.comparison_value = status.comparison_value;
         self.slots = status.slots.clone();
         let mut next = None;
         if let Some(router) = self.router.as_mut() {
@@ -1027,12 +1099,16 @@ struct Status {
     selected: u8,
     slots: Vec<SlotSnapshot>,
     generation: u32,
+    pairing_status: PairingStatus,
+    pairing_remaining_ms: Option<u32>,
+    challenge_id: Option<u32>,
+    comparison_value: Option<u32>,
 }
 
 impl Status {
-    fn parse(bytes: &[u8]) -> Result<Self, ProtocolError> {
+    fn parse(bytes: &[u8], minor: u16) -> Result<Self, ProtocolError> {
         let mut c = Cbor { bytes, at: 0 };
-        c.expect(0xa5)?;
+        c.expect(if minor >= 1 { 0xa6 } else { 0xa5 })?;
         c.expect(1)?;
         let state = c.uint()?;
         c.expect(2)?;
@@ -1070,7 +1146,65 @@ impl Status {
         let _errors = c.uint()?;
         c.expect(5)?;
         let generation = c.uint()?;
+        let mut pairing_status = PairingStatus::Unsupported;
+        let mut pairing_remaining_ms = None;
+        let mut challenge_id = None;
+        let mut comparison_value = None;
+        if minor >= 1 {
+            c.expect(6)?;
+            let len = c.byte()?;
+            if !(0xa1..=0xa4).contains(&len) {
+                return Err(ProtocolError::Payload);
+            }
+            c.expect(1)?;
+            pairing_status = match c.uint()? {
+                0 => PairingStatus::Closed,
+                1 => PairingStatus::Waiting,
+                2 => PairingStatus::Challenge,
+                3 => PairingStatus::Rejected,
+                4 => PairingStatus::Capacity,
+                5 => PairingStatus::Timeout,
+                _ => return Err(ProtocolError::Payload),
+            };
+            match pairing_status {
+                PairingStatus::Waiting | PairingStatus::Challenge => {
+                    if (pairing_status == PairingStatus::Waiting && len != 0xa2)
+                        || (pairing_status == PairingStatus::Challenge && len != 0xa4)
+                    {
+                        return Err(ProtocolError::Payload);
+                    }
+                    c.expect(2)?;
+                    let remaining = c.uint()?;
+                    if !(1..=60000).contains(&remaining) {
+                        return Err(ProtocolError::Payload);
+                    }
+                    pairing_remaining_ms = Some(remaining as u32);
+                    if pairing_status == PairingStatus::Challenge {
+                        c.expect(3)?;
+                        let id = c.uint()?;
+                        c.expect(4)?;
+                        let number = c.uint()?;
+                        if id == 0 || id > u32::MAX as u64 || number > 999999 {
+                            return Err(ProtocolError::Payload);
+                        }
+                        challenge_id = Some(id as u32);
+                        comparison_value = Some(number as u32);
+                    }
+                }
+                _ if len != 0xa1 => return Err(ProtocolError::Payload),
+                _ => {}
+            }
+        }
         if c.at != bytes.len() || state > 6 || selected > 3 || generation > u32::MAX as u64 {
+            return Err(ProtocolError::Payload);
+        }
+        if minor >= 1
+            && (state == 5)
+                != matches!(
+                    pairing_status,
+                    PairingStatus::Waiting | PairingStatus::Challenge
+                )
+        {
             return Err(ProtocolError::Payload);
         }
         Ok(Self {
@@ -1078,6 +1212,10 @@ impl Status {
             selected: selected as u8,
             slots,
             generation: generation as u32,
+            pairing_status,
+            pairing_remaining_ms,
+            challenge_id,
+            comparison_value,
         })
     }
 }

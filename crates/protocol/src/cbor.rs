@@ -156,6 +156,18 @@ fn field<'a>(entries: &'a [(u64, Value<'a>)], key: u64) -> Option<&'a Value<'a>>
         .map(|(_, value)| value)
 }
 
+fn keys_exact(entries: &[(u64, Value<'_>)], expected: &[u64]) -> Result<(), ProtocolError> {
+    if entries.len() != expected.len()
+        || entries
+            .iter()
+            .zip(expected)
+            .any(|((key, _), wanted)| key != wanted)
+    {
+        return Err(ProtocolError::Payload);
+    }
+    Ok(())
+}
+
 fn uint(entries: &[(u64, Value<'_>)], key: u64, min: u64, max: u64) -> Result<u64, ProtocolError> {
     match field(entries, key) {
         Some(Value::Uint(n)) if (min..=max).contains(n) => Ok(*n),
@@ -218,7 +230,7 @@ pub(crate) fn validate(kind: MessageKind, payload: &[u8]) -> Result<(), Protocol
             uint(fields, 2, 0, u64::MAX)?;
         }
         MessageKind::Status => {
-            let fields = map(&value, &[1, 2, 3, 4, 5], &[1, 2, 3, 4, 5])?;
+            let fields = map(&value, &[1, 2, 3, 4, 5], &[1, 2, 3, 4, 5, 6])?;
             uint(fields, 1, 0, 6)?;
             uint(fields, 2, 0, 3)?;
             let Some(Value::Array(slots)) = field(fields, 3) else {
@@ -242,25 +254,33 @@ pub(crate) fn validate(kind: MessageKind, payload: &[u8]) -> Result<(), Protocol
             }
             uint(fields, 4, 0, u32::MAX as u64)?;
             uint(fields, 5, 0, u32::MAX as u64)?;
+            if let Some(pairing) = field(fields, 6) {
+                let pairing = map(pairing, &[1], &[1, 2, 3, 4])?;
+                let state = uint(pairing, 1, 0, 5)?;
+                match state {
+                    1 => {
+                        keys_exact(pairing, &[1, 2])?;
+                        uint(pairing, 2, 1, 60_000)?;
+                    }
+                    2 => {
+                        keys_exact(pairing, &[1, 2, 3, 4])?;
+                        uint(pairing, 2, 1, 60_000)?;
+                        uint(pairing, 3, 1, u32::MAX as u64)?;
+                        uint(pairing, 4, 0, 999_999)?;
+                    }
+                    _ if pairing.len() != 1 => return Err(ProtocolError::Payload),
+                    _ => {}
+                }
+            }
         }
         MessageKind::ForgetBond => {
             bytes16(map(&value, &[1], &[1])?, 1)?;
         }
         MessageKind::PairReply => {
-            let fields = map(&value, &[1, 2], &[1, 2, 3, 4])?;
+            let fields = map(&value, &[1, 2, 3], &[1, 2, 3])?;
             uint(fields, 1, 1, u32::MAX as u64)?;
-            let method = uint(fields, 2, 0, 1)?;
-            if method == 0 {
-                if field(fields, 4).is_some() {
-                    return Err(ProtocolError::Payload);
-                }
-                boolean(fields, 3)?;
-            } else {
-                if field(fields, 3).is_some() {
-                    return Err(ProtocolError::Payload);
-                }
-                uint(fields, 4, 0, 999_999)?;
-            }
+            uint(fields, 2, 0, 0)?;
+            boolean(fields, 3)?;
         }
         _ => return Err(ProtocolError::Payload),
     }

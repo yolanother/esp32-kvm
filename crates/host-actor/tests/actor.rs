@@ -84,6 +84,8 @@ fn device() -> ConfirmedDevice {
         session_id: 5,
         max_connections: 1,
         max_bonds: 1,
+        firmware_version: "0.1.0-m1".into(),
+        negotiated_minor: 0,
     }
 }
 
@@ -468,8 +470,31 @@ fn pairing_controls_share_session_and_snapshot_tracks_bonds() {
     assert_eq!(snapshot.max_bonds, 1);
     assert_eq!(snapshot.slots[0].bond_token, [1; 16]);
     assert!(snapshot.slots[0].ready);
-    assert!(snapshot.firmware_version.is_none());
+    assert_eq!(snapshot.firmware_version.as_deref(), Some("0.1.0-m1"));
     assert!(snapshot.comparison_value.is_none());
+    assert!(actor.pair_begin(60, 2).is_err());
+}
+
+#[test]
+fn minor_one_pairing_controls_share_verified_session() {
+    let wire = FakePort::default();
+    let (gate, _) = CaptureGate::new(32);
+    let mut device = device();
+    device.negotiated_minor = 1;
+    let mut actor = HostActor::from_confirmed(
+        wire.clone(),
+        Box::new(gate),
+        device,
+        vec![1],
+        Box::new(TestMapper),
+        0,
+    )
+    .unwrap();
+    let mut initial = status(0, true);
+    initial.payload[0] = 0xa6;
+    initial.payload.extend_from_slice(&[6, 0xa1, 1, 0]);
+    wire.feed(initial);
+    actor.poll(1);
     actor.pair_begin(60, 2).unwrap();
     let begin = wire.sent().last().unwrap().clone();
     assert_eq!(begin.kind, MessageKind::PairBegin);
@@ -477,16 +502,17 @@ fn pairing_controls_share_session_and_snapshot_tracks_bonds() {
     wire.feed(ack(&begin, 0));
     actor.poll(3);
     let mut pairing = status(0, true);
+    pairing.payload[0] = 0xa6;
     pairing.payload[2] = 5;
+    pairing
+        .payload
+        .extend_from_slice(&[6, 0xa2, 1, 1, 2, 0x19, 0xea, 0x60]);
     wire.feed(pairing);
     actor.poll(4);
     assert_eq!(actor.state(), HostState::Pairing);
-    actor.pair_reply(7, true, 5).unwrap();
+    assert!(actor.pair_reply(7, true, 5).is_err());
     let reply = wire.sent().last().unwrap().clone();
-    assert_eq!(reply.kind, MessageKind::PairReply);
-    assert_eq!(reply.payload, [0xa3, 1, 7, 2, 0, 3, 0xf5]);
-    wire.feed(ack(&reply, 0));
-    actor.poll(6);
+    assert_eq!(reply.kind, MessageKind::PairBegin);
     actor.pair_cancel(7).unwrap();
     assert_eq!(wire.sent().last().unwrap().kind, MessageKind::PairCancel);
 }
@@ -564,4 +590,50 @@ fn bonded_guest_profile_maps_physical_usage_before_key_state() {
     let key_state = wire.sent().last().unwrap().clone();
     assert_eq!(key_state.kind, MessageKind::KeyState);
     assert_eq!(key_state.payload[2], 5);
+}
+
+#[test]
+fn numeric_challenge_status_exposes_value_and_rejects_stale_reply() {
+    let wire = FakePort::default();
+    let (gate, _) = CaptureGate::new(32);
+    let mut device = device();
+    device.negotiated_minor = 1;
+    let mut actor = HostActor::from_confirmed(
+        wire.clone(),
+        Box::new(gate),
+        device,
+        vec![1],
+        Box::new(TestMapper),
+        0,
+    )
+    .unwrap();
+    let mut initial = status(0, false);
+    initial.payload[0] = 0xa6;
+    initial.payload.extend_from_slice(&[6, 0xa1, 1, 0]);
+    wire.feed(initial);
+    actor.poll(1);
+    assert_eq!(
+        actor.setup_snapshot().firmware_version.as_deref(),
+        Some("0.1.0-m1")
+    );
+    actor.pair_begin(60, 2).unwrap();
+    let begin = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&begin, 0));
+    actor.poll(3);
+    let mut challenge = status(0, false);
+    challenge.payload[0] = 0xa6;
+    challenge.payload[2] = 5;
+    challenge.payload.extend_from_slice(&[
+        6, 0xa4, 1, 2, 2, 0x19, 0x03, 0xe8, 3, 7, 4, 0x1a, 0, 1, 0xe2, 0x40,
+    ]);
+    wire.feed(challenge);
+    actor.poll(4);
+    let snapshot = actor.setup_snapshot();
+    assert_eq!(snapshot.challenge_id, Some(7));
+    assert_eq!(snapshot.comparison_value, Some(123456));
+    assert_eq!(snapshot.pairing_deadline_ms, Some(1004));
+    assert!(actor.pair_reply(8, true, 5).is_err());
+    actor.pair_reply(7, true, 5).unwrap();
+    assert!(actor.pair_reply(7, true, 6).is_err());
+    assert_eq!(actor.setup_snapshot().comparison_value, None);
 }

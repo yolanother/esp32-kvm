@@ -86,12 +86,29 @@ fn handshake_requires_board_id_protocol_range_and_ack() {
     let result = probe_stream(&mut stream, "esp32-kvm", "host-test").unwrap();
     assert_eq!(result.session_id, 0x1_0000_0000);
     assert_eq!(result.board_id, "esp32-kvm");
+    assert_eq!(result.firmware_version, "1");
+    assert_eq!(result.negotiated_minor, 0);
     let sent = decoded_frames(&stream.written);
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[0].kind, MessageKind::Hello);
     assert_eq!(sent[0].session_id, 0);
     assert_eq!(sent[1].kind, MessageKind::SessionOpen);
     assert_eq!(sent[1].session_id, result.session_id);
+}
+
+#[test]
+fn handshake_upgrades_to_minor_one_for_pairing_status() {
+    let mut input = caps("esp32-kvm", 0x1_0000_0000, 0, 1);
+    input.extend_from_slice(&caps("esp32-kvm", 0x1_0000_0000, 0, 1));
+    input.extend_from_slice(&ack(0x1_0000_0000));
+    let mut stream = ScriptedPort::new(input);
+    let device = probe_stream(&mut stream, "esp32-kvm", "host-test").unwrap();
+    assert_eq!(device.negotiated_minor, 1);
+    let sent = decoded_frames(&stream.written);
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[0].payload[..2], [0, 0]);
+    assert_eq!(sent[1].payload[..2], [1, 0]);
+    assert_eq!(sent[2].kind, MessageKind::SessionOpen);
 }
 
 #[test]

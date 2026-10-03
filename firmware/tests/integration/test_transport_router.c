@@ -12,6 +12,13 @@ static size_t reply_len;
 static int replies, releases, arms, sends;
 static uint64_t now_ms;
 static bool ready = true;
+static unsigned pair_opens, pair_replies;
+static uint32_t last_challenge;
+static bool last_approval;
+static bool pair_begin(void *context) { (void)context; pair_opens++; return true; }
+static bool pair_cancel(void *context) { (void)context; return true; }
+static bool pair_reply(void *context, uint32_t id, bool approved)
+{ (void)context; pair_replies++; last_challenge = id; last_approval = approved; return true; }
 
 static uint32_t crc(const uint8_t *p, size_t n)
 {
@@ -133,5 +140,40 @@ int main(void)
     int before = replies;
     send_frame(&core, KVM_MSG_SESSION_OPEN, 7, 8, 0, invalid_open, sizeof(invalid_open));
     assert(replies == before && !router.session_open);
+    now_ms = 0;
+    /* Minor one carries the numeric challenge in STATUS and accepts only an
+     * exact numeric-reply payload while the router remains local. */
+    kvm_transport_core_bind_pairing(&core,
+        (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply}, NULL);
+    const uint8_t hello1[] = {1, 0, 0, 0, 0, 0};
+    send_frame(&core, KVM_MSG_HELLO, 0, 30, 0, hello1, sizeof(hello1));
+    expect_reply(KVM_MSG_CAPS, 0, 0);
+    send_frame(&core, KVM_MSG_SESSION_OPEN, 7, 31, 0, open, sizeof(open));
+    expect_reply(KVM_MSG_ACK, 0, router.generation);
+    const uint8_t duration[] = {60, 0};
+    send_frame(&core, KVM_MSG_PAIR_BEGIN, 7, 32, router.generation, duration, sizeof(duration));
+    expect_reply(KVM_MSG_ACK, 0, router.generation);
+    assert(pair_opens == 1);
+    kvm_transport_core_pairing_event(&core, KVM_PAIRING_CHALLENGE, 7, 123456, 1000);
+    send_frame(&core, KVM_MSG_GET_STATUS, 7, 33, router.generation, NULL, 0);
+    uint8_t decoded[600];
+    size_t decoded_len = decode(decoded);
+    assert(decoded[3] == KVM_MSG_STATUS && decoded[24] == 0xa6);
+    const uint8_t pairing_suffix[] = {6, 0xa4, 1, 2, 2, 0x19, 3, 0xe8,
+                                      3, 7, 4, 0x1a, 0, 1, 0xe2, 0x40};
+    assert(memcmp(decoded + decoded_len - 4 - sizeof(pairing_suffix),
+                  pairing_suffix, sizeof(pairing_suffix)) == 0);
+    const uint8_t stale_reply[] = {0xa3, 1, 8, 2, 0, 3, 0xf5};
+    send_frame(&core, KVM_MSG_PAIR_REPLY, 7, 34, router.generation,
+               stale_reply, sizeof(stale_reply));
+    expect_reply(KVM_MSG_NACK, KVM_ROUTER_BAD_PAYLOAD, router.generation);
+    assert(pair_replies == 0);
+    const uint8_t reply_payload[] = {0xa3, 1, 7, 2, 0, 3, 0xf5};
+    send_frame(&core, KVM_MSG_PAIR_REPLY, 7, 35, router.generation, reply_payload, sizeof(reply_payload));
+    expect_reply(KVM_MSG_ACK, 0, router.generation);
+    assert(pair_replies == 1 && last_challenge == 7 && last_approval);
+    send_frame(&core, KVM_MSG_PAIR_REPLY, 7, 36, router.generation, reply_payload, sizeof(reply_payload));
+    expect_reply(KVM_MSG_NACK, KVM_ROUTER_BAD_PAYLOAD, router.generation);
+    assert(pair_replies == 1);
     return 0;
 }

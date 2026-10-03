@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Exposes opt-in single-guest NimBLE startup for hardware bring-up. Firmware
  * main remains disarmed; callers must verify board recovery and explicitly
- * start this service before it can advertise or accept a guest. */
+ * start this service before it can advertise or accept a guest. It also
+ * exposes bounded NimBLE host-loop pairing requests and short status events. */
 #ifndef ESP32_KVM_HID_GUEST_H
 #define ESP32_KVM_HID_GUEST_H
 
@@ -15,7 +16,9 @@ typedef enum {
     HID_GUEST_PAIRING_CHALLENGE,
     HID_GUEST_PAIRING_CLOSED,
     HID_GUEST_BONDED,
-    HID_GUEST_PAIRING_REJECTED
+    HID_GUEST_PAIRING_REJECTED,
+    HID_GUEST_PAIRING_CAPACITY,
+    HID_GUEST_PAIRING_TIMEOUT
 } hid_guest_pairing_event_type_t;
 
 /** Status event; number is present only for CHALLENGE, token only for BONDED. */
@@ -24,6 +27,7 @@ typedef struct {
     uint16_t connection_handle;
     uint32_t challenge_id;
     uint32_t number;
+    uint64_t deadline_ms;
     hid_token_t token;
 } hid_guest_pairing_event_t;
 
@@ -63,5 +67,11 @@ bool hid_guest_request_mouse(uint8_t buttons, int16_t dx, int16_t dy,
                              int8_t wheel, int8_t pan);
 /** Sends one consumer usage through the bounded host-loop bridge. */
 bool hid_guest_request_consumer(uint16_t usage);
+/** Opens a pairing window on the NimBLE host loop within a bounded wait. */
+bool hid_guest_request_pair_begin(void);
+/** Cancels pairing on the NimBLE host loop within a bounded wait. */
+bool hid_guest_request_pair_cancel(void);
+/** Answers the exact challenge on the NimBLE host loop within a bounded wait. */
+bool hid_guest_request_pair_reply(uint32_t challenge_id, bool approved);
 
 #endif

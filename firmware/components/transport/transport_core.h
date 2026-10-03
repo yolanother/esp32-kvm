@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
  * Defines the disarmed firmware USB loopback protocol core. It accepts bounded
  * COBS frames, validates CRC32C and sessions, and dispatches authenticated
- * routing commands to a bound serialized router. A USB CDC adapter owns I/O. */
+ * routing commands to a bound serialized router. Minor-one pairing controls
+ * use bounded callbacks and STATUS events. A USB CDC adapter owns I/O. */
 #ifndef ESP32_KVM_TRANSPORT_CORE_H
 #define ESP32_KVM_TRANSPORT_CORE_H
 
@@ -19,12 +20,26 @@ typedef void (*kvm_transport_send_fn)(void *context, const uint8_t *bytes, size_
 /** Supplies monotonic firmware milliseconds for lease and input age checks. */
 typedef uint64_t (*kvm_transport_now_fn)(void *context);
 
+/** Minor-one pairing states carried in STATUS key 6. */
+typedef enum {
+    KVM_PAIRING_CLOSED = 0, KVM_PAIRING_WAITING = 1,
+    KVM_PAIRING_CHALLENGE = 2, KVM_PAIRING_REJECTED = 3,
+    KVM_PAIRING_CAPACITY = 4, KVM_PAIRING_TIMEOUT = 5
+} kvm_transport_pairing_state_t;
+/** Bounded pairing commands execute on the NimBLE host loop. */
+typedef struct {
+    bool (*begin)(void *context);
+    bool (*cancel)(void *context);
+    bool (*reply)(void *context, uint32_t challenge_id, bool approved);
+} kvm_transport_pairing_ops_t;
+
 /** Private stream and handshake state for one USB connection. */
 typedef struct {
     uint8_t rx[KVM_TRANSPORT_ENCODED_CAPACITY];
     size_t rx_length;
     bool draining;
     bool session_open;
+    uint16_t minor;
     uint64_t session_id;
     char board_id[33];
     char firmware_version[33];
@@ -39,6 +54,14 @@ typedef struct {
     bool status_armed;
     bool status_fault;
     uint32_t next_select_request_id;
+    kvm_transport_pairing_ops_t pairing_ops;
+    void *pairing_context;
+    kvm_transport_pairing_state_t pairing_state;
+    uint32_t pairing_challenge_id;
+    uint32_t pairing_number;
+    uint64_t pairing_deadline_ms;
+    kvm_transport_pairing_state_t status_pairing_state;
+    uint32_t status_challenge_id;
 } kvm_transport_core_t;
 
 /** Initializes a disarmed loopback core with a nonzero, caller-generated session. */
@@ -57,6 +80,14 @@ bool kvm_transport_core_session_open(const kvm_transport_core_t *core);
 /** Binds the one serialized router and monotonic clock before USB input. */
 void kvm_transport_core_bind_router(kvm_transport_core_t *core, kvm_router_t *router,
                                     kvm_transport_now_fn now, void *now_context);
+/** Binds serialized, bounded pairing operations from the USB worker. */
+void kvm_transport_core_bind_pairing(kvm_transport_core_t *core,
+                                     kvm_transport_pairing_ops_t ops, void *context);
+/** Applies a queued NimBLE pairing event on the USB worker. */
+void kvm_transport_core_pairing_event(kvm_transport_core_t *core,
+                                      kvm_transport_pairing_state_t state,
+                                      uint32_t challenge_id, uint32_t number,
+                                      uint64_t deadline_ms);
 /** Drains router input and enforces the lease while USB is idle. */
 void kvm_transport_core_tick(kvm_transport_core_t *core);
 /** Sends an arbitration request for a physical PLUS press in an open USB session. */

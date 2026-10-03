@@ -49,7 +49,7 @@ static void publish(hid_guest_pairing_event_type_t type, uint16_t handle,
 {
     if (!pairing_events) return;
     hid_guest_pairing_event_t event = {.type = type, .connection_handle = handle,
-                                      .number = number};
+                                      .number = number, .deadline_ms = pairing.deadline_ms};
     if (type == HID_GUEST_PAIRING_CHALLENGE) event.challenge_id = pairing.challenge_id;
     if (token) event.token = *token;
     pairing_events(&event, pairing_event_context);
@@ -62,7 +62,7 @@ static void expire_window(void)
     uint16_t handle = pairing.challenge_handle;
     if (was_open && !hid_pairing_window_open(&pairing, now_ms())) {
         if (pending) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
-        publish(HID_GUEST_PAIRING_CLOSED, 0, 0, NULL);
+        publish(HID_GUEST_PAIRING_TIMEOUT, 0, 0, NULL);
     }
 }
 
@@ -150,7 +150,9 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         struct ble_gap_conn_desc incoming;
         if (ble_gap_conn_find(event->connect.conn_handle, &incoming) != 0 ||
             !hid_pairing_admit(&pairing, peer_identity(&incoming.peer_id_addr), now_ms())) {
-            publish(HID_GUEST_PAIRING_REJECTED, event->connect.conn_handle, 0, NULL);
+            publish(pairing.bond_count >= HID_PAIRING_MAX_BONDS ?
+                    HID_GUEST_PAIRING_CAPACITY : HID_GUEST_PAIRING_REJECTED,
+                    event->connect.conn_handle, 0, NULL);
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
@@ -163,6 +165,8 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         hid_gatt_on_disconnect(event->disconnect.conn.conn_handle);
+        if (pairing.challenge_active)
+            publish(HID_GUEST_PAIRING_REJECTED, event->disconnect.conn.conn_handle, 0, NULL);
         pairing.challenge_active = false;
         pairing.challenge_approved = false;
         pairing.challenge_id = 0;
@@ -224,9 +228,9 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     case BLE_GAP_EVENT_PASSKEY_ACTION: {
         struct ble_gap_conn_desc description;
         uint16_t handle = event->passkey.conn_handle;
-        uint32_t challenge_id = esp_random();
-        if (challenge_id == 0 || challenge_id == pairing.last_challenge_id)
-            challenge_id = esp_random();
+        uint32_t challenge_id;
+        do { challenge_id = esp_random(); }
+        while (challenge_id == 0 || challenge_id == pairing.last_challenge_id);
         if (event->passkey.params.action != BLE_SM_IOACT_NUMCMP ||
             ble_gap_conn_find(handle, &description) != 0 ||
             !hid_pairing_begin_challenge(&pairing, peer_identity(&description.peer_id_addr),
@@ -301,9 +305,13 @@ esp_err_t hid_guest_pairing_open(void)
     if (!started || hid_gatt_channel()->connected || !pairing_events) return ESP_ERR_INVALID_STATE;
     ble_addr_t bonds[HID_PAIRING_MAX_BONDS];
     int count = 0;
-    if (ble_store_util_bonded_peers(bonds, &count, HID_PAIRING_MAX_BONDS) != 0 ||
-        count >= HID_PAIRING_MAX_BONDS || !hid_pairing_open(&pairing, now_ms()))
+    if (ble_store_util_bonded_peers(bonds, &count, HID_PAIRING_MAX_BONDS) != 0)
         return ESP_ERR_INVALID_STATE;
+    if (count >= HID_PAIRING_MAX_BONDS || pairing.bond_count >= HID_PAIRING_MAX_BONDS) {
+        publish(HID_GUEST_PAIRING_CAPACITY, 0, 0, NULL);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!hid_pairing_open(&pairing, now_ms())) return ESP_ERR_INVALID_STATE;
     if (ble_npl_callout_reset(&pairing_timeout,
                              ble_npl_time_ms_to_ticks32(HID_PAIRING_WINDOW_MS)) != BLE_NPL_OK) {
         hid_pairing_cancel(&pairing);
@@ -332,7 +340,10 @@ esp_err_t hid_guest_pairing_confirm(uint32_t challenge_id, bool approved)
     bool accepted = hid_pairing_confirm(&pairing, challenge_id, approved, now_ms());
     struct ble_sm_io io = {.action = BLE_SM_IOACT_NUMCMP, .numcmp_accept = accepted};
     if (ble_sm_inject_io(connection_handle, &io) != 0) return ESP_FAIL;
-    if (!accepted) ble_gap_terminate(connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (!accepted) {
+        publish(HID_GUEST_PAIRING_REJECTED, connection_handle, 0, NULL);
+        ble_gap_terminate(connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
     return ESP_OK;
 }
 

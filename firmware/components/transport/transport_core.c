@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
  * Implements bounded binary USB framing, handshake and command dispatch for
  * ESP32-S3 CDC. Validated frames enter one serialized router; malformed or
- * stale frames have no HID effects and diagnostic text never enters CDC. */
+ * stale frames have no HID effects and diagnostic text never enters CDC.
+ * Minor-one pairing replies are matched against the active challenge. */
 #include "transport_core.h"
 #include <string.h>
 
@@ -129,9 +130,9 @@ static void send_caps(kvm_transport_core_t *core, uint32_t seq)
     payload[at++] = 1; at += cbor_text(payload + at, core->firmware_version);
     payload[at++] = 2; at += cbor_text(payload + at, core->board_id);
     payload[at++] = 3; payload[at++] = 0; /* minor minimum */
-    payload[at++] = 4; payload[at++] = 0; /* minor maximum */
+    payload[at++] = 4; payload[at++] = KVM_PROTOCOL_MINOR_MAX;
     payload[at++] = 5; payload[at++] = 1; /* One live BLE guest. */
-    payload[at++] = 6; payload[at++] = 1; /* Conservative storage bound. */
+    payload[at++] = 6; payload[at++] = 8; /* HID pairing policy capacity. */
     payload[at++] = 7; payload[at++] = 0; /* Report feature flags not negotiated. */
     payload[at++] = 8; at += cbor_uint(payload + at, core->session_id);
     emit(core, KVM_MSG_CAPS, seq, payload, at);
@@ -155,7 +156,7 @@ static void send_result(kvm_transport_core_t *core, uint8_t original,
 
 static void send_status(kvm_transport_core_t *core, uint32_t seq)
 {
-    uint8_t p[48] = {0xa5, 1, 0, 2, 0, 3, 0x81, 0xa5, 1, 1, 2, 0x50};
+    uint8_t p[96] = {0xa5, 1, 0, 2, 0, 3, 0x81, 0xa5, 1, 1, 2, 0x50};
     kvm_router_t *r = core->router;
     bool is_ready = r && r->output.ready && r->output.ready(r->context, 1);
     /* Slot map contains a zero opaque token until bonding identity is wired. */
@@ -165,7 +166,33 @@ static void send_status(kvm_transport_core_t *core, uint32_t seq)
     p[at++] = 5; p[at++] = 0;
     p[at++] = 4; p[at++] = r && r->fault ? 1 : 0;
     p[at++] = 5; at += cbor_uint(p + at, r ? r->generation : 0);
-    p[2] = r && r->armed ? 2 : r && r->slot ? 1 : 0;
+    if (core->minor >= 1) {
+        uint64_t now = firmware_ms(core);
+        if ((core->pairing_state == KVM_PAIRING_WAITING ||
+             core->pairing_state == KVM_PAIRING_CHALLENGE) &&
+            now >= core->pairing_deadline_ms) {
+            core->pairing_state = KVM_PAIRING_TIMEOUT;
+            core->pairing_challenge_id = 0;
+            core->pairing_number = 0;
+        }
+        p[0] = 0xa6;
+        p[at++] = 6;
+        bool waiting = core->pairing_state == KVM_PAIRING_WAITING;
+        bool challenge = core->pairing_state == KVM_PAIRING_CHALLENGE;
+        p[at++] = challenge ? 0xa4 : waiting ? 0xa2 : 0xa1;
+        p[at++] = 1; p[at++] = (uint8_t)core->pairing_state;
+        if (waiting || challenge) {
+            p[at++] = 2;
+            at += cbor_uint(p + at, core->pairing_deadline_ms - now);
+        }
+        if (challenge) {
+            p[at++] = 3; at += cbor_uint(p + at, core->pairing_challenge_id);
+            p[at++] = 4; at += cbor_uint(p + at, core->pairing_number);
+        }
+    }
+    p[2] = r && r->armed ? 2 : r && r->slot ? 1 :
+           core->minor >= 1 && (core->pairing_state == KVM_PAIRING_WAITING ||
+                                 core->pairing_state == KVM_PAIRING_CHALLENGE) ? 5 : 0;
     p[4] = r ? r->slot : 0;
     emit(core, KVM_MSG_STATUS, seq, p, at);
     core->last_status_ms = firmware_ms(core);
@@ -173,6 +200,31 @@ static void send_status(kvm_transport_core_t *core, uint32_t seq)
     core->status_slot = r ? r->slot : 0;
     core->status_armed = r && r->armed;
     core->status_fault = r && r->fault;
+    core->status_pairing_state = core->pairing_state;
+    core->status_challenge_id = core->pairing_challenge_id;
+}
+
+static bool cbor_pair_reply(const uint8_t *p, size_t length, uint32_t *id, bool *approved)
+{
+    if (length < 7 || p[0] != 0xa3 || p[1] != 1) return false;
+    size_t at = 2;
+    uint64_t number;
+    unsigned marker = p[at++];
+    if (marker < 24) number = marker;
+    else {
+        size_t width = marker == 0x18 ? 1 : marker == 0x19 ? 2 : marker == 0x1a ? 4 : 0;
+        if (!width || at + width + 4 != length) return false;
+        number = 0;
+        for (size_t i = 0; i < width; ++i) number = (number << 8) | p[at++];
+        if ((width == 1 && number < 24) || (width == 2 && number <= UINT8_MAX) ||
+            (width == 4 && number <= UINT16_MAX)) return false;
+    }
+    if (!number || number > UINT32_MAX || at + 4 != length ||
+        p[at++] != 2 || p[at++] != 0 || p[at++] != 3 ||
+        (p[at] != 0xf4 && p[at] != 0xf5)) return false;
+    *id = (uint32_t)number;
+    *approved = p[at] == 0xf5;
+    return true;
 }
 
 static bool utf8_valid(const uint8_t *p, size_t length)
@@ -238,8 +290,14 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
     size_t payload_length = get_u16(p + 4);
     if (kind == KVM_MSG_HELLO) {
         if (session != 0 || generation != 0 || payload_length != 6 ||
-            get_u16(payload) != 0 || get_u32(payload + 2) != 0) return;
+            get_u16(payload) > KVM_PROTOCOL_MINOR_MAX || get_u32(payload + 2) != 0) return;
+        if ((core->pairing_state == KVM_PAIRING_WAITING ||
+             core->pairing_state == KVM_PAIRING_CHALLENGE) && core->pairing_ops.cancel)
+            (void)core->pairing_ops.cancel(core->pairing_context);
         core->session_open = false;
+        core->minor = get_u16(payload);
+        core->pairing_state = KVM_PAIRING_CLOSED;
+        core->pairing_challenge_id = 0;
         if (core->router) kvm_router_reset(core->router);
         send_caps(core, seq);
         return;
@@ -266,7 +324,10 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
                 send_result(core, kind, seq, result);
             }
         } else if (kind == KVM_MSG_SWITCH) {
-            if (payload_length == 9 && generation == get_u32(payload + 1))
+            if (core->pairing_state == KVM_PAIRING_WAITING ||
+                core->pairing_state == KVM_PAIRING_CHALLENGE)
+                result = KVM_ROUTER_PAUSED;
+            else if (payload_length == 9 && generation == get_u32(payload + 1))
                 result = kvm_router_switch(r, session, seq, payload[0], get_u32(payload + 1),
                                            get_u32(payload + 5), now_ms);
             else r->last_result_generation = r->generation;
@@ -276,9 +337,38 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
             else r->last_result_generation = r->generation;
             send_result(core, kind, seq, result);
         } else if (kind == KVM_MSG_ARM) {
-            if (payload_length == 5 && generation == get_u32(payload + 1))
+            if (core->pairing_state == KVM_PAIRING_WAITING ||
+                core->pairing_state == KVM_PAIRING_CHALLENGE)
+                result = KVM_ROUTER_PAUSED;
+            else if (payload_length == 5 && generation == get_u32(payload + 1))
                 result = kvm_router_arm(r, session, seq, payload[0], get_u32(payload + 1), now_ms);
             else r->last_result_generation = r->generation;
+            send_result(core, kind, seq, result);
+        } else if (kind == KVM_MSG_PAIR_BEGIN || kind == KVM_MSG_PAIR_CANCEL ||
+                   kind == KVM_MSG_PAIR_REPLY) {
+            uint32_t id = 0;
+            bool approved = false;
+            if (core->minor < 1) result = (kvm_router_result_t)8; /* UNSUPPORTED */
+            else if (generation != r->generation || r->armed || r->slot)
+                result = KVM_ROUTER_PAUSED;
+            else if (kind == KVM_MSG_PAIR_BEGIN && payload_length == 2 &&
+                     get_u16(payload) == 60 && core->pairing_ops.begin)
+                result = core->pairing_ops.begin(core->pairing_context) ? KVM_ROUTER_OK : KVM_ROUTER_BUSY;
+            else if (kind == KVM_MSG_PAIR_CANCEL && payload_length == 0 &&
+                     core->pairing_ops.cancel)
+                result = core->pairing_ops.cancel(core->pairing_context) ? KVM_ROUTER_OK : KVM_ROUTER_BUSY;
+            else if (kind == KVM_MSG_PAIR_REPLY &&
+                     cbor_pair_reply(payload, payload_length, &id, &approved) &&
+                     core->pairing_state == KVM_PAIRING_CHALLENGE &&
+                     id == core->pairing_challenge_id && firmware_ms(core) < core->pairing_deadline_ms &&
+                     core->pairing_ops.reply)
+                result = core->pairing_ops.reply(core->pairing_context, id, approved) ? KVM_ROUTER_OK : KVM_ROUTER_BUSY;
+            if (result == KVM_ROUTER_OK && kind == KVM_MSG_PAIR_REPLY) {
+                core->pairing_challenge_id = 0;
+                core->pairing_number = 0;
+                core->pairing_state = approved ? KVM_PAIRING_WAITING : KVM_PAIRING_REJECTED;
+            }
+            r->last_result_generation = r->generation;
             send_result(core, kind, seq, result);
         } else if (kind == KVM_MSG_KEY_STATE && payload_length == 8) {
             kvm_router_input_t input = {0};
@@ -326,6 +416,9 @@ void kvm_transport_core_reset(kvm_transport_core_t *core)
     core->rx_length = 0;
     core->draining = false;
     core->session_open = false;
+    core->minor = 0;
+    core->pairing_state = KVM_PAIRING_CLOSED;
+    core->pairing_challenge_id = 0;
     if (core->router) kvm_router_reset(core->router);
 }
 
@@ -364,6 +457,28 @@ void kvm_transport_core_bind_router(kvm_transport_core_t *core, kvm_router_t *ro
     core->now_context = now_context;
 }
 
+void kvm_transport_core_bind_pairing(kvm_transport_core_t *core,
+                                     kvm_transport_pairing_ops_t ops, void *context)
+{
+    if (!core) return;
+    core->pairing_ops = ops;
+    core->pairing_context = context;
+}
+
+void kvm_transport_core_pairing_event(kvm_transport_core_t *core,
+                                      kvm_transport_pairing_state_t state,
+                                      uint32_t challenge_id, uint32_t number,
+                                      uint64_t deadline_ms)
+{
+    if (!core || !core->session_open || core->minor < 1 || state > KVM_PAIRING_TIMEOUT) return;
+    if (state == KVM_PAIRING_CHALLENGE &&
+        (!challenge_id || number > 999999 || deadline_ms <= firmware_ms(core))) return;
+    core->pairing_state = state;
+    core->pairing_deadline_ms = deadline_ms;
+    core->pairing_challenge_id = state == KVM_PAIRING_CHALLENGE ? challenge_id : 0;
+    core->pairing_number = state == KVM_PAIRING_CHALLENGE ? number : 0;
+}
+
 void kvm_transport_core_tick(kvm_transport_core_t *core)
 {
     if (!core || !core->router || !core->now) return;
@@ -373,7 +488,9 @@ void kvm_transport_core_tick(kvm_transport_core_t *core)
     uint64_t now_ms = firmware_ms(core);
     if (now_ms < core->last_status_ms || now_ms - core->last_status_ms >= 1000 ||
         r->generation != core->status_generation || r->slot != core->status_slot ||
-        r->armed != core->status_armed || r->fault != core->status_fault)
+        r->armed != core->status_armed || r->fault != core->status_fault ||
+        core->pairing_state != core->status_pairing_state ||
+        core->pairing_challenge_id != core->status_challenge_id)
         send_status(core, 0);
 }
 

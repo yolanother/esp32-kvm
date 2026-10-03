@@ -15,11 +15,14 @@ fn crc32c_standard_check_value() {
 fn independent_fixtures_cover_every_message_kind() {
     let fixtures: &[(&str, u8)] = &[
         ("hello-v1", 0x01),
+        ("hello-m1", 0x01),
         ("caps", 0x02),
+        ("caps-m1", 0x02),
         ("session-open", 0x03),
         ("heartbeat", 0x10),
         ("get-status", 0x11),
         ("status", 0x12),
+        ("status-pairing-m1", 0x12),
         ("switch", 0x20),
         ("release-all", 0x21),
         ("arm", 0x22),
@@ -141,6 +144,31 @@ fn canonical_cbor_rejects_missing_keys_duplicates_and_trailing_data() {
         let frame = Frame::new(MessageKind::SessionOpen, 5, 1, 0, payload.to_vec());
         assert_eq!(frame.encode(), Err(ProtocolError::Payload));
     }
+}
+
+#[test]
+fn minor_one_pairing_status_requires_complete_numeric_challenge() {
+    let mut status = vec![
+        0xa6, 1, 5, 2, 0, 3, 0x80, 4, 0, 5, 0, 6, 0xa4, 1, 2, 2, 0x19, 0xea, 0x60, 3, 7, 4, 0x1a,
+        0x00, 0x01, 0xe2, 0x40,
+    ];
+    assert!(
+        Frame::new(MessageKind::Status, 5, 1, 0, status.clone())
+            .encode()
+            .is_ok()
+    );
+    status[20] = 0; // Challenge ID zero is never valid.
+    assert_eq!(
+        Frame::new(MessageKind::Status, 5, 1, 0, status.clone()).encode(),
+        Err(ProtocolError::Payload)
+    );
+    status[20] = 7;
+    status.truncate(21);
+    status[12] = 0xa3;
+    assert_eq!(
+        Frame::new(MessageKind::Status, 5, 1, 0, status).encode(),
+        Err(ProtocolError::Payload)
+    );
 }
 
 #[test]
