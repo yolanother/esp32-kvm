@@ -1,7 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Starts a bounded NimBLE HID peripheral after explicit firmware integration.
  * It admits up to three isolated connections to one composite HID service, requires an
- * authenticated bonded link and explicit pairing consent, while routing stays
+ * authenticated bonded link and guest-side numeric consent, while routing stays
  * disarmed until the host actor arms. A connected peer's opaque token is
  * resolved from the persisted pairing table only after link authentication.
  * Retained inventory copies opaque tokens on the NimBLE host loop. Only the
@@ -194,7 +194,8 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         if (disconnected_slot)
             publish(HID_GUEST_DISCONNECTED, event->disconnect.conn.conn_handle,
                     disconnected_slot, NULL);
-        if (pairing.challenge_active && pairing.challenge_handle == event->disconnect.conn.conn_handle)
+        if ((pairing.challenge_active || pairing.challenge_approved) &&
+            pairing.challenge_handle == event->disconnect.conn.conn_handle)
             publish(HID_GUEST_PAIRING_REJECTED, event->disconnect.conn.conn_handle, 0, NULL);
         if (pairing.challenge_handle == event->disconnect.conn.conn_handle) {
             pairing.challenge_active = false;
@@ -264,6 +265,13 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     case BLE_GAP_EVENT_PASSKEY_ACTION: {
         struct ble_gap_conn_desc description;
         uint16_t handle = event->passkey.conn_handle;
+        expire_window();
+        if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP &&
+            !pairing.window_active && hid_guest_pairing_open() != ESP_OK) {
+            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, NULL);
+            ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+            return 0;
+        }
         uint32_t challenge_id;
         do { challenge_id = esp_random(); }
         while (challenge_id == 0 || challenge_id == pairing.last_challenge_id);
@@ -276,6 +284,13 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             return 0;
         }
         publish(HID_GUEST_PAIRING_CHALLENGE, handle, pairing.challenge_number, NULL);
+        /* The guest confirms the displayed code on its own screen. NimBLE may
+           complete only after that peer's confirmation and authenticated bonding. */
+        if (hid_guest_pairing_confirm(challenge_id, true) != ESP_OK) {
+            pairing.challenge_approved = false;
+            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, NULL);
+            ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
         return 0;
     }
     case BLE_GAP_EVENT_REPEAT_PAIRING:

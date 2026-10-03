@@ -1,5 +1,5 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Implements timed HID admission, one pending numeric comparison, and a
+ * Implements timed HID admission, three numeric comparisons per window, and a
  * bounded identity-to-token bond table without implicit deletion. Connected
  * lookup clears output unless the peer is authenticated and bound. Inventory
  * copies retained opaque tokens without exposing peer identities. */
@@ -32,6 +32,7 @@ bool hid_pairing_open(hid_pairing_t *state, uint64_t now_ms)
     state->challenge_active = false;
     state->challenge_approved = false;
     state->challenge_id = 0;
+    state->attempt_count = 0;
     return true;
 }
 
@@ -71,7 +72,9 @@ bool hid_pairing_begin_challenge(hid_pairing_t *state, hid_peer_t peer, uint16_t
 {
     hid_token_t token;
     if (!hid_pairing_window_open(state, now_ms) || hid_pairing_token(state, peer, &token) ||
-        state->challenge_active || !challenge_id || challenge_id == state->last_challenge_id ||
+        state->challenge_active || state->challenge_approved ||
+        state->attempt_count >= HID_PAIRING_MAX_ATTEMPTS ||
+        !challenge_id || challenge_id == state->last_challenge_id ||
         number > 999999) return false;
     state->challenge_handle = handle;
     state->challenge_id = challenge_id;
@@ -79,6 +82,7 @@ bool hid_pairing_begin_challenge(hid_pairing_t *state, hid_peer_t peer, uint16_t
     state->challenge_number = number;
     state->challenge_active = true;
     state->challenge_approved = false;
+    ++state->attempt_count;
     return true;
 }
 

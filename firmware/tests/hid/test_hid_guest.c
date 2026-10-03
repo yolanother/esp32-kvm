@@ -99,7 +99,7 @@ void nimble_port_freertos_deinit(void) { }
 void ble_svc_gap_init(void) { }
 void ble_svc_gatt_init(void) { }
 int ble_svc_gap_device_name_set(const char *name) { return strcmp(name, "ESP32 KVM"); }
-int ble_svc_gap_device_appearance_set(uint16_t appearance) { return appearance == 0x03c0 ? 0 : -1; }
+int ble_svc_gap_device_appearance_set(uint16_t appearance) { return appearance == 0x03c1 ? 0 : -1; }
 void ble_store_config_init(void) { }
 int ble_hs_util_ensure_addr(int privacy) { return privacy; }
 int ble_hs_id_infer_auto(int privacy, uint8_t *type) { *type = 0; return privacy; }
@@ -107,7 +107,7 @@ int ble_store_util_bonded_peers(ble_addr_t *peers, int *count, int maximum)
 { (void)peers; (void)maximum; *count = saved_size ? 1 : 0; return 0; }
 int ble_store_util_delete_peer(const ble_addr_t *peer) { (void)peer; return 0; }
 int ble_sm_inject_io(uint16_t handle, struct ble_sm_io *io)
-{ assert(handle == 17 && io->action == BLE_SM_IOACT_NUMCMP && io->numcmp_accept);
+{ assert((handle == 17 || handle == 18) && io->action == BLE_SM_IOACT_NUMCMP && io->numcmp_accept);
   confirmations++; return 0; }
 int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *fields)
 { assert(fields->num_uuids16 == 1 && fields->uuids16[0].value == 0x1812); return 0; }

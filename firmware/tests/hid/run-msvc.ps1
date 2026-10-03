@@ -2,6 +2,7 @@
 # Builds and runs the portable HID report and NimBLE-adapter contract tests on
 # Windows with installed MSVC and Windows SDK headers, without device access.
 $ErrorActionPreference = 'Stop'
+$testNames = if ($args.Count) { $args } else { @('test_hid_report', 'test_hid_gatt', 'test_hid_guest') }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
 $msvcRoot = 'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC'
 $kitRoot = 'C:/Program Files (x86)/Windows Kits/10'
@@ -22,7 +23,7 @@ $libraries = @(
     "/LIBPATH:$kitRoot/Lib/$($kit.Name)/um/x64",
     "/LIBPATH:$kitRoot/Lib/$($kit.Name)/ucrt/x64"
 )
-foreach ($name in @('test_hid_report', 'test_hid_gatt', 'test_hid_guest')) {
+foreach ($name in $testNames) {
     $sources = @(
         (Join-Path $PSScriptRoot "$name.c"),
         (Join-Path $repo 'firmware/components/hid/hid_report.c')
@@ -30,7 +31,7 @@ foreach ($name in @('test_hid_report', 'test_hid_gatt', 'test_hid_guest')) {
     if ($name -eq 'test_hid_gatt') {
         $sources += (Join-Path $repo 'firmware/components/hid/hid_gatt.c')
     }
-    if ($name -eq 'test_hid_guest') {
+    if ($name -eq 'test_hid_guest' -or $name -eq 'test_auto_pairing') {
         $sources += (Join-Path $repo 'firmware/components/hid/hid_guest.c')
         $sources += (Join-Path $repo 'firmware/components/hid/hid_guest_rpc.c')
         $sources += (Join-Path $repo 'firmware/components/hid/hid_pairing.c')

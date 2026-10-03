@@ -22,7 +22,7 @@
 typedef struct { uint16_t value; } ble_uuid16_t;
 typedef struct { uint8_t type; uint8_t val[6]; } ble_addr_t;
 #define BLE_UUID16_INIT(value) {value}
-struct ble_gap_adv_params { uint8_t conn_mode, disc_mode; };
+struct ble_gap_adv_params { uint8_t conn_mode, disc_mode; uint16_t itvl_min, itvl_max; };
 struct ble_hs_adv_fields {
     uint8_t flags;
     uint8_t *name;
@@ -43,7 +43,7 @@ struct ble_gap_event {
     int type;
     union {
         struct { int status; uint16_t conn_handle; } connect;
-        struct { struct ble_gap_conn_desc conn; } disconnect;
+        struct { struct ble_gap_conn_desc conn; int reason; } disconnect;
         struct { int status; uint16_t conn_handle; } enc_change;
         struct { uint16_t conn_handle, attr_handle; uint8_t cur_notify; } subscribe;
         struct { int status; uint16_t conn_handle; } notify_tx;

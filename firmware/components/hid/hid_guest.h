@@ -55,7 +55,8 @@ void hid_guest_pairing_set_events(hid_guest_pairing_event_fn callback, void *con
 esp_err_t hid_guest_pairing_open(void);
 /** Cancels pairing; caller must run on the NimBLE host thread. */
 void hid_guest_pairing_cancel(void);
-/** Confirms or rejects the pending numeric comparison on the host thread. */
+/** Confirms or rejects a pending numeric comparison on the host thread.
+ * Guest-initiated comparisons are approved automatically before this can be called. */
 esp_err_t hid_guest_pairing_confirm(uint32_t challenge_id, bool approved);
 /** Copies current pairing state for a host-thread status bridge. */
 void hid_guest_pairing_snapshot(hid_pairing_t *output);

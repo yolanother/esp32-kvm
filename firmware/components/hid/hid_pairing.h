@@ -1,7 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Defines the portable, fail-closed HID pairing policy. The policy admits
- * known bond identities or new peers during an explicit 60-second window,
- * requires numeric confirmation, and keeps eight opaque bond tokens stable.
+ * known bond identities or new peers during a 60-second window,
+ * permits bounded numeric comparison attempts, and keeps eight opaque bond tokens stable.
  * Connected-peer lookup exposes only a nonzero token after authentication;
  * inventory copies only bounded retained tokens. */
 #ifndef ESP32_KVM_HID_PAIRING_H
@@ -12,6 +12,7 @@
 
 #define HID_PAIRING_MAX_BONDS 8
 #define HID_PAIRING_WINDOW_MS 60000ULL
+#define HID_PAIRING_MAX_ATTEMPTS 3
 #define HID_PAIRING_TOKEN_LEN 16
 
 /** A resolved BLE peer identity; never use a rotating over-the-air address. */
@@ -29,6 +30,7 @@ typedef struct {
     uint32_t challenge_id;
     uint32_t last_challenge_id;
     uint32_t challenge_number;
+    uint8_t attempt_count;
     bool window_active;
     bool challenge_active;
     bool challenge_approved;
