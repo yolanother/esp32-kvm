@@ -29,14 +29,18 @@ void kvm_transport_display_status(const kvm_transport_core_t *core,
     for (uint8_t slot = 1; slot <= KVM_ROUTER_MAX_SLOTS; ++slot) {
         const kvm_transport_slot_t *item = &core->slots[slot - 1];
         if (!has_token(item->token)) continue;
-        status->guest_slots++;
+        status->guest_slots = slot;
         bool ready = item->ready && item->subscribed;
-        if (ready) status->ready_slots++;
+        if (ready) {
+            status->ready_slots++;
+            status->ready_mask |= (uint8_t)(1u << (slot - 1u));
+        }
         if (router->slot == slot) selected_ready = ready;
     }
     if (!status->guest_slots && has_token(core->connected_token)) {
         status->guest_slots = 1;
         status->ready_slots = hid_ready ? 1 : 0;
+        status->ready_mask = hid_ready ? 1 : 0;
         selected_ready = router->slot == 1 && hid_ready;
     }
     status->guest_ready = router->slot ? selected_ready : status->ready_slots > 0;

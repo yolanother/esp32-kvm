@@ -178,9 +178,11 @@ static void publish_status(bool connected, bool guest_ready,
             for (size_t i = 0; i < sizeof(slots[slot].token); ++i)
                 has_token |= slots[slot].token[i] != 0;
             if (!has_token) continue;
-            status.guest_slots++;
-            if (slots[slot].ready && slots[slot].subscribed)
+            status.guest_slots = slot + 1u;
+            if (slots[slot].ready && slots[slot].subscribed) {
                 status.ready_slots++;
+                status.ready_mask |= (uint8_t)(1u << slot);
+            }
         }
     }
     if (display_pairing.state != KVM_DISPLAY_PAIRING_CLOSED) {
@@ -255,7 +257,9 @@ static void usb_worker(void *context)
                 slots[slot].subscribed = sampled[slot].subscribed;
             }
             memset(sampled, 0, sizeof(sampled));
-            guest_ready = valid && slots[0].ready && slots[0].subscribed;
+            guest_ready = false;
+            for (uint8_t slot = 0; valid && slot < KVM_ROUTER_MAX_SLOTS; ++slot)
+                guest_ready |= slots[slot].ready && slots[slot].subscribed;
             if (was_connected && (!valid || !kvm_transport_core_set_slots(&core, slots))) {
                 memset(slots, 0, sizeof(slots));
                 (void)kvm_transport_core_set_slots(&core, slots);
@@ -293,8 +297,14 @@ static void usb_worker(void *context)
         int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(20));
         if (read > 0) kvm_transport_core_feed(&core, bytes, (size_t)read);
         kvm_transport_core_tick(&core);
-        if ((button_bits & 1u) && !(button_bits & 2u))
-            (void)kvm_transport_core_device_select_request(&core, router.slot ? 0 : 1);
+        if ((button_bits & 1u) && !(button_bits & 2u)) {
+            uint8_t ready_mask = 0;
+            for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot)
+                if (slots[slot].ready && slots[slot].subscribed)
+                    ready_mask |= (uint8_t)(1u << slot);
+            (void)kvm_transport_core_device_select_request(&core,
+                kvm_display_next_ready_slot(ready_mask, router.slot));
+        }
         publish_status(true, guest_ready, slots);
     }
 }
@@ -322,6 +332,15 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     }
     hid_guest_pairing_set_events(pairing_event, NULL);
     kvm_router_init(&router, kvm_router_hid_output(), NULL);
+    if (!kvm_router_set_capacity(&router, KVM_ROUTER_MAX_SLOTS)) {
+        hid_guest_pairing_set_events(NULL, NULL);
+        vQueueDelete(pairing_queue);
+        vQueueDelete(pairing_touch_queue);
+        pairing_queue = NULL;
+        pairing_touch_queue = NULL;
+        (void)usb_serial_jtag_driver_uninstall();
+        return ESP_ERR_INVALID_STATE;
+    }
     if (xTaskCreate(usb_worker, "kvm_usb_loopback", KVM_USB_TASK_STACK, NULL, 10, &usb_task) != pdPASS) {
         hid_guest_pairing_set_events(NULL, NULL);
         vQueueDelete(pairing_queue);

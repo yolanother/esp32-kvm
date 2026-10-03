@@ -18,6 +18,7 @@ typedef struct {
     uint32_t generation;
     uint8_t guest_slots;
     uint8_t ready_slots;
+    uint8_t ready_mask;
     bool show_guest_list;
     bool touch_available;
     uint8_t pairing_state;
@@ -80,6 +81,8 @@ bool kvm_display_pair_touch_action(const kvm_display_status_t *status,
                                    kvm_display_pair_action_t *action);
 /** Returns the ready slot touched in a guest row, or zero if unavailable. */
 uint8_t kvm_display_touch_slot(const kvm_display_view_t *view, uint16_t y);
+/** Cycles through live guests and then Local; zero means request Local. */
+uint8_t kvm_display_next_ready_slot(uint8_t ready_mask, uint8_t current_slot);
 
 /** Request from a runtime button, never a direct route mutation. */
 typedef enum {

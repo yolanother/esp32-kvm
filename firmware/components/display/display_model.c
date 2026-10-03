@@ -52,7 +52,7 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
             snprintf(v->primary, sizeof(v->primary), "%06u", (unsigned)s->pairing_number);
             snprintf(v->detail, sizeof(v->detail), "%llus remaining",
                      (unsigned long long)((s->pairing_deadline_ms - now_ms + 999u) / 1000u));
-            COPY_TEXT(v->footer, "Compare, then approve or reject");
+            COPY_TEXT(v->footer, "Confirm matching code on guest");
         } else if (s->pairing_state == KVM_DISPLAY_PAIRING_WAITING &&
                    s->pairing_deadline_ms > now_ms) {
             COPY_TEXT(v->primary, "WAITING FOR GUEST");
@@ -88,7 +88,7 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         COPY_TEXT(v->primary, "SELECT TARGET");
         v->selectable_slots = s->guest_slots > 3 ? 3 : s->guest_slots;
         for (uint8_t i = 0; i < v->selectable_slots; ++i) {
-            const char *state = !(s->ready_slots & (1u << i)) ? "OFFLINE" :
+            const char *state = !(s->ready_mask & (1u << i)) ? "OFFLINE" :
                                 (s->armed && s->selected_slot == i + 1u) ? "ACTIVE" : "STANDBY";
             snprintf(v->rows[i], sizeof(v->rows[i]), "GUEST %u  %s", i + 1u, state);
         }
@@ -152,9 +152,7 @@ bool kvm_display_pair_touch_action(const kvm_display_status_t *s,
         if (!s->pairing_local_owner || x >= 115u) return false;
         *action = KVM_DISPLAY_PAIR_CANCEL; return true;
     case KVM_DISPLAY_PAIRING_CHALLENGE:
-        if (x >= 115u && x < 125u) return false;
-        *action = x < 115u ? KVM_DISPLAY_PAIR_REJECT : KVM_DISPLAY_PAIR_APPROVE;
-        return true;
+        return false;
     default: return false;
     }
 }
@@ -166,6 +164,13 @@ uint8_t kvm_display_touch_slot(const kvm_display_view_t *v, uint16_t y)
     uint8_t index = (uint8_t)((y - 44u) / 44u);
     if (index >= v->selectable_slots || strstr(v->rows[index], "OFFLINE")) return 0;
     return index + 1u;
+}
+
+uint8_t kvm_display_next_ready_slot(uint8_t ready_mask, uint8_t current_slot)
+{
+    for (uint8_t slot = current_slot + 1u; slot <= 3u; ++slot)
+        if (ready_mask & (1u << (slot - 1u))) return slot;
+    return 0;
 }
 
 void kvm_display_buttons_init(kvm_display_buttons_t *s, bool plus_down,

@@ -33,7 +33,7 @@ int main(void)
 
     kvm_transport_display_status(&core, &router, true, true, now, &status);
     assert(status.usb_connected && status.armed && status.guest_ready);
-    assert(status.guest_slots == 1 && status.ready_slots == 1);
+    assert(status.guest_slots == 1 && status.ready_slots == 1 && status.ready_mask == 1);
     assert(status.selected_slot == 1 && status.generation == 3);
     assert(status.pairing_state == KVM_DISPLAY_PAIRING_CHALLENGE);
     assert(status.pairing_challenge_id == 9 && status.pairing_number == 123);
@@ -64,7 +64,7 @@ int main(void)
 
     kvm_transport_core_set_connected_token(&core, NULL);
     kvm_transport_display_status(&core, &router, true, true, now, &status);
-    assert(status.guest_slots == 0 && status.ready_slots == 0);
+    assert(status.guest_slots == 0 && status.ready_slots == 0 && status.ready_mask == 0);
     assert(!status.armed && !status.guest_ready && status.fault);
 
     kvm_transport_display_status(&core, &router, false, true, now, &status);
@@ -89,7 +89,14 @@ int main(void)
     }
     assert(kvm_transport_core_set_slots(&core, slots));
     kvm_transport_display_status(&core, &router, true, false, now, &status);
-    assert(status.guest_slots == 3 && status.ready_slots == 3);
+    assert(status.guest_slots == 3 && status.ready_slots == 3 && status.ready_mask == 7);
     assert(status.selected_slot == 3 && status.guest_ready && status.armed && !status.fault);
+    memset(&slots[0], 0, sizeof(slots[0]));
+    memset(&slots[2], 0, sizeof(slots[2]));
+    router.slot = 2;
+    assert(kvm_transport_core_set_slots(&core, slots));
+    kvm_transport_display_status(&core, &router, true, false, now, &status);
+    assert(status.guest_slots == 2 && status.ready_slots == 1 && status.ready_mask == 2);
+    assert(status.selected_slot == 2 && status.guest_ready && status.armed && !status.fault);
     return 0;
 }
