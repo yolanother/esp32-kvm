@@ -235,4 +235,24 @@ mod tests {
         assert_eq!(events.recv().unwrap().event, PhysicalEvent::Motion(3, -2));
         assert!(!gate.physical_all_up());
     }
+
+    #[test]
+    fn helper_pipe_close_forces_local_capture() {
+        let (gate, _) = CaptureGate::new(8);
+        let (replies, _) = mpsc::channel();
+        let (ready, ready_rx) = mpsc::sync_channel(1);
+        let alive = Arc::new(AtomicBool::new(true));
+        assert!(gate.arm(11));
+        read_events(
+            io::Cursor::new(b"READY\n"),
+            Arc::clone(&gate),
+            replies,
+            ready,
+            Arc::clone(&alive),
+        );
+        assert!(ready_rx.recv().unwrap());
+        assert_eq!(gate.generation(), 0);
+        assert_eq!(gate.fault(), Some(CaptureFault::MessagePumpFailure));
+        assert!(!alive.load(Ordering::Acquire));
+    }
 }
