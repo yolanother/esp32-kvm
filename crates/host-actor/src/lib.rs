@@ -6,6 +6,8 @@
 // requires an exact device ACK and fresh retained-inventory exclusion before
 // profile removal; live STATUS slots never stand in for persisted bonds. A
 // consuming update handoff releases input before any app-only flash adapter runs.
+// Aggregate input trace separates captured, serial-written, and board-enqueued
+// events without recording key contents.
 
 #![forbid(unsafe_code)]
 
@@ -43,6 +45,23 @@ const HEARTBEAT_MS: u64 = 100;
 const STATUS_REQUEST_MS: u64 = 250;
 const CONTROL_RETRY_MS: u64 = 100;
 const PEER_TIMEOUT_MS: u64 = 500;
+
+/// Aggregate input-path observations for the current verified USB session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InputTrace {
+    /// Physical key transitions presented to the host actor.
+    pub key_events_seen: u64,
+    /// Key transitions admitted by the capture gate and mapping policy.
+    pub key_events_accepted: u64,
+    /// Key-state frames successfully written to the USB stream after admission.
+    pub key_frames_written: u64,
+    /// Sequence of the most recent admitted key-state frame.
+    pub last_key_seq: Option<u32>,
+    /// Highest input sequence accepted into the board router, when reported.
+    pub board_accepted_seq: Option<u32>,
+    /// Highest input sequence enqueued to BLE, when reported.
+    pub ble_enqueued_seq: Option<u32>,
+}
 
 /// A translated keyboard output supplied by the active guest profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -326,6 +345,7 @@ pub struct HostActor<S: Read + Write> {
     buttons: u8,
     wheel_residual: i32,
     pan_residual: i32,
+    input_trace: InputTrace,
 }
 
 impl<S: Read + Write> HostActor<S> {
@@ -380,6 +400,7 @@ impl<S: Read + Write> HostActor<S> {
             buttons: 0,
             wheel_residual: 0,
             pan_residual: 0,
+            input_trace: InputTrace::default(),
         };
         actor.send(MessageKind::GetStatus, 0, vec![])?;
         Ok(actor)
@@ -402,6 +423,11 @@ impl<S: Read + Write> HostActor<S> {
     /// Returns the terminal fault, if this session must be renegotiated.
     pub fn fault(&self) -> Option<HostFault> {
         self.fault
+    }
+
+    /// Returns aggregate input progress without exposing key contents.
+    pub fn input_trace(&self) -> InputTrace {
+        self.input_trace
     }
 
     /// Installs a validated guest profile by its persistent opaque bond token.
@@ -666,6 +692,9 @@ impl<S: Read + Write> HostActor<S> {
 
     /// Processes one bounded capture event without replaying pointer deltas.
     pub fn on_capture(&mut self, event: CaptureEvent, now_ms: u64) {
+        if matches!(event.event, PhysicalEvent::Key { .. }) {
+            self.input_trace.key_events_seen += 1;
+        }
         if let PhysicalEvent::Hotkey(action) = event.event {
             if action == Action::Local || event.generation == self.capture.generation() {
                 self.request(action, now_ms);
@@ -692,6 +721,7 @@ impl<S: Read + Write> HostActor<S> {
                 repeat,
             } => {
                 if !repeat && self.update_key(virtual_key, scan_code, extended, down) {
+                    self.input_trace.key_events_accepted += 1;
                     self.send_key_state();
                 }
             }
@@ -888,7 +918,15 @@ impl<S: Read + Write> HostActor<S> {
                     self.handle_ack(frame, now_ms);
                 }
             }
-            MessageKind::InputProgress => self.last_peer = now_ms,
+            MessageKind::InputProgress => {
+                if frame.route_generation == self.confirmed_generation {
+                    self.input_trace.board_accepted_seq =
+                        Some(u32::from_le_bytes(frame.payload[0..4].try_into().unwrap()));
+                    self.input_trace.ble_enqueued_seq =
+                        Some(u32::from_le_bytes(frame.payload[4..8].try_into().unwrap()));
+                }
+                self.last_peer = now_ms;
+            }
             MessageKind::DeviceSelectRequest => {
                 self.last_peer = now_ms;
                 let action = if frame.payload[0] == 0 {
@@ -1219,11 +1257,12 @@ impl<S: Read + Write> HostActor<S> {
 
     fn send_key_state(&mut self) {
         let payload = self.mapping.report().bytes().to_vec();
-        if self
-            .send(MessageKind::KeyState, self.confirmed_generation, payload)
-            .is_err()
-        {
+        let frame = self.make_frame(MessageKind::KeyState, self.confirmed_generation, payload);
+        if self.write_frame(&frame).is_err() {
             self.fail(HostFault::Transport);
+        } else {
+            self.input_trace.key_frames_written += 1;
+            self.input_trace.last_key_seq = Some(frame.seq);
         }
     }
 

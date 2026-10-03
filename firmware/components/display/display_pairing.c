@@ -60,7 +60,7 @@ bool kvm_display_pairing_accept(const kvm_display_pairing_t *p,
             p->deadline_ms > now_ms;
     case KVM_DISPLAY_PAIR_APPROVE:
     case KVM_DISPLAY_PAIR_REJECT:
-        return p->local_owner && p->state == KVM_DISPLAY_PAIRING_CHALLENGE && p->challenge_id &&
+        return p->state == KVM_DISPLAY_PAIRING_CHALLENGE && p->challenge_id &&
             request.challenge_id == p->challenge_id && p->number <= 999999u &&
             p->deadline_ms > now_ms;
     default: return false;

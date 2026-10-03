@@ -113,8 +113,10 @@ int main(void)
     assert(kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_REJECT, &request));
     assert(request.challenge_id == 91);
     status.pairing_local_owner = false;
-    assert(!kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_APPROVE, &request));
-    assert(!kvm_display_pair_touch_action(&status, 180, 180, &touched));
+    assert(kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_APPROVE, &request));
+    assert(request.challenge_id == 91);
+    assert(kvm_display_pair_touch_action(&status, 180, 180, &touched));
+    assert(touched == KVM_DISPLAY_PAIR_APPROVE);
     status.pairing_local_owner = true;
     assert(!kvm_display_pair_request(&status, 61000, KVM_DISPLAY_PAIR_APPROVE, &request));
     assert(request.challenge_id == 0);
@@ -168,6 +170,8 @@ int main(void)
     request = (kvm_display_pair_request_t){KVM_DISPLAY_PAIR_APPROVE, 90};
     assert(!kvm_display_pairing_accept(&pairing, request, 2000));
     request.challenge_id = 91;
+    assert(kvm_display_pairing_accept(&pairing, request, 2000));
+    pairing.local_owner = false;
     assert(kvm_display_pairing_accept(&pairing, request, 2000));
     assert(!kvm_display_pairing_accept(&pairing, request, 61000));
     kvm_display_pairing_replied(&pairing, true);

@@ -717,6 +717,22 @@ fn active_input_uses_current_generation_and_never_replays_deltas() {
     actor.on_capture(
         CaptureEvent {
             generation: 1,
+            event: PhysicalEvent::Key {
+                virtual_key: 0x41,
+                scan_code: 0x1e,
+                extended: false,
+                down: true,
+                repeat: false,
+            },
+        },
+        6,
+    );
+    assert_eq!(actor.input_trace().key_events_seen, 1);
+    assert_eq!(actor.input_trace().key_events_accepted, 0);
+    assert_eq!(actor.input_trace().key_frames_written, 0);
+    actor.on_capture(
+        CaptureEvent {
+            generation: 1,
             event: PhysicalEvent::Motion(9, 0),
         },
         6,
@@ -754,6 +770,19 @@ fn active_input_uses_current_generation_and_never_replays_deltas() {
         .collect();
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[1].payload, [0, 0, 4, 0, 0, 0, 0, 0]);
+    let trace = actor.input_trace();
+    assert_eq!(trace.key_events_seen, 2);
+    assert_eq!(trace.key_events_accepted, 1);
+    assert_eq!(trace.key_frames_written, 1);
+    assert_eq!(trace.last_key_seq, Some(keys[1].seq));
+    let mut progress = Vec::new();
+    progress.extend_from_slice(&keys[1].seq.to_le_bytes());
+    progress.extend_from_slice(&keys[1].seq.to_le_bytes());
+    wire.feed(Frame::new(MessageKind::InputProgress, 5, 99, 2, progress));
+    actor.poll(9);
+    let trace = actor.input_trace();
+    assert_eq!(trace.board_accepted_seq, trace.last_key_seq);
+    assert_eq!(trace.ble_enqueued_seq, trace.last_key_seq);
 }
 
 #[test]

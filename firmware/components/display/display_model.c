@@ -52,8 +52,7 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
             snprintf(v->primary, sizeof(v->primary), "%06u", (unsigned)s->pairing_number);
             snprintf(v->detail, sizeof(v->detail), "%llus remaining",
                      (unsigned long long)((s->pairing_deadline_ms - now_ms + 999u) / 1000u));
-            COPY_TEXT(v->footer, s->pairing_local_owner ?
-                      "Compare, then approve or reject" : "Compare and confirm on host");
+            COPY_TEXT(v->footer, "Compare, then approve or reject");
         } else if (s->pairing_state == KVM_DISPLAY_PAIRING_WAITING &&
                    s->pairing_deadline_ms > now_ms) {
             COPY_TEXT(v->primary, "WAITING FOR GUEST");
@@ -126,7 +125,7 @@ bool kvm_display_pair_request(const kvm_display_status_t *s, uint64_t now_ms,
         break;
     case KVM_DISPLAY_PAIR_APPROVE:
     case KVM_DISPLAY_PAIR_REJECT:
-        if (!s->pairing_local_owner || s->pairing_state != KVM_DISPLAY_PAIRING_CHALLENGE ||
+        if (s->pairing_state != KVM_DISPLAY_PAIRING_CHALLENGE ||
             !s->pairing_challenge_id || s->pairing_number > 999999u ||
             s->pairing_deadline_ms <= now_ms) return false;
         request->challenge_id = s->pairing_challenge_id;
@@ -153,7 +152,6 @@ bool kvm_display_pair_touch_action(const kvm_display_status_t *s,
         if (!s->pairing_local_owner || x >= 115u) return false;
         *action = KVM_DISPLAY_PAIR_CANCEL; return true;
     case KVM_DISPLAY_PAIRING_CHALLENGE:
-        if (!s->pairing_local_owner) return false;
         if (x >= 115u && x < 125u) return false;
         *action = x < 115u ? KVM_DISPLAY_PAIR_REJECT : KVM_DISPLAY_PAIR_APPROVE;
         return true;

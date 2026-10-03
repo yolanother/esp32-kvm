@@ -245,8 +245,8 @@ static void display_worker(void *context)
                     break;
                 case KVM_DISPLAY_PAIRING_CHALLENGE:
                     lv_obj_set_width(left_action, 103);
-                    set_action(left_action, next.pairing_local_owner ? "REJECT" : NULL);
-                    set_action(right_action, next.pairing_local_owner ? "APPROVE" : NULL);
+                    set_action(left_action, "REJECT");
+                    set_action(right_action, "APPROVE");
                     break;
                 default:
                     set_action(left_action, NULL);
