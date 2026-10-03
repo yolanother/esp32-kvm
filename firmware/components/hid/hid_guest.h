@@ -2,7 +2,8 @@
  * Exposes opt-in single-guest NimBLE startup for hardware bring-up. Firmware
  * main remains disarmed; callers must verify board recovery and explicitly
  * start this service before it can advertise or accept a guest. It also
- * exposes bounded NimBLE host-loop pairing requests and short status events. */
+ * exposes bounded NimBLE host-loop pairing requests and short status events.
+ * Connected-peer STATUS lookup exposes only its stable opaque bond token. */
 #ifndef ESP32_KVM_HID_GUEST_H
 #define ESP32_KVM_HID_GUEST_H
 
@@ -18,7 +19,9 @@ typedef enum {
     HID_GUEST_BONDED,
     HID_GUEST_PAIRING_REJECTED,
     HID_GUEST_PAIRING_CAPACITY,
-    HID_GUEST_PAIRING_TIMEOUT
+    HID_GUEST_PAIRING_TIMEOUT,
+    /** Signals the USB worker to clear its connected-token STATUS cache. */
+    HID_GUEST_DISCONNECTED
 } hid_guest_pairing_event_type_t;
 
 /** Status event; number is present only for CHALLENGE, token only for BONDED. */
@@ -46,6 +49,9 @@ void hid_guest_pairing_cancel(void);
 esp_err_t hid_guest_pairing_confirm(uint32_t challenge_id, bool approved);
 /** Copies current pairing state for a host-thread status bridge. */
 void hid_guest_pairing_snapshot(hid_pairing_t *output);
+/** Looks up the current authenticated connection's opaque token on the NimBLE host loop.
+ * Clears output and returns false for unbound, disconnected, or unauthenticated peers. */
+bool hid_guest_current_bond_token(hid_token_t *output);
 /** Removes one bond only after explicit confirmation on the host thread. */
 esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed);
 /** Disarms and terminates the current guest after uncertain all-up delivery.
@@ -73,6 +79,9 @@ bool hid_guest_request_pair_begin(void);
 bool hid_guest_request_pair_cancel(void);
 /** Answers the exact challenge on the NimBLE host loop within a bounded wait. */
 bool hid_guest_request_pair_reply(uint32_t challenge_id, bool approved);
+/** Retrieves only a connected authenticated peer's opaque token through a bounded RPC.
+ * Always clears output on failure; never returns BLE addresses or key material. */
+bool hid_guest_request_current_bond_token(uint8_t output[HID_PAIRING_TOKEN_LEN]);
 /** Forgets one confirmed opaque bond token on the NimBLE host loop. */
 bool hid_guest_request_forget_bond(const uint8_t token[HID_PAIRING_TOKEN_LEN]);
 

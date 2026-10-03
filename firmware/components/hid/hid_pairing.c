@@ -1,6 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Implements timed HID admission, one pending numeric comparison, and a
- * bounded identity-to-token bond table without implicit deletion. */
+ * bounded identity-to-token bond table without implicit deletion. Connected
+ * lookup clears output unless the peer is authenticated and bound. */
 #include "hid_pairing.h"
 #include <string.h>
 
@@ -110,6 +111,19 @@ bool hid_pairing_add_bond(hid_pairing_t *state, hid_peer_t peer, hid_token_t tok
         if (same_token(state->bonds[index].token, token)) return false;
     state->bonds[state->bond_count++] = (hid_bond_t){peer, token};
     hid_pairing_cancel(state);
+    return true;
+}
+
+bool hid_pairing_connected_token(const hid_pairing_t *state, bool connected,
+                                 bool authenticated, hid_peer_t peer, hid_token_t *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!connected || !authenticated || !state || !hid_pairing_token(state, peer, out) ||
+        token_zero(*out)) {
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
     return true;
 }
 

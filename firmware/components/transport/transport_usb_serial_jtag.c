@@ -2,7 +2,8 @@
  * Bridges binary framed routing traffic through ESP32-S3 USB Serial/JTAG CDC.
  * One worker serializes transport and router calls, rotates the session on
  * disconnect, ticks the fail-local lease, and queues NimBLE pairing events
- * for serialized minor-one STATUS without reading HID state on this task. */
+ * for serialized minor-one STATUS. It refreshes only the authenticated
+ * connected peer's opaque token through a bounded HID host-loop RPC. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "router_hid_bridge.h"
@@ -14,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include <string.h>
 #include <stdatomic.h>
 #include "sdkconfig.h"
 
@@ -51,16 +53,23 @@ static void pairing_event(const hid_guest_pairing_event_t *event, void *context)
         atomic_store(&pairing_overflow, true);
 }
 
-static void drain_pairing_events(void)
+static void drain_pairing_events(uint8_t connected_token[16])
 {
     hid_guest_pairing_event_t event;
     if (atomic_exchange(&pairing_overflow, false)) {
         (void)xQueueReset(pairing_queue);
+        memset(connected_token, 0, 16);
+        kvm_transport_core_set_connected_token(&core, NULL);
         (void)hid_guest_request_pair_cancel();
         kvm_transport_core_pairing_event(&core, KVM_PAIRING_REJECTED, 0, 0, 0);
         return;
     }
     while (xQueueReceive(pairing_queue, &event, 0) == pdTRUE) {
+        if (event.type == HID_GUEST_DISCONNECTED) {
+            memset(connected_token, 0, 16);
+            kvm_transport_core_set_connected_token(&core, NULL);
+            continue;
+        }
         kvm_transport_pairing_state_t state;
         switch (event.type) {
         case HID_GUEST_PAIRING_OPENED: state = KVM_PAIRING_WAITING; break;
@@ -130,6 +139,8 @@ static void usb_worker(void *context)
     bool was_connected = false;
     bool guest_ready = false;
     uint64_t last_ready_ms = 0;
+    bool ready_sampled = false;
+    uint8_t connected_token[16] = {0};
     for (;;) {
         uint32_t button_bits = 0;
         (void)xTaskNotifyWait(0, UINT32_MAX, &button_bits, 0);
@@ -141,10 +152,15 @@ static void usb_worker(void *context)
         }
         bool connected = usb_serial_jtag_is_connected();
         uint64_t time_ms = now_ms(NULL);
-        drain_pairing_events();
-        if (time_ms < last_ready_ms || time_ms - last_ready_ms >= 1000) {
+        drain_pairing_events(connected_token);
+        if (!ready_sampled || time_ms < last_ready_ms || time_ms - last_ready_ms >= 1000) {
             guest_ready = hid_guest_request_ready();
+            memset(connected_token, 0, sizeof(connected_token));
+            (void)hid_guest_request_current_bond_token(connected_token);
+            if (was_connected)
+                kvm_transport_core_set_connected_token(&core, connected_token);
             last_ready_ms = time_ms;
+            ready_sampled = true;
         }
         if (!connected) {
             if (was_connected) {
@@ -162,6 +178,7 @@ static void usb_worker(void *context)
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
             kvm_transport_core_bind_pairing(&core,
                 (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply, pair_forget}, NULL);
+            kvm_transport_core_set_connected_token(&core, connected_token);
             was_connected = true;
         }
         int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(20));

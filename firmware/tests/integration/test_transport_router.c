@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Sends independently encoded USB frames through transport and router with a
  * fake one-guest HID sink, checking command dispatch, ACKs, report fencing,
- * malformed input rejection, lease expiry, and disconnect release. */
+ * malformed input rejection, lease expiry, disconnect release, and the
+ * connected guest's opaque STATUS token. */
 #include "transport_core.h"
 #include "router.h"
 #include <assert.h>
@@ -118,6 +119,21 @@ int main(void)
     assert(replies == before_heartbeat);
     send_frame(&core, KVM_MSG_GET_STATUS, 7, 21, 0, NULL, 0);
     expect_reply(KVM_MSG_STATUS, 0, 0);
+    uint8_t bond_token[16] = {1};
+    kvm_transport_core_set_connected_token(&core, bond_token);
+    send_frame(&core, KVM_MSG_GET_STATUS, 7, 22, 0, NULL, 0);
+    uint8_t token_status[600];
+    (void)decode(token_status);
+    assert(memcmp(token_status + KVM_PROTOCOL_HEADER_LEN + 12, bond_token, 16) == 0);
+    ready = false;
+    send_frame(&core, KVM_MSG_GET_STATUS, 7, 23, 0, NULL, 0);
+    (void)decode(token_status);
+    assert(memcmp(token_status + KVM_PROTOCOL_HEADER_LEN + 12, bond_token, 16) == 0);
+    kvm_transport_core_set_connected_token(&core, NULL);
+    ready = true;
+    send_frame(&core, KVM_MSG_GET_STATUS, 7, 24, 0, NULL, 0);
+    (void)decode(token_status);
+    assert(memcmp(token_status + KVM_PROTOCOL_HEADER_LEN + 12, (uint8_t[16]){0}, 16) == 0);
     command[0] = 1; u32(command + 1, 0); u32(command + 5, 1);
     send_frame(&core, KVM_MSG_SWITCH, 7, 3, 0, command, 9);
     expect_reply(KVM_MSG_ACK, 0, 1);

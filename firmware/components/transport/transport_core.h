@@ -2,7 +2,8 @@
  * Defines the disarmed firmware USB loopback protocol core. It accepts bounded
  * COBS frames, validates CRC32C and sessions, and dispatches authenticated
  * routing commands to a bound serialized router. Minor-one pairing controls
- * use bounded callbacks and STATUS events. A USB CDC adapter owns I/O. */
+ * use bounded callbacks and STATUS events. STATUS exposes only a current
+ * authenticated guest's opaque token; a USB CDC adapter owns I/O. */
 #ifndef ESP32_KVM_TRANSPORT_CORE_H
 #define ESP32_KVM_TRANSPORT_CORE_H
 
@@ -64,6 +65,7 @@ typedef struct {
     uint64_t pairing_deadline_ms;
     kvm_transport_pairing_state_t status_pairing_state;
     uint32_t status_challenge_id;
+    uint8_t connected_token[16];
     bool last_forget_valid;
     uint32_t last_forget_seq;
     uint32_t last_forget_generation;
@@ -94,6 +96,10 @@ void kvm_transport_core_pairing_event(kvm_transport_core_t *core,
                                       kvm_transport_pairing_state_t state,
                                       uint32_t challenge_id, uint32_t number,
                                       uint64_t deadline_ms);
+/** Caches one nonzero authenticated connected-peer token; NULL clears it.
+ * Only the USB worker calls this after a bounded HID host-loop lookup. */
+void kvm_transport_core_set_connected_token(kvm_transport_core_t *core,
+                                            const uint8_t token[16]);
 /** Drains router input and enforces the lease while USB is idle. */
 void kvm_transport_core_tick(kvm_transport_core_t *core);
 /** Sends an arbitration request for a physical PLUS press in an open USB session. */

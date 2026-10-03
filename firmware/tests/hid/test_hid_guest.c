@@ -1,6 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Exercises HID guest admission, numeric consent, authenticated bonding,
- * token persistence, and deliberate removal with mocked NimBLE and NVS. */
+ * token persistence, bounded current-token lookup, disconnect clearing,
+ * and deliberate removal with mocked NimBLE and NVS. */
 #include <assert.h>
 #include <string.h>
 #include "hid_guest.h"
@@ -144,7 +145,7 @@ int main(void)
     assert(hid_guest_pairing_open() == 0 && last_event.type == HID_GUEST_PAIRING_OPENED);
     time_us = 60000000;
     host_timeout.callback(NULL);
-    assert(last_event.type == HID_GUEST_PAIRING_CLOSED);
+    assert(last_event.type == HID_GUEST_PAIRING_TIMEOUT);
     gap_callback(&connect, NULL);
     assert(terminations == 2 && !channel.connected);
     assert(hid_guest_pairing_open() == 0);
@@ -179,6 +180,14 @@ int main(void)
     assert(sizeof(last_event.token.bytes) == 16 &&
            memcmp(last_event.token.bytes, zero_token.bytes, HID_PAIRING_TOKEN_LEN) != 0 && saved_size);
     hid_token_t token = last_event.token;
+    uint8_t current_token[16];
+    assert(hid_guest_request_current_bond_token(current_token));
+    assert(memcmp(current_token, token.bytes, sizeof(current_token)) == 0);
+    active_peer.val[0] = 99;
+    memset(current_token, 0xa5, sizeof(current_token));
+    assert(!hid_guest_request_current_bond_token(current_token));
+    assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
+    active_peer.val[0] = 42;
     hid_pairing_t snapshot;
     hid_guest_pairing_snapshot(&snapshot);
     assert(snapshot.bond_count == 1 &&
@@ -187,6 +196,10 @@ int main(void)
     disconnect.disconnect.conn.conn_handle = 17;
     gap_callback(&disconnect, NULL);
     assert(advertisements == 2 && !channel.connected);
+    assert(last_event.type == HID_GUEST_DISCONNECTED);
+    memset(current_token, 0xa5, sizeof(current_token));
+    assert(!hid_guest_request_current_bond_token(current_token));
+    assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
     gap_callback(&connect, NULL);
     assert(channel.connected && terminations == 2);
     hold_host = true;

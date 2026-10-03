@@ -1,0 +1,7 @@
+# Connected guest token in firmware STATUS
+
+The BLE host loads the persisted pairing table from `hid_pairing_store` at startup. For the current connection, it resolves NimBLE's identity address on the host loop and looks up the corresponding opaque 16-byte token. The lookup requires a connected, encrypted, bonded, authenticated link and a nonzero token. It clears its output on any failure and never sends a BLE address or key to the USB worker.
+
+`hid_guest_request_current_bond_token` uses the existing single-slot HID RPC with its 20 ms bound. The USB worker samples readiness and token at most once per second, then updates a token cache in the transport core. STATUS copies only that token into the slot map, including while an authenticated peer awaits HID subscriptions. A NimBLE disconnect/reset event clears the cache before the USB worker's next serial read; queue overflow also clears it. USB reset clears the core cache. An unknown, disconnected, or unauthenticated peer therefore cannot retain a previous guest identity in STATUS. The host profile layer must treat zero as unbound. This reports the live slot only and does not enumerate offline bonds.
+
+Portable MSVC tests cover known/unknown/disconnected identity lookup, native-mock HID RPC output clearing, disconnect notification, STATUS serialization, and explicit cache clear. Physical BLE reconnection and STATUS observation remain a separate gate; this branch does not use COM7.

@@ -3,7 +3,8 @@
  * ESP32-S3 CDC. Validated frames enter one serialized router; malformed or
  * stale frames have no HID effects and diagnostic text never enters CDC.
  * Minor-one pairing replies match the active challenge and bond deletion
- * accepts only an exact opaque token while routing is local and disarmed. */
+ * accepts only an exact opaque token while routing is local and disarmed.
+ * STATUS reports only the authenticated connected guest's cached token. */
 #include "transport_core.h"
 #include <string.h>
 
@@ -160,7 +161,7 @@ static void send_status(kvm_transport_core_t *core, uint32_t seq)
     uint8_t p[96] = {0xa5, 1, 0, 2, 0, 3, 0x81, 0xa5, 1, 1, 2, 0x50};
     kvm_router_t *r = core->router;
     bool is_ready = r && r->output.ready && r->output.ready(r->context, 1);
-    /* Slot map contains a zero opaque token until bonding identity is wired. */
+    memcpy(p + 12, core->connected_token, sizeof(core->connected_token));
     size_t at = 28;
     p[at++] = 3; p[at++] = is_ready ? 0xf5 : 0xf4;
     p[at++] = 4; p[at++] = is_ready ? 0xf5 : 0xf4;
@@ -455,6 +456,7 @@ void kvm_transport_core_reset(kvm_transport_core_t *core)
     core->draining = false;
     core->session_open = false;
     core->minor = 0;
+    memset(core->connected_token, 0, sizeof(core->connected_token));
     core->pairing_state = KVM_PAIRING_CLOSED;
     core->pairing_challenge_id = 0;
     core->last_forget_valid = false;
@@ -516,6 +518,18 @@ void kvm_transport_core_pairing_event(kvm_transport_core_t *core,
     core->pairing_deadline_ms = deadline_ms;
     core->pairing_challenge_id = state == KVM_PAIRING_CHALLENGE ? challenge_id : 0;
     core->pairing_number = state == KVM_PAIRING_CHALLENGE ? number : 0;
+}
+
+void kvm_transport_core_set_connected_token(kvm_transport_core_t *core,
+                                            const uint8_t token[16])
+{
+    if (!core) return;
+    memset(core->connected_token, 0, sizeof(core->connected_token));
+    if (!token) return;
+    bool nonzero = false;
+    for (size_t index = 0; index < sizeof(core->connected_token); ++index)
+        nonzero |= token[index] != 0;
+    if (nonzero) memcpy(core->connected_token, token, sizeof(core->connected_token));
 }
 
 void kvm_transport_core_tick(kvm_transport_core_t *core)

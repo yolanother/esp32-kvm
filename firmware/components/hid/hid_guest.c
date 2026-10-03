@@ -2,7 +2,8 @@
  * Starts an optional single-identity NimBLE HID peripheral after explicit
  * firmware integration. It advertises a composite HID service, requires an
  * authenticated bonded link and explicit pairing consent, while routing stays
- * disarmed until the host actor arms. */
+ * disarmed until the host actor arms. A connected peer's opaque token is
+ * resolved from the persisted pairing table only after link authentication. */
 #include "hid_guest.h"
 
 #include <string.h>
@@ -127,6 +128,7 @@ static void on_reset(int reason)
 {
     (void)reason;
     hid_channel_disconnected(hid_gatt_channel());
+    publish(HID_GUEST_DISCONNECTED, 0, 0, NULL);
 }
 
 static void on_sync(void)
@@ -165,6 +167,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         hid_gatt_on_disconnect(event->disconnect.conn.conn_handle);
+        publish(HID_GUEST_DISCONNECTED, event->disconnect.conn.conn_handle, 0, NULL);
         if (pairing.challenge_active)
             publish(HID_GUEST_PAIRING_REJECTED, event->disconnect.conn.conn_handle, 0, NULL);
         pairing.challenge_active = false;
@@ -351,6 +354,24 @@ void hid_guest_pairing_snapshot(hid_pairing_t *output)
 {
     expire_window();
     *output = pairing;
+}
+
+bool hid_guest_current_bond_token(hid_token_t *output)
+{
+    if (!output) return false;
+    memset(output, 0, sizeof(*output));
+    hid_channel_t *channel = hid_gatt_channel();
+    if (!started || !channel->connected || !channel->encrypted || channel->needs_disconnect)
+        return false;
+    struct ble_gap_conn_desc description;
+    if (ble_gap_conn_find(channel->connection_handle, &description) != 0 ||
+        description.conn_handle != channel->connection_handle)
+        return false;
+    bool authenticated = description.sec_state.encrypted &&
+                         description.sec_state.bonded &&
+                         description.sec_state.authenticated;
+    return hid_pairing_connected_token(&pairing, true, authenticated,
+                                       peer_identity(&description.peer_id_addr), output);
 }
 
 esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed)
