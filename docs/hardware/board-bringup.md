@@ -106,6 +106,8 @@ With a blank TextEdit document reportedly focused on the newly paired Mac, HostA
 
 The user then reported no character in TextEdit and no match for `ESP32 KVM` in `hidutil list`. A name-only HID search may miss a device registered under a PnP-derived name, so a numeric VID/PID search remains pending. The battery characteristic was separately found to return 0%; the local source now reports 100% for the USB-powered board and passed the HID suite, but this correction has not been flashed and has no demonstrated causal link to macOS HID registration. Static review of NimBLE event ordering showed bonded CCCD restore occurs after application connection/encryption callbacks; no subscription-reset change was warranted. Fresh Mac input delivery remains unverified.
 
+The new Mac's `hidutil` search by the board's numeric VID/PID also returned no row, strengthening the inference that macOS had not created a HID device for the BLE link. The corrected Battery Service app (1,007,632 bytes; SHA-256 `6AE0E62FBC32A841DB3E48D27F1ADB6B6D118938CBA6070FD052DE3CF0172F26`) passed the HID MSVC suite and ESP-IDF 5.5.1 build. Fresh COM7 reads matched the pinned partition hash and all-`0xff` OTA selector; esptool flashed only the app at `0x20000` and verified its data hash. The rebooted app reported `Local`, no fault, two retained Mac bonds, and no live slot. A 110-second COM7 watch observed no automatic Mac reconnect. The Mac's Bluetooth status, fresh registration, and input after this image remain pending.
+
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
