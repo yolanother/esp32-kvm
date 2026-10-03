@@ -293,10 +293,46 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         }
         return 0;
     }
-    case BLE_GAP_EVENT_REPEAT_PAIRING:
-        /* Preserve the old bond; deletion requires explicit user intent. */
-        ble_gap_terminate(event->repeat_pairing.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        return 0;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* A peer that forgot its key can repair only during an explicitly
+           opened pairing window. Keep every other peer's bond untouched. */
+        uint16_t handle = event->repeat_pairing.conn_handle;
+        struct ble_gap_conn_desc description;
+        expire_window();
+        bool allowed = pairing.window_active &&
+                       event->repeat_pairing.new_authenticated &&
+                       event->repeat_pairing.new_sc &&
+                       event->repeat_pairing.new_bonding &&
+                       ble_gap_conn_find(handle, &description) == 0;
+        if (allowed) {
+            hid_peer_t peer = peer_identity(&description.peer_id_addr);
+            for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+                hid_channel_t *other = hid_gatt_channel_at(slot);
+                struct ble_gap_conn_desc other_description;
+                if (!other->connected || other->connection_handle == handle) continue;
+                if (ble_gap_conn_find(other->connection_handle, &other_description) == 0 &&
+                    other_description.peer_id_addr.type == description.peer_id_addr.type &&
+                    memcmp(other_description.peer_id_addr.val, description.peer_id_addr.val,
+                           sizeof(description.peer_id_addr.val)) == 0) allowed = false;
+            }
+            if (allowed) {
+                hid_pairing_t next = pairing;
+                hid_token_t old_token;
+                bool known = hid_pairing_token(&pairing, peer, &old_token);
+                if (known && (!hid_pairing_forget(&next, old_token, true) ||
+                              hid_pairing_store_save(&next) != ESP_OK)) allowed = false;
+                if (allowed && ble_store_util_delete_peer(&description.peer_id_addr) == 0) {
+                    pairing = next;
+                    ESP_LOGI(tag, "Replacing one forgotten BLE bond during pairing window");
+                    return BLE_GAP_REPEAT_PAIRING_RETRY;
+                }
+                if (known && allowed) (void)hid_pairing_store_save(&pairing);
+            }
+        }
+        ESP_LOGW(tag, "Repeat pairing rejected outside safe repair window");
+        ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+        return BLE_GAP_REPEAT_PAIRING_IGNORE;
+    }
     default: return 0;
     }
 }

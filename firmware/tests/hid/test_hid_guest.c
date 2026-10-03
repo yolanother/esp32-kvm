@@ -29,6 +29,7 @@ static struct ble_npl_callout host_timeout;
 static bool hold_host;
 static bool fail_next_commit;
 static int security_result;
+static unsigned deleted_peers;
 
 static void event_sink(const hid_guest_pairing_event_t *event, void *context)
 { (void)context; last_event = *event; }
@@ -105,7 +106,7 @@ int ble_hs_util_ensure_addr(int privacy) { return privacy; }
 int ble_hs_id_infer_auto(int privacy, uint8_t *type) { *type = 0; return privacy; }
 int ble_store_util_bonded_peers(ble_addr_t *peers, int *count, int maximum)
 { (void)peers; (void)maximum; *count = saved_size ? 1 : 0; return 0; }
-int ble_store_util_delete_peer(const ble_addr_t *peer) { (void)peer; return 0; }
+int ble_store_util_delete_peer(const ble_addr_t *peer) { (void)peer; deleted_peers++; return 0; }
 int ble_sm_inject_io(uint16_t handle, struct ble_sm_io *io)
 { assert((handle == 17 || handle == 18) && io->action == BLE_SM_IOACT_NUMCMP && io->numcmp_accept);
   confirmations++; return 0; }
@@ -287,5 +288,46 @@ int main(void)
     host_queue.pending = NULL;
     assert(second->needs_disconnect && !channel.needs_disconnect &&
            terminations == prior_terminations + 1);
+    /* A Mac that forgot its key may replace only its own stored bond while
+       an explicit pairing window is open; the other guest stays enrolled. */
+    hid_gatt_on_disconnect(17);
+    hid_gatt_on_disconnect(18);
+    active_peer.val[0] = 42;
+    gap_callback(&connect, NULL);
+    gap_callback(&challenge, NULL);
+    gap_callback(&encryption, NULL);
+    hid_token_t first = last_event.token;
+    gap_callback(&disconnect, NULL);
+    active_peer.val[0] = 99;
+    gap_callback(&connect, NULL);
+    gap_callback(&challenge, NULL);
+    gap_callback(&encryption, NULL);
+    hid_token_t preserved = last_event.token;
+    assert(memcmp(first.bytes, preserved.bytes, HID_PAIRING_TOKEN_LEN) != 0);
+    gap_callback(&disconnect, NULL);
+    active_peer.val[0] = 42;
+    gap_callback(&connect, NULL);
+    struct ble_gap_event repeat = {.type = BLE_GAP_EVENT_REPEAT_PAIRING};
+    repeat.repeat_pairing.conn_handle = 17;
+    repeat.repeat_pairing.new_authenticated = 1;
+    repeat.repeat_pairing.new_sc = 1;
+    repeat.repeat_pairing.new_bonding = 1;
+    unsigned deleted_before = deleted_peers;
+    assert(gap_callback(&repeat, NULL) == BLE_GAP_REPEAT_PAIRING_IGNORE);
+    assert(deleted_peers == deleted_before);
+    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(retained_count == 2);
+    gap_callback(&disconnect, NULL);
+    gap_callback(&connect, NULL);
+    assert(hid_guest_pairing_open() == 0);
+    repeat.repeat_pairing.new_sc = 0;
+    assert(gap_callback(&repeat, NULL) == BLE_GAP_REPEAT_PAIRING_IGNORE);
+    assert(deleted_peers == deleted_before);
+    repeat.repeat_pairing.new_sc = 1;
+    assert(gap_callback(&repeat, NULL) == BLE_GAP_REPEAT_PAIRING_RETRY);
+    assert(deleted_peers == deleted_before + 1);
+    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(retained_count == 1 &&
+           memcmp(retained[0], preserved.bytes, HID_PAIRING_TOKEN_LEN) == 0);
     return 0;
 }

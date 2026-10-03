@@ -13,6 +13,8 @@
 #define BLE_GAP_EVENT_ADV_COMPLETE 6
 #define BLE_GAP_EVENT_REPEAT_PAIRING 7
 #define BLE_GAP_EVENT_PASSKEY_ACTION 8
+#define BLE_GAP_REPEAT_PAIRING_IGNORE 0
+#define BLE_GAP_REPEAT_PAIRING_RETRY 1
 #define BLE_HS_ADV_F_DISC_GEN 1
 #define BLE_HS_ADV_F_BREDR_UNSUP 4
 #define BLE_GAP_CONN_MODE_UND 1
@@ -47,7 +49,7 @@ struct ble_gap_event {
         struct { int status; uint16_t conn_handle; } enc_change;
         struct { uint16_t conn_handle, attr_handle; uint8_t cur_notify; } subscribe;
         struct { int status; uint16_t conn_handle; } notify_tx;
-        struct { uint16_t conn_handle; } repeat_pairing;
+        struct { uint16_t conn_handle; uint8_t new_authenticated, new_sc, new_bonding; } repeat_pairing;
         struct { uint16_t conn_handle; struct { uint8_t action; uint32_t numcmp; } params; } passkey;
     };
 };
