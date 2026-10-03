@@ -41,7 +41,7 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         if (s->pairing_state == KVM_DISPLAY_PAIRING_CHALLENGE &&
             s->pairing_challenge_id && s->pairing_number <= 999999u &&
             s->pairing_deadline_ms > now_ms) {
-            snprintf(v->primary, sizeof(v->primary), "%06u", s->pairing_number);
+            snprintf(v->primary, sizeof(v->primary), "%06u", (unsigned)s->pairing_number);
             snprintf(v->detail, sizeof(v->detail), "%llus remaining",
                      (unsigned long long)((s->pairing_deadline_ms - now_ms + 999u) / 1000u));
             COPY_TEXT(v->footer, "Compare on guest and host");
