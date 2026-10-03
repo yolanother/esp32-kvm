@@ -177,6 +177,7 @@ mod tests {
             route,
             pairing: PairingState::Closed,
             bond_tokens: vec!["abababababababababababababababab".into()],
+            retained_bond_tokens: None,
             connected_tokens: vec!["abababababababababababababababab".into()],
             ready_tokens: vec!["abababababababababababababababab".into()],
             profiles: vec![GuestProfile {

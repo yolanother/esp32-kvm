@@ -7,7 +7,7 @@ import type { GuestProfile, SetupSnapshot } from "./setup-model";
 /** Return a truthful disconnected snapshot when the native shell is absent. */
 export function unavailableSnapshot(reason = "Native device service is unavailable."): SetupSnapshot {
   return { device: { kind: "unavailable", reason }, route: { kind: "failed", reason: "native_service" }, pairing: { kind: "closed" },
-    bondTokens: [], connectedTokens: [], readyTokens: [], profiles: [], mappingPendingTokens: [], pairingAvailable: false };
+    bondTokens: [], retainedBondTokens: null, connectedTokens: [], readyTokens: [], profiles: [], mappingPendingTokens: [], pairingAvailable: false };
 }
 
 /** Reads current USB and pairing state without activating input routing. */

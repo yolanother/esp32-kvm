@@ -3,7 +3,8 @@
 // a verified protocol session, input policy, fail-local capture gate, and
 // numeric pairing state reported by negotiated firmware STATUS. Terminal
 // suspend and shutdown end the session without input replay. Bond deletion
-// requires an exact device ACK and a fresh STATUS before profile removal.
+// requires an exact device ACK and fresh retained-inventory exclusion before
+// profile removal; live STATUS slots never stand in for persisted bonds.
 
 #![forbid(unsafe_code)]
 
@@ -19,7 +20,7 @@ use esp32_kvm_platform_windows::CaptureService;
 use esp32_kvm_platform_windows::{
     CaptureEvent, CaptureFault, CaptureGate, MouseAxis, MouseButton, PhysicalEvent,
 };
-use esp32_kvm_protocol::{Frame, FrameDecoder, MessageKind, ProtocolError};
+use esp32_kvm_protocol::{BondInventory, Frame, FrameDecoder, MessageKind, ProtocolError};
 use esp32_kvm_usb_transport::{
     ConfirmedDevice, ProbeError, available_usb_ports, candidate_ports, probe_stream,
 };
@@ -219,6 +220,10 @@ pub struct SetupSnapshot {
     pub state: HostState,
     /// Bond slots from the latest STATUS.
     pub slots: Vec<SlotSnapshot>,
+    /// Fresh authoritative retained tokens, or None when unread/expired/unsupported.
+    pub retained_bonds: Option<Vec<[u8; 16]>>,
+    /// Host monotonic time of the retained snapshot; None when unavailable.
+    pub retained_bonds_observed_ms: Option<u64>,
     /// Host monotonic deadline derived from STATUS remaining time.
     pub pairing_deadline_ms: Option<u64>,
     /// Fresh challenge ID when pairing status is Challenge.
@@ -253,9 +258,24 @@ pub enum ForgetError {
     NotLocal,
     /// The latest verified STATUS does not contain this token.
     UnknownBond,
+    /// Minor-two retained inventory is not negotiated.
+    Unsupported,
+    /// A fresh inventory proves this token was already absent before deletion.
+    AlreadyAbsent,
     /// A fresh post-ACK STATUS still reported the token.
     StillBonded,
     /// The verified session failed before removal could be confirmed.
+    Host(HostFault),
+}
+
+/// A retained inventory read could not become authoritative.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InventoryError {
+    /// Firmware did not negotiate the minor-two inventory command.
+    Unsupported,
+    /// Another control or inventory operation is in flight.
+    Busy,
+    /// The verified session failed before the read completed.
     Host(HostFault),
 }
 
@@ -291,7 +311,9 @@ pub struct HostActor<S: Read + Write> {
     challenge_id: Option<u32>,
     comparison_value: Option<u32>,
     slots: Vec<SlotSnapshot>,
-    status_revision: u64,
+    retained_bonds: Option<Vec<[u8; 16]>>,
+    inventory_observed_ms: Option<u64>,
+    inventory_request_seq: Option<u32>,
     keys: BTreeMap<(u32, bool), SourceKey>,
     mapping: MappingEngine,
     profiles: BTreeMap<[u8; 16], MappingProfile>,
@@ -343,7 +365,9 @@ impl<S: Read + Write> HostActor<S> {
             challenge_id: None,
             comparison_value: None,
             slots: Vec::new(),
-            status_revision: 0,
+            retained_bonds: None,
+            inventory_observed_ms: None,
+            inventory_request_seq: None,
             keys: BTreeMap::new(),
             mapping: MappingEngine::new(MappingProfile::default()).expect("empty profile is valid"),
             profiles: BTreeMap::new(),
@@ -404,6 +428,8 @@ impl<S: Read + Write> HostActor<S> {
             pairing_status: self.pairing_status,
             state: self.state(),
             slots: self.slots.clone(),
+            retained_bonds: self.retained_bonds.clone(),
+            retained_bonds_observed_ms: self.inventory_observed_ms,
             pairing_deadline_ms: self.pairing_deadline_ms,
             challenge_id: self.challenge_id,
             comparison_value: self.comparison_value,
@@ -480,9 +506,50 @@ impl<S: Read + Write> HostActor<S> {
         self.issue_aux(MessageKind::PairCancel, vec![], now_ms)
     }
 
+    /// Reads a fresh, sequence-matched retained inventory from minor-two firmware.
+    /// An empty successful vector is authoritative; errors leave snapshot unknown.
+    pub fn refresh_bond_inventory(&mut self, now_ms: u64) -> Result<Vec<[u8; 16]>, InventoryError> {
+        if self.device.negotiated_minor < 2 {
+            return Err(InventoryError::Unsupported);
+        }
+        if self.pending.is_some() || self.inventory_request_seq.is_some() || self.router.is_none() {
+            return Err(InventoryError::Busy);
+        }
+        if let Some(fault) = self.fault {
+            return Err(InventoryError::Host(fault));
+        }
+        self.retained_bonds = None;
+        self.inventory_observed_ms = None;
+        let frame = self.make_frame(MessageKind::GetBonds, self.confirmed_generation, vec![1]);
+        self.inventory_request_seq = Some(frame.seq);
+        if self.write_frame(&frame).is_err() {
+            self.fail(HostFault::Transport);
+            return Err(InventoryError::Host(HostFault::Transport));
+        }
+        let started = Instant::now();
+        while self.inventory_request_seq.is_some() {
+            let elapsed = started.elapsed().as_millis() as u64;
+            if elapsed >= PEER_TIMEOUT_MS {
+                self.fail(HostFault::Timeout);
+                return Err(InventoryError::Host(HostFault::Timeout));
+            }
+            self.poll(now_ms.saturating_add(elapsed));
+            if let Some(fault) = self.fault {
+                return Err(InventoryError::Host(fault));
+            }
+            if self.inventory_request_seq.is_some() {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(self
+            .retained_bonds
+            .clone()
+            .expect("matching BONDS supplied inventory"))
+    }
+
     /// Removes a known bond on this actor's verified stream. The caller must
     /// run this bounded operation on the native actor worker, not the UI thread.
-    /// Success means an exact ACK and a later STATUS no longer naming the token.
+    /// Success means an exact ACK and a later retained inventory excluding the token.
     pub fn forget_bond(&mut self, token: [u8; 16], now_ms: u64) -> Result<(), ForgetError> {
         if self.state() != HostState::Local {
             return Err(ForgetError::NotLocal);
@@ -490,8 +557,18 @@ impl<S: Read + Write> HostActor<S> {
         if self.pending.is_some() {
             return Err(ForgetError::Busy);
         }
-        if !self.slots.iter().any(|slot| slot.bond_token == token) {
+        if token == [0; 16] {
             return Err(ForgetError::UnknownBond);
+        }
+        let before = self
+            .refresh_bond_inventory(now_ms)
+            .map_err(|error| match error {
+                InventoryError::Unsupported => ForgetError::Unsupported,
+                InventoryError::Busy => ForgetError::Busy,
+                InventoryError::Host(fault) => ForgetError::Host(fault),
+            })?;
+        if !before.contains(&token) {
+            return Err(ForgetError::AlreadyAbsent);
         }
         let mut payload = vec![0xa1, 1, 0x50];
         payload.extend_from_slice(&token);
@@ -507,21 +584,14 @@ impl<S: Read + Write> HostActor<S> {
                 thread::sleep(Duration::from_millis(1));
             }
         }
-        let previous_status = self.status_revision;
-        if let Err(fault) = self.send(MessageKind::GetStatus, self.confirmed_generation, vec![]) {
-            self.fail(fault);
-            return Err(ForgetError::Host(fault));
-        }
-        while self.status_revision == previous_status {
-            self.poll(now_ms.saturating_add(started.elapsed().as_millis() as u64));
-            if let Some(fault) = self.fault {
-                return Err(ForgetError::Host(fault));
-            }
-            if self.status_revision == previous_status {
-                thread::sleep(Duration::from_millis(1));
-            }
-        }
-        if self.slots.iter().any(|slot| slot.bond_token == token) {
+        let after = self
+            .refresh_bond_inventory(now_ms.saturating_add(started.elapsed().as_millis() as u64))
+            .map_err(|error| match error {
+                InventoryError::Unsupported => ForgetError::Unsupported,
+                InventoryError::Busy => ForgetError::Busy,
+                InventoryError::Host(fault) => ForgetError::Host(fault),
+            })?;
+        if after.contains(&token) {
             return Err(ForgetError::StillBonded);
         }
         self.profiles.remove(&token);
@@ -664,6 +734,13 @@ impl<S: Read + Write> HostActor<S> {
         if self.fault.is_some() {
             return;
         }
+        if self
+            .inventory_observed_ms
+            .is_some_and(|observed| now_ms.saturating_sub(observed) >= 1000)
+        {
+            self.retained_bonds = None;
+            self.inventory_observed_ms = None;
+        }
         self.capture.actor_heartbeat();
         if self
             .pairing_deadline_ms
@@ -775,7 +852,36 @@ impl<S: Read + Write> HostActor<S> {
         }
         match frame.kind {
             MessageKind::Status => self.handle_status(frame, now_ms),
-            MessageKind::Ack | MessageKind::Nack => self.handle_ack(frame, now_ms),
+            MessageKind::Bonds => {
+                if self.inventory_request_seq != Some(frame.seq) {
+                    return;
+                }
+                if frame.route_generation != self.confirmed_generation {
+                    self.fail(HostFault::Protocol);
+                    return;
+                }
+                let Ok(inventory) = BondInventory::decode(&frame.payload) else {
+                    self.fail(HostFault::Protocol);
+                    return;
+                };
+                self.retained_bonds = Some(inventory.tokens);
+                self.inventory_observed_ms = Some(now_ms);
+                self.inventory_request_seq = None;
+                self.last_peer = now_ms;
+            }
+            MessageKind::Ack | MessageKind::Nack => {
+                if self.inventory_request_seq == Some(frame.seq)
+                    && frame.payload[0] == MessageKind::GetBonds as u8
+                {
+                    self.fail(if frame.kind == MessageKind::Nack {
+                        HostFault::Rejected
+                    } else {
+                        HostFault::Protocol
+                    });
+                } else {
+                    self.handle_ack(frame, now_ms);
+                }
+            }
             MessageKind::InputProgress => self.last_peer = now_ms,
             MessageKind::DeviceSelectRequest => {
                 self.last_peer = now_ms;
@@ -833,7 +939,6 @@ impl<S: Read + Write> HostActor<S> {
         self.challenge_id = status.challenge_id;
         self.comparison_value = status.comparison_value;
         self.slots = status.slots.clone();
-        self.status_revision = self.status_revision.wrapping_add(1);
         let mut next = None;
         if let Some(router) = self.router.as_mut() {
             for slot in self.order.iter().copied() {
@@ -1132,6 +1237,9 @@ impl<S: Read + Write> HostActor<S> {
         self.all_up = false;
         self.baseline_sent = false;
         self.pending = None;
+        self.inventory_request_seq = None;
+        self.retained_bonds = None;
+        self.inventory_observed_ms = None;
         self.decoder.reset();
         if let Some(router) = self.router.as_mut() {
             router.link_lost();

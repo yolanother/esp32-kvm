@@ -1,7 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Provides the Tauri setup boundary and versioned, crash-tolerant local guest profiles.
-// The serial-owning host actor supplies verified bonds and pairing controls;
-// absent challenge events and all-up proof keep confirmation and testing closed.
+// The serial-owning host actor supplies live status, authoritative retained
+// inventory, and pairing controls; removal preserves profiles until verified.
 use esp32_kvm_input_core::{
     Destination, MappingPreset, MappingProfile, MappingRule, Side, SourceKey, preset_profile,
 };
@@ -188,7 +188,7 @@ pub fn mapping_profile(guest: &GuestProfile) -> Result<MappingProfile, String> {
     Ok(preset_profile(preset))
 }
 
-fn token_bytes(token: &str) -> Result<[u8; 16], String> {
+pub(crate) fn token_bytes(token: &str) -> Result<[u8; 16], String> {
     if token.len() != 32 {
         return Err("Invalid bond identity token.".into());
     }
@@ -212,6 +212,9 @@ pub struct SetupSnapshot {
     pub pairing: PairingState,
     /// Opaque identities currently reported by firmware.
     pub bond_tokens: Vec<String>,
+    /// Fresh retained firmware bonds, or unknown while unread or unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_bond_tokens: Option<Vec<String>>,
     /// Bond identities with a live BLE peer, even before HID subscription.
     pub connected_tokens: Vec<String>,
     /// Identities with encrypted, subscribed HID readiness.
@@ -235,6 +238,8 @@ pub struct BackendSnapshot {
     pub pairing: PairingState,
     /// Identities reported in firmware STATUS.
     pub bond_tokens: Vec<String>,
+    /// Fresh retained firmware bonds, distinct from live STATUS slots.
+    pub retained_bond_tokens: Option<Vec<String>>,
     /// Connected peer identities from firmware STATUS.
     pub connected_tokens: Vec<String>,
     /// Encrypted and subscribed live identities.
@@ -250,6 +255,7 @@ impl BackendSnapshot {
             route: self.route,
             pairing: self.pairing,
             bond_tokens: self.bond_tokens,
+            retained_bond_tokens: self.retained_bond_tokens,
             connected_tokens: self.connected_tokens,
             ready_tokens: self.ready_tokens,
             profiles,
@@ -271,7 +277,11 @@ pub trait SetupBackend: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
-    /// Forgets one firmware bond and returns only after ACK and fresh STATUS.
+    /// Refreshes authoritative retained inventory on the verified actor stream.
+    fn refresh_inventory(&self) -> Result<BackendSnapshot, String> {
+        Err("Firmware retained-bond inventory is unavailable.".into())
+    }
+    /// Forgets one firmware bond and returns only after ACK and fresh inventory.
     fn forget_bond(&self, _bond_token: &str) -> Result<(), String> {
         Err("Firmware bond forgetting is not wired to the host actor.".into())
     }
@@ -583,7 +593,15 @@ impl SetupService {
             .lock()
             .map_err(|error| error.to_string())?;
         self.reconcile_one(&mut pending);
-        let backend = self.backend.snapshot()?;
+        let mut backend = self.backend.snapshot()?;
+        if matches!(backend.device, DeviceState::Verified { .. })
+            && matches!(backend.route, RouteState::Local)
+            && backend.retained_bond_tokens.is_none()
+        {
+            if let Ok(fresh) = self.backend.refresh_inventory() {
+                backend = fresh;
+            }
+        }
         let guard = self.profiles.lock().map_err(|error| error.to_string())?;
         let profiles = guard.as_ref().map_err(Clone::clone)?.profiles.clone();
         let mut snapshot = backend.into_setup_snapshot(profiles);
@@ -629,6 +647,7 @@ impl SetupService {
     }
 
     fn forget_profile(&self, token: &str) -> Result<ForgetOutcome, String> {
+        token_bytes(token)?;
         let exists = self
             .profiles
             .lock()
@@ -638,38 +657,57 @@ impl SetupService {
             .profiles
             .iter()
             .any(|entry| entry.bond_token == token);
-        if !exists {
-            return Ok(ForgetOutcome::AlreadyAbsent);
-        }
         let before = self.backend.snapshot()?;
         if !matches!(before.device, DeviceState::Verified { .. })
             || !matches!(before.route, RouteState::Local)
         {
             return Err("Return locally with a verified device before forgetting this guest; the profile was kept.".into());
         }
-        if !before.bond_tokens.iter().any(|bond| bond == token) {
-            return Err("This guest is absent from live slots; retained firmware bonds are not inventoried, so the local profile was kept.".into());
+        let fresh = self.backend.refresh_inventory()?;
+        if !matches!(fresh.device, DeviceState::Verified { .. })
+            || !matches!(fresh.route, RouteState::Local)
+        {
+            return Err(
+                "A fresh local firmware session is required; the local profile was kept.".into(),
+            );
+        }
+        let Some(retained) = fresh.retained_bond_tokens else {
+            return Err(
+                "Retained-bond inventory is unavailable; the local profile was kept.".into(),
+            );
+        };
+        if !retained.iter().any(|bond| bond == token) {
+            return if exists {
+                Err("Firmware inventory already excludes this bond; the local profile was kept for reconciliation.".into())
+            } else {
+                Ok(ForgetOutcome::AlreadyAbsent)
+            };
         }
         self.backend.forget_bond(token)?;
         let after = self.backend.snapshot()?;
         if !matches!(after.device, DeviceState::Verified { .. })
             || !matches!(after.route, RouteState::Local)
-            || after.bond_tokens.iter().any(|bond| bond == token)
+            || !after
+                .retained_bond_tokens
+                .as_ref()
+                .is_some_and(|bonds| !bonds.iter().any(|bond| bond == token))
         {
             return Err(
                 "Firmware has not confirmed bond removal; the local profile was kept.".into(),
             );
         }
-        let mut guard = self.profiles.lock().map_err(|error| error.to_string())?;
-        guard
-            .as_mut()
-            .map_err(|error| error.clone())?
-            .remove(token)?;
-        drop(guard);
-        self.mapping_pending
-            .lock()
-            .map_err(|error| error.to_string())?
-            .remove(token);
+        if exists {
+            let mut guard = self.profiles.lock().map_err(|error| error.to_string())?;
+            guard
+                .as_mut()
+                .map_err(|error| error.clone())?
+                .remove(token)?;
+            drop(guard);
+            self.mapping_pending
+                .lock()
+                .map_err(|error| error.to_string())?
+                .remove(token);
+        }
         Ok(ForgetOutcome::Forgot)
     }
 }
@@ -764,6 +802,7 @@ mod tests {
                 bond_token: "00112233445566778899aabbccddeeff".into(),
             },
             bond_tokens: vec!["00112233445566778899aabbccddeeff".into()],
+            retained_bond_tokens: None,
             connected_tokens: vec!["00112233445566778899aabbccddeeff".into()],
             ready_tokens: Vec::new(),
             pairing_available: true,
@@ -793,6 +832,7 @@ mod tests {
                 route: RouteState::Local,
                 pairing: PairingState::Closed,
                 bond_tokens: vec!["00112233445566778899aabbccddeeff".into()],
+                retained_bond_tokens: None,
                 connected_tokens: vec!["00112233445566778899aabbccddeeff".into()],
                 ready_tokens: Vec::new(),
                 pairing_available: false,
@@ -921,6 +961,7 @@ mod tests {
                 route: RouteState::Local,
                 pairing: PairingState::Closed,
                 bond_tokens: Vec::new(),
+                retained_bond_tokens: None,
                 connected_tokens: Vec::new(),
                 ready_tokens: Vec::new(),
                 pairing_available: false,
@@ -992,6 +1033,13 @@ mod tests {
                 route: RouteState::Local,
                 pairing: PairingState::Closed,
                 bond_tokens: bonds,
+                retained_bond_tokens: Some(
+                    if self.present.load(std::sync::atomic::Ordering::SeqCst) {
+                        vec!["00112233445566778899aabbccddeeff".into()]
+                    } else {
+                        Vec::new()
+                    },
+                ),
                 connected_tokens: Vec::new(),
                 ready_tokens: Vec::new(),
                 pairing_available: false,
@@ -1003,6 +1051,9 @@ mod tests {
                     .store(false, std::sync::atomic::Ordering::SeqCst);
             }
             Ok(())
+        }
+        fn refresh_inventory(&self) -> Result<BackendSnapshot, String> {
+            self.snapshot()
         }
     }
 
@@ -1068,6 +1119,124 @@ mod tests {
         assert!(service.forget_profile(token).is_err());
         assert_eq!(service.snapshot().unwrap().profiles.len(), 1);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    struct OfflineRetainedBackend {
+        present: std::sync::atomic::AtomicBool,
+    }
+    impl SetupBackend for OfflineRetainedBackend {
+        fn snapshot(&self) -> Result<BackendSnapshot, String> {
+            Ok(BackendSnapshot {
+                device: DeviceState::Verified {
+                    board_id: "esp32-kvm-s3".into(),
+                    firmware_version: None,
+                    max_bonds: 8,
+                    max_connections: 1,
+                },
+                route: RouteState::Local,
+                pairing: PairingState::Closed,
+                bond_tokens: Vec::new(),
+                retained_bond_tokens: Some(
+                    if self.present.load(std::sync::atomic::Ordering::SeqCst) {
+                        vec!["00112233445566778899aabbccddeeff".into()]
+                    } else {
+                        Vec::new()
+                    },
+                ),
+                connected_tokens: Vec::new(),
+                ready_tokens: Vec::new(),
+                pairing_available: false,
+            })
+        }
+        fn refresh_inventory(&self) -> Result<BackendSnapshot, String> {
+            self.snapshot()
+        }
+        fn forget_bond(&self, _token: &str) -> Result<(), String> {
+            self.present
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn setup_snapshot_refreshes_unread_inventory_for_offline_forget_control() {
+        struct UnreadInventory;
+        impl SetupBackend for UnreadInventory {
+            fn snapshot(&self) -> Result<BackendSnapshot, String> {
+                let mut value = OneBondBackend.snapshot()?;
+                value.bond_tokens.clear();
+                value.retained_bond_tokens = None;
+                Ok(value)
+            }
+            fn refresh_inventory(&self) -> Result<BackendSnapshot, String> {
+                let mut value = self.snapshot()?;
+                value.retained_bond_tokens = Some(vec!["00112233445566778899aabbccddeeff".into()]);
+                Ok(value)
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-unread-inventory-{}", std::process::id()));
+        let service = SetupService::new(directory.clone(), Box::new(UnreadInventory));
+        let snapshot = service.snapshot().unwrap();
+        assert!(snapshot.bond_tokens.is_empty());
+        assert_eq!(
+            snapshot.retained_bond_tokens,
+            Some(vec!["00112233445566778899aabbccddeeff".into()])
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn offline_retained_bond_requires_inventory_proof_before_local_removal() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-retained-forget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let token = "00112233445566778899aabbccddeeff";
+        SetupService::new(directory.clone(), Box::new(OneBondBackend))
+            .save_profile(profile(token))
+            .unwrap();
+        let service = SetupService::new(
+            directory.clone(),
+            Box::new(OfflineRetainedBackend {
+                present: std::sync::atomic::AtomicBool::new(true),
+            }),
+        );
+        assert_eq!(
+            service.forget_profile(token).unwrap(),
+            ForgetOutcome::Forgot
+        );
+        assert!(
+            ProfileStore::load(directory.clone())
+                .unwrap()
+                .profiles
+                .is_empty()
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn retained_bond_without_local_profile_is_still_removed_from_firmware() {
+        let directory = std::env::temp_dir().join(format!(
+            "esp32-kvm-firmware-only-forget-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let token = "00112233445566778899aabbccddeeff";
+        let service = SetupService::new(
+            directory.clone(),
+            Box::new(OfflineRetainedBackend {
+                present: std::sync::atomic::AtomicBool::new(true),
+            }),
+        );
+        assert_eq!(
+            service.forget_profile(token).unwrap(),
+            ForgetOutcome::Forgot
+        );
+        assert_eq!(
+            service.forget_profile(token).unwrap(),
+            ForgetOutcome::AlreadyAbsent
+        );
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

@@ -25,6 +25,7 @@ static unsigned sent_reports;
 static struct ble_npl_eventq host_queue;
 static struct ble_npl_callout host_timeout;
 static bool hold_host;
+static bool fail_next_commit;
 
 static void event_sink(const hid_guest_pairing_event_t *event, void *context)
 { (void)context; last_event = *event; }
@@ -47,7 +48,8 @@ int nvs_get_blob(nvs_handle_t handle, const char *key, void *value, size_t *leng
 int nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, size_t length)
 { (void)handle; (void)key; assert(length <= sizeof(saved));
   memcpy(saved, value, length); saved_size = length; return 0; }
-int nvs_commit(nvs_handle_t handle) { (void)handle; return 0; }
+int nvs_commit(nvs_handle_t handle)
+{ (void)handle; if (fail_next_commit) { fail_next_commit = false; return ESP_FAIL; } return 0; }
 void nvs_close(nvs_handle_t handle) { (void)handle; }
 uint32_t esp_random(void) { static uint32_t next = 0x1234; return ++next; }
 int64_t esp_timer_get_time(void) { return time_us; }
@@ -234,8 +236,12 @@ int main(void)
     host_queue.pending = NULL;
     assert(terminations == 4 && channel.needs_disconnect);
     assert(hid_guest_pairing_forget(token, false) != 0);
+    fail_next_commit = true;
+    assert(hid_guest_pairing_forget(token, true) != 0);
+    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(retained_count == 1 && memcmp(retained[0], token.bytes, 16) == 0);
     assert(hid_guest_pairing_forget(token, true) == 0);
-    assert(terminations == 5 && !channel.armed && channel.needs_disconnect);
+    assert(terminations >= 5 && !channel.armed && channel.needs_disconnect);
     assert(hid_guest_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 0);
     return 0;

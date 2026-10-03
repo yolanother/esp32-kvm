@@ -15,11 +15,28 @@ fn retained_bond_inventory_is_bounded_versioned_and_unique() {
     assert_eq!(BondInventory::decode(&payload).unwrap().tokens, tokens);
     assert_eq!(BondInventory::decode(&[2, 0]), Err(ProtocolError::Version));
     assert_eq!(BondInventory::decode(&[1, 1]), Err(ProtocolError::Payload));
-    assert_eq!(BondInventory::new(vec![[0; 16]]), Err(ProtocolError::Payload));
-    assert_eq!(BondInventory::new(vec![[1; 16]; 2]), Err(ProtocolError::Payload));
-    assert_eq!(BondInventory::new(vec![[1; 16]; 9]), Err(ProtocolError::Payload));
-    assert!(Frame::new(MessageKind::GetBonds, 5, 9, 0, vec![1]).encode().is_ok());
-    assert!(Frame::new(MessageKind::Bonds, 5, 9, 0, payload).encode().is_ok());
+    assert_eq!(
+        BondInventory::new(vec![[0; 16]]),
+        Err(ProtocolError::Payload)
+    );
+    assert_eq!(
+        BondInventory::new(vec![[1; 16]; 2]),
+        Err(ProtocolError::Payload)
+    );
+    assert_eq!(
+        BondInventory::new(vec![[1; 16]; 9]),
+        Err(ProtocolError::Payload)
+    );
+    assert!(
+        Frame::new(MessageKind::GetBonds, 5, 9, 0, vec![1])
+            .encode()
+            .is_ok()
+    );
+    assert!(
+        Frame::new(MessageKind::Bonds, 5, 9, 0, payload)
+            .encode()
+            .is_ok()
+    );
 }
 
 #[test]

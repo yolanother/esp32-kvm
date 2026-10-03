@@ -35,8 +35,13 @@ pub struct BondInventory {
 impl BondInventory {
     /// Validates a retained token snapshot before it crosses the wire.
     pub fn new(tokens: Vec<[u8; 16]>) -> Result<Self, ProtocolError> {
-        if tokens.len() > MAX_BONDS || tokens.iter().any(|token| *token == [0; 16]) ||
-            tokens.iter().enumerate().any(|(i, token)| tokens[..i].contains(token)) {
+        if tokens.len() > MAX_BONDS
+            || tokens.iter().any(|token| *token == [0; 16])
+            || tokens
+                .iter()
+                .enumerate()
+                .any(|(i, token)| tokens[..i].contains(token))
+        {
             return Err(ProtocolError::Payload);
         }
         Ok(Self { tokens })
@@ -45,7 +50,9 @@ impl BondInventory {
     /// Encodes format version, count, then contiguous opaque tokens.
     pub fn encode(&self) -> Vec<u8> {
         let mut payload = vec![BOND_INVENTORY_VERSION, self.tokens.len() as u8];
-        for token in &self.tokens { payload.extend_from_slice(token); }
+        for token in &self.tokens {
+            payload.extend_from_slice(token);
+        }
         payload
     }
 
@@ -58,8 +65,10 @@ impl BondInventory {
         if count > MAX_BONDS || payload.len() != 2 + count * 16 {
             return Err(ProtocolError::Payload);
         }
-        let tokens = payload[2..].chunks_exact(16)
-            .map(|bytes| bytes.try_into().unwrap()).collect();
+        let tokens = payload[2..]
+            .chunks_exact(16)
+            .map(|bytes| bytes.try_into().unwrap())
+            .collect();
         Self::new(tokens)
     }
 }
@@ -265,8 +274,11 @@ pub fn validate_payload(kind: MessageKind, payload: &[u8]) -> Result<(), Protoco
             return Err(ProtocolError::Payload);
         }
     } else {
-        if kind == Bonds { BondInventory::decode(payload)?; }
-        else { cbor::validate(kind, payload)?; }
+        if kind == Bonds {
+            BondInventory::decode(payload)?;
+        } else {
+            cbor::validate(kind, payload)?;
+        }
     }
     match kind {
         Hello

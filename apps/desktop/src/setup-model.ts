@@ -1,6 +1,6 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Defines setup status and fail-closed wizard gates. Device facts must come
-// from the native serial owner; saved names are never proof of BLE readiness.
+// from the native serial owner; retained bond inventory is separate from live slots.
 
 /** Device discovery and firmware-verification state supplied by native code. */
 export type DeviceState =
@@ -52,6 +52,7 @@ export interface SetupSnapshot {
   route: RouteState;
   pairing: PairingState;
   bondTokens: string[];
+  retainedBondTokens: string[] | null;
   connectedTokens: string[];
   readyTokens: string[];
   profiles: GuestProfile[];
@@ -84,9 +85,9 @@ export function liveGuestState(token: string, snapshot: Pick<SetupSnapshot, "dev
   return "offline";
 }
 
-/** Allows bond removal only for a live slot on a verified local session. */
-export function canForgetLiveGuest(snapshot: Pick<SetupSnapshot, "device" | "route" | "bondTokens">, token: string): boolean {
-  return snapshot.device.kind === "verified" && snapshot.route.kind === "local" && snapshot.bondTokens.includes(token);
+/** Allows bond removal only with authoritative retained inventory and a verified local route. */
+export function canForgetRetainedGuest(snapshot: Pick<SetupSnapshot, "device" | "route" | "retainedBondTokens">, token: string): boolean {
+  return snapshot.device.kind === "verified" && snapshot.route.kind === "local" && snapshot.retainedBondTokens?.includes(token) === true;
 }
 
 /** Selects only an identity first reported after the user's pairing request. */

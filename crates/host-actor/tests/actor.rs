@@ -18,6 +18,9 @@ struct WireState {
     eof: bool,
     forget_script: Option<ForgetScript>,
     forget_seen: bool,
+    inventory_before: Vec<[u8; 16]>,
+    inventory_after: Vec<[u8; 16]>,
+    inventory_silent: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +62,14 @@ impl FakePort {
     fn script_forget(&self, script: ForgetScript) {
         self.0.lock().unwrap().forget_script = Some(script);
     }
+    fn inventory(&self, before: Vec<[u8; 16]>, after: Vec<[u8; 16]>) {
+        let mut state = self.0.lock().unwrap();
+        state.inventory_before = before;
+        state.inventory_after = after;
+    }
+    fn silence_inventory(&self) {
+        self.0.lock().unwrap().inventory_silent = true;
+    }
 }
 
 impl Read for FakePort {
@@ -90,6 +101,32 @@ impl Write for FakePort {
         let mut decoder = FrameDecoder::new();
         for frame in buf.iter().filter_map(|byte| decoder.push(*byte)).flatten() {
             match (state.forget_script, frame.kind) {
+                (_, MessageKind::GetBonds) if !state.inventory_silent => {
+                    let tokens = if state.forget_seen {
+                        &state.inventory_after
+                    } else {
+                        &state.inventory_before
+                    };
+                    let mut payload = vec![1, tokens.len() as u8];
+                    for token in tokens {
+                        payload.extend_from_slice(token);
+                    }
+                    let answer = Frame::new(
+                        MessageKind::Bonds,
+                        5,
+                        frame.seq,
+                        frame.route_generation,
+                        payload,
+                    );
+                    if state.forget_seen
+                        && matches!(state.forget_script, Some(ForgetScript::StaleThenSuccess))
+                    {
+                        let mut stale = answer.clone();
+                        stale.seq = 0;
+                        state.incoming.extend(stale.encode().unwrap());
+                    }
+                    state.incoming.extend(answer.encode().unwrap());
+                }
                 (Some(script), MessageKind::ForgetBond) if !state.forget_seen => {
                     state.forget_seen = true;
                     if matches!(script, ForgetScript::Unplug) {
@@ -183,6 +220,84 @@ fn status_empty() -> Frame {
     )
 }
 
+fn status_empty_m2() -> Frame {
+    Frame::new(
+        MessageKind::Status,
+        5,
+        1,
+        0,
+        vec![0xa6, 1, 0, 2, 0, 3, 0x80, 4, 0, 5, 0, 6, 0xa1, 1, 0],
+    )
+}
+
+fn status_ready_m2() -> Frame {
+    let mut frame = status(0, true);
+    frame.payload[0] = 0xa6;
+    frame.payload.extend_from_slice(&[6, 0xa1, 1, 0]);
+    frame
+}
+
+fn setup_inventory() -> (HostActor<FakePort>, FakePort, Arc<CaptureGate>) {
+    let wire = FakePort::default();
+    let (gate, _receiver) = CaptureGate::new(32);
+    let mut confirmed = device();
+    confirmed.negotiated_minor = 2;
+    let actor = HostActor::from_confirmed(
+        wire.clone(),
+        Box::new(gate.clone()),
+        confirmed,
+        vec![1],
+        Box::new(TestMapper),
+        0,
+    )
+    .unwrap();
+    (actor, wire, gate)
+}
+
+#[test]
+fn retained_inventory_distinguishes_unknown_from_authoritative_empty() {
+    let (mut actor, wire, _) = setup_inventory();
+    wire.feed(status_empty_m2());
+    actor.poll(1);
+    assert!(actor.setup_snapshot().retained_bonds.is_none());
+    wire.inventory(vec![[1; 16]], vec![]);
+    assert_eq!(actor.refresh_bond_inventory(2).unwrap(), vec![[1; 16]]);
+    assert_eq!(actor.setup_snapshot().retained_bonds, Some(vec![[1; 16]]));
+}
+
+#[test]
+fn forget_bond_fails_closed_when_inventory_is_unavailable_or_unsupported() {
+    let (mut old_actor, old_wire, _) = setup();
+    old_wire.feed(status(0, true));
+    old_actor.poll(1);
+    assert_eq!(
+        old_actor.forget_bond([1; 16], 2),
+        Err(ForgetError::Unsupported)
+    );
+    assert!(
+        !old_wire
+            .sent()
+            .iter()
+            .any(|f| f.kind == MessageKind::ForgetBond)
+    );
+
+    let (mut actor, wire, _) = setup_inventory();
+    wire.feed(status_empty_m2());
+    actor.poll(1);
+    wire.silence_inventory();
+    assert_eq!(
+        actor.forget_bond([1; 16], 2),
+        Err(ForgetError::Host(HostFault::Timeout))
+    );
+    assert!(actor.setup_snapshot().retained_bonds.is_none());
+    assert!(
+        !wire
+            .sent()
+            .iter()
+            .any(|f| f.kind == MessageKind::ForgetBond)
+    );
+}
+
 fn ack(original: &Frame, result_generation: u32) -> Frame {
     let mut payload = vec![original.kind as u8];
     payload.extend_from_slice(&original.seq.to_le_bytes());
@@ -213,9 +328,10 @@ fn setup() -> (HostActor<FakePort>, FakePort, Arc<CaptureGate>) {
 }
 
 #[test]
-fn forget_bond_requires_exact_ack_and_fresh_absent_status() {
-    let (mut actor, wire, _) = setup();
-    wire.feed(status(0, true));
+fn forget_bond_requires_exact_ack_and_fresh_absent_inventory() {
+    let (mut actor, wire, _) = setup_inventory();
+    wire.inventory(vec![[1; 16]], vec![]);
+    wire.feed(status_empty_m2());
     actor.poll(1);
     wire.script_forget(ForgetScript::Success);
     assert_eq!(actor.forget_bond([1; 16], 2), Ok(()));
@@ -234,19 +350,31 @@ fn forget_bond_requires_exact_ack_and_fresh_absent_status() {
     assert!(
         frames
             .iter()
-            .any(|f| f.kind == MessageKind::GetStatus && f.seq > forget.seq)
+            .any(|f| f.kind == MessageKind::GetBonds && f.seq > forget.seq)
     );
-    assert!(actor.setup_snapshot().slots.is_empty());
+    assert_eq!(actor.setup_snapshot().retained_bonds, Some(vec![]));
 }
 
 #[test]
-fn forget_bond_rejects_unknown_or_nonlocal_without_writing() {
-    let (mut actor, wire, _) = setup();
-    wire.feed(status(0, true));
+fn forget_bond_rejects_absent_or_nonlocal_without_delete() {
+    let (mut actor, wire, _) = setup_inventory();
+    wire.inventory(vec![[1; 16]], vec![]);
+    wire.feed(status_empty_m2());
     actor.poll(1);
     let before = wire.sent().len();
-    assert_eq!(actor.forget_bond([2; 16], 2), Err(ForgetError::UnknownBond));
-    assert_eq!(wire.sent().len(), before);
+    assert_eq!(
+        actor.forget_bond([2; 16], 2),
+        Err(ForgetError::AlreadyAbsent)
+    );
+    assert!(wire.sent().len() > before);
+    assert!(
+        !wire
+            .sent()
+            .iter()
+            .any(|f| f.kind == MessageKind::ForgetBond)
+    );
+    wire.feed(status_ready_m2());
+    actor.poll(3);
     actor.request(Action::Direct(1), 3);
     let before = wire.sent().len();
     assert_eq!(actor.forget_bond([1; 16], 4), Err(ForgetError::NotLocal));
@@ -254,7 +382,7 @@ fn forget_bond_rejects_unknown_or_nonlocal_without_writing() {
 }
 
 #[test]
-fn forget_bond_wrong_ack_fails_local_and_unchanged_status_never_succeeds() {
+fn forget_bond_wrong_ack_fails_local_and_unchanged_inventory_never_succeeds() {
     for (script, expected) in [
         (
             ForgetScript::WrongAck,
@@ -262,38 +390,53 @@ fn forget_bond_wrong_ack_fails_local_and_unchanged_status_never_succeeds() {
         ),
         (ForgetScript::StillBonded, Err(ForgetError::StillBonded)),
     ] {
-        let (mut actor, wire, _) = setup();
-        wire.feed(status(0, true));
+        let (mut actor, wire, _) = setup_inventory();
+        wire.inventory(
+            vec![[1; 16]],
+            if matches!(script, ForgetScript::StillBonded) {
+                vec![[1; 16]]
+            } else {
+                vec![]
+            },
+        );
+        wire.feed(status_empty_m2());
         actor.poll(1);
         wire.script_forget(script);
         assert_eq!(actor.forget_bond([1; 16], 2), expected);
-        assert!(!actor.setup_snapshot().slots.is_empty());
+        assert!(!wire.sent().is_empty());
     }
 }
 
 #[test]
 fn forget_bond_without_ack_times_out_and_keeps_bond() {
-    let (mut actor, wire, _) = setup();
-    wire.feed(status(0, true));
+    let (mut actor, wire, _) = setup_inventory();
+    wire.inventory(vec![[1; 16]], vec![]);
+    wire.feed(status_empty_m2());
     actor.poll(1);
     wire.script_forget(ForgetScript::NoAck);
     assert_eq!(
         actor.forget_bond([1; 16], 2),
         Err(ForgetError::Host(HostFault::Timeout))
     );
-    assert!(!actor.setup_snapshot().slots.is_empty());
+    assert!(
+        wire.sent()
+            .iter()
+            .any(|f| f.kind == MessageKind::ForgetBond)
+    );
 }
 
 #[test]
 fn forget_bond_ignores_stale_ack_but_transport_loss_is_terminal() {
-    let (mut actor, wire, _) = setup();
-    wire.feed(status(0, true));
+    let (mut actor, wire, _) = setup_inventory();
+    wire.inventory(vec![[1; 16]], vec![]);
+    wire.feed(status_empty_m2());
     actor.poll(1);
     wire.script_forget(ForgetScript::StaleThenSuccess);
     assert_eq!(actor.forget_bond([1; 16], 2), Ok(()));
 
-    let (mut actor, wire, _) = setup();
-    wire.feed(status(0, true));
+    let (mut actor, wire, _) = setup_inventory();
+    wire.inventory(vec![[1; 16]], vec![]);
+    wire.feed(status_empty_m2());
     actor.poll(1);
     wire.script_forget(ForgetScript::Unplug);
     assert_eq!(
@@ -301,7 +444,7 @@ fn forget_bond_ignores_stale_ack_but_transport_loss_is_terminal() {
         Err(ForgetError::Host(HostFault::Transport))
     );
     assert_eq!(actor.state(), HostState::Failed);
-    assert!(!actor.setup_snapshot().slots.is_empty());
+    assert!(actor.setup_snapshot().retained_bonds.is_none());
 }
 
 fn active() -> (HostActor<FakePort>, FakePort, Arc<CaptureGate>) {

@@ -1,11 +1,14 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
-// Owns the desktop setup worker's one verified host actor and maps its STATUS
-// into fail-closed Tauri setup facts. No UI thread directly opens a serial port.
+// Owns the desktop setup worker's one verified host actor and maps STATUS and
+// retained inventory into fail-closed Tauri setup facts. No UI thread opens
+// a serial port or removes a local profile before actor confirmation.
 
-use crate::setup::{BackendSnapshot, DeviceState, PairingState, RouteState, SetupBackend};
+use crate::setup::{
+    BackendSnapshot, DeviceState, PairingState, RouteState, SetupBackend, token_bytes,
+};
 use esp32_kvm_host_actor::{
-    ConnectError, HostActor, HostState, KeyMapper, MappedKey, PairingError, PairingStatus,
-    SetupSnapshot as ActorSnapshot, connect_system,
+    ConnectError, ForgetError, HostActor, HostState, InventoryError, KeyMapper, MappedKey,
+    PairingError, PairingStatus, SetupSnapshot as ActorSnapshot, connect_system,
 };
 use esp32_kvm_input_core::Action;
 use esp32_kvm_input_core::MappingProfile;
@@ -22,6 +25,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const EXPECTED_BOARD: &str = "esp32-kvm-s3";
 const HOST_VERSION: &str = "0.1.0-m1";
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
+const INVENTORY_TIMEOUT: Duration = Duration::from_millis(900);
+const FORGET_TIMEOUT: Duration = Duration::from_millis(2500);
 
 /// The native setup adapter: one worker owns and drives the confirmed serial stream.
 pub struct ActorBackend {
@@ -38,6 +43,10 @@ enum CommandKind {
         approved: bool,
     },
     Local,
+    RefreshInventory,
+    Forget {
+        token: [u8; 16],
+    },
     SetMapping {
         bond_token: [u8; 16],
         profile: MappingProfile,
@@ -80,16 +89,21 @@ impl ActorBackend {
     }
 
     fn request(&self, kind: CommandKind) -> Result<(), String> {
+        let timeout = match &kind {
+            CommandKind::RefreshInventory => INVENTORY_TIMEOUT,
+            CommandKind::Forget { .. } => FORGET_TIMEOUT,
+            _ => COMMAND_TIMEOUT,
+        };
         let (reply, result) = mpsc::sync_channel(1);
         self.commands
             .try_send(Command {
                 kind,
-                deadline: Instant::now() + COMMAND_TIMEOUT,
+                deadline: Instant::now() + timeout,
                 reply,
             })
             .map_err(|_| "Setup actor is busy or disconnected.".to_owned())?;
         result
-            .recv_timeout(COMMAND_TIMEOUT)
+            .recv_timeout(timeout)
             .map_err(|_| "Setup actor did not answer before the deadline.".to_owned())?
     }
 }
@@ -111,6 +125,17 @@ impl SetupBackend for ActorBackend {
             self.gate.disarm();
         }
         result
+    }
+
+    fn refresh_inventory(&self) -> Result<BackendSnapshot, String> {
+        self.request(CommandKind::RefreshInventory)?;
+        self.snapshot()
+    }
+
+    fn forget_bond(&self, bond_token: &str) -> Result<(), String> {
+        self.request(CommandKind::Forget {
+            token: token_bytes(bond_token)?,
+        })
     }
 
     fn begin(&self) -> Result<(), String> {
@@ -143,6 +168,7 @@ fn empty_snapshot(device: DeviceState) -> BackendSnapshot {
         route: RouteState::Local,
         pairing: PairingState::Closed,
         bond_tokens: Vec::new(),
+        retained_bond_tokens: None,
         connected_tokens: Vec::new(),
         ready_tokens: Vec::new(),
         pairing_available: false,
@@ -195,6 +221,14 @@ fn map_snapshot(value: ActorSnapshot, monotonic_ms: u64, wall_ms: u64) -> Backen
         .iter()
         .map(|slot| token_hex(&slot.bond_token))
         .collect();
+    let retained_bond_tokens = if active {
+        value
+            .retained_bonds
+            .as_ref()
+            .map(|tokens| tokens.iter().map(token_hex).collect())
+    } else {
+        None
+    };
     let connected_tokens = value
         .slots
         .iter()
@@ -241,6 +275,7 @@ fn map_snapshot(value: ActorSnapshot, monotonic_ms: u64, wall_ms: u64) -> Backen
         route,
         pairing,
         bond_tokens,
+        retained_bond_tokens,
         connected_tokens,
         ready_tokens,
         pairing_available: value.state == HostState::Local
@@ -263,6 +298,26 @@ fn pair_error(error: PairingError) -> String {
     .to_owned()
 }
 
+fn inventory_error(error: InventoryError) -> String {
+    match error {
+        InventoryError::Unsupported => "Firmware does not support retained-bond inventory.".into(),
+        InventoryError::Busy => "Device is finishing another control request.".into(),
+        InventoryError::Host(fault) => format!("Retained-bond inventory failed: {fault:?}"),
+    }
+}
+
+fn forget_error(error: ForgetError) -> String {
+    match error {
+        ForgetError::Busy => "Device is finishing another control request.".into(),
+        ForgetError::NotLocal => "Return to local control before removing a bond.".into(),
+        ForgetError::UnknownBond => "Invalid bond identity token.".into(),
+        ForgetError::Unsupported => "Firmware does not support retained-bond inventory.".into(),
+        ForgetError::AlreadyAbsent => "Firmware inventory already excludes this bond; local profile was kept for reconciliation.".into(),
+        ForgetError::StillBonded => "Firmware still retains this bond; local profile was kept.".into(),
+        ForgetError::Host(fault) => format!("Bond removal was not confirmed: {fault:?}"),
+    }
+}
+
 fn worker(
     receiver: Receiver<Command>,
     shared: Arc<Mutex<BackendSnapshot>>,
@@ -276,6 +331,10 @@ fn worker(
     loop {
         match receiver.recv_timeout(Duration::from_millis(20)) {
             Ok(command) => {
+                let publish_after = matches!(
+                    &command.kind,
+                    CommandKind::RefreshInventory | CommandKind::Forget { .. }
+                );
                 if matches!(command.kind, CommandKind::Quit) {
                     gate.disarm();
                     if let Some(current) = actor.as_mut() {
@@ -312,25 +371,46 @@ fn worker(
                 } else if let Some(current) = actor.as_mut() {
                     let now_ms = started.elapsed().as_millis() as u64;
                     match command.kind {
-                        CommandKind::Begin => current.pair_begin(60, now_ms),
-                        CommandKind::Cancel => current.pair_cancel(now_ms),
+                        CommandKind::Begin => current.pair_begin(60, now_ms).map_err(pair_error),
+                        CommandKind::Cancel => current.pair_cancel(now_ms).map_err(pair_error),
                         CommandKind::Confirm {
                             challenge_id,
                             approved,
-                        } => current.pair_reply(challenge_id, approved, now_ms),
+                        } => current
+                            .pair_reply(challenge_id, approved, now_ms)
+                            .map_err(pair_error),
                         CommandKind::Local => {
                             current.request(Action::Local, now_ms);
                             Ok(())
                         }
+                        CommandKind::RefreshInventory => current
+                            .refresh_bond_inventory(now_ms)
+                            .map(|_| ())
+                            .map_err(inventory_error),
+                        CommandKind::Forget { token } => {
+                            current.forget_bond(token, now_ms).map_err(forget_error)
+                        }
                         CommandKind::SetMapping { .. } => unreachable!(),
                         CommandKind::Quit => unreachable!(),
                     }
-                    .map_err(pair_error)
                 } else if matches!(command.kind, CommandKind::Local) {
                     Ok(())
                 } else {
                     Err("No verified device session is available.".into())
                 };
+                if publish_after {
+                    if let Some(current) = actor.as_ref() {
+                        let now_ms = started.elapsed().as_millis() as u64;
+                        let wall_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        publish(
+                            &shared,
+                            map_snapshot(current.setup_snapshot(), now_ms, wall_ms),
+                        );
+                    }
+                }
                 let _ = command.reply.send(outcome);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -437,6 +517,8 @@ mod tests {
                 ready: true,
                 subscribed: true,
             }],
+            retained_bonds: Some(vec![[0xcd; 16]]),
+            retained_bonds_observed_ms: Some(0),
             pairing_deadline_ms: None,
             challenge_id: None,
             comparison_value: None,
@@ -449,6 +531,7 @@ mod tests {
         let local = map_snapshot(actor(HostState::Local), 0, 1_000);
         assert!(local.pairing_available);
         assert_eq!(local.bond_tokens, vec!["ab".repeat(16)]);
+        assert_eq!(local.retained_bond_tokens, Some(vec!["cd".repeat(16)]));
         assert_eq!(local.ready_tokens, local.bond_tokens);
         assert_eq!(local.connected_tokens, local.bond_tokens);
         assert!(matches!(local.route, crate::setup::RouteState::Local));
