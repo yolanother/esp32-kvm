@@ -99,6 +99,13 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(self.out.exists())
 
+    def test_accepts_tauri_msi_filename_with_product_space(self):
+        """The native Tauri MSI name contains a space in the product name."""
+        self.installer = self.installer.rename(self.root / "ESP32 KVM_0.1.0_x64_en-US.msi")
+        result = self.run_package()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.out / self.installer.name).is_file())
+
     def test_rejects_unsafe_version_and_installer_mismatch(self):
         """Do not accept path-like versions or mislabeled desktop installers."""
         failed = self.run_package("--firmware-version", "../bad")

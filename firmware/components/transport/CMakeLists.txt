@@ -3,4 +3,4 @@
 idf_component_register(SRCS "transport_core.c" "transport_usb_serial_jtag.c" "router_hid_bridge.c"
     INCLUDE_DIRS "." "../../../protocol/schema"
     REQUIRES router display
-    PRIV_REQUIRES esp_driver_usb_serial_jtag esp_hw_support hid esp_timer)
+    PRIV_REQUIRES esp_app_format esp_driver_usb_serial_jtag esp_hw_support hid esp_timer)

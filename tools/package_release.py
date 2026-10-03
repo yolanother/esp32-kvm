@@ -104,7 +104,8 @@ def package(args: argparse.Namespace) -> None:
     installer_name = args.installer.name
     if not installer or args.installer.suffix.lower() not in {".msi", ".exe"}:
         raise ValueError("installer must be a nonempty .msi or .exe")
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", installer_name) or desktop_version not in installer_name:
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._ -]*[A-Za-z0-9]", installer_name)
+            or desktop_version not in installer_name):
         raise ValueError("installer filename must be safe and contain desktop version")
 
     image_name = f"{BOARD_ID}-{firmware_version}-app.bin"

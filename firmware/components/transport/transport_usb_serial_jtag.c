@@ -11,6 +11,7 @@
 #include "display.h"
 #include "hid_guest.h"
 #include "driver/usb_serial_jtag.h"
+#include "esp_app_desc.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -176,7 +177,7 @@ static void usb_worker(void *context)
             continue;
         }
         if (!was_connected) {
-            (void)kvm_transport_core_init(&core, "esp32-kvm-s3", "0.1.0-m1",
+            (void)kvm_transport_core_init(&core, "esp32-kvm-s3", esp_app_get_description()->version,
                                           new_session(), send_binary, NULL);
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
             kvm_transport_core_bind_pairing(&core,

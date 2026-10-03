@@ -22,10 +22,10 @@ must contain the desktop Cargo version. Then run, for example:
 & 'C:/Users/yolan/AppData/Local/Programs/Python/Python312-dropkey/python.exe' tools/package_release.py `
   --app-image firmware/build/esp32_kvm.bin `
   --partition-table firmware/partitions.csv `
-  --installer path/to/ESP32-KVM_0.1.0_x64.msi `
-  --firmware-version 0.2.0 --desktop-version 0.1.0 `
-  --protocol-major 1 --protocol-minor-min 0 --protocol-minor-max 1 `
-  --out-dir dist/esp32-kvm-0.2.0
+  --installer 'target/release/bundle/msi/ESP32 KVM_0.1.0_x64_en-US.msi' `
+  --firmware-version 0.1.0-m1 --desktop-version 0.1.0 `
+  --protocol-major 1 --protocol-minor-min 0 --protocol-minor-max 2 `
+  --out-dir dist/esp32-kvm-0.1.0-m1
 ```
 
 Replace the input filenames and versions with the actual built release. The
@@ -37,6 +37,8 @@ in `firmware/partitions.csv`. The checked board partition is currently offset
 `0x20000`, capacity `0x650000` bytes. The descriptor check alone does not prove
 a binary was built from this source; the
 release operator must retain the native build log and source commit.
+The firmware's USB STATUS version is read from the same ESP-IDF app descriptor,
+so the packaged manifest version and device-reported version agree.
 
 The output directory has exactly five files:
 
@@ -74,11 +76,12 @@ not present the sequence as verified until that drill passes.
 
 ## Verification and remaining gates
 
-`python -m unittest discover -s tests/release -v` runs offline packaging
+`python -B -m unittest discover -s tests/release -v` runs offline packaging
 tests for deterministic outputs/checksums, embedded image identity, valid ICO,
-and rejected invalid inputs. The isolated worktree's unsigned Tauri build
-reached `beforeBuildCommand` but stopped because frontend dependencies were
-absent (`tsc` was not found); it produced no MSI. A real
+and rejected invalid inputs. An unsigned Windows MSI was built locally with
+Tauri's `--ignore-version-mismatches` flag while Rust Tauri 2.12.0 and the
+installed JavaScript API 2.10.1 were out of alignment; align those packages
+and rebuild before any release. A real
 release additionally needs: pinned ESP-IDF app build, Windows installer build
 and clean-machine install/upgrade/uninstall test, code-signature verification
 or an explicit unsigned label, USB update/re-enumeration with bonds preserved,
