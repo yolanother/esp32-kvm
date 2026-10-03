@@ -2,7 +2,7 @@
 // Drives the native host actor with a fake monotonic clock and byte stream to
 // verify exact control acknowledgments, retry bounds, local failover, and input safety.
 
-use esp32_kvm_host_actor::{HostActor, HostState, KeyMapper, MappedKey};
+use esp32_kvm_host_actor::{HostActor, HostFault, HostState, KeyMapper, MappedKey};
 use esp32_kvm_input_core::{Action, Destination, MappingProfile, MappingRule, Side, SourceKey};
 use esp32_kvm_platform_windows::{CaptureEvent, CaptureGate, PhysicalEvent};
 use esp32_kvm_protocol::{Frame, FrameDecoder, MessageKind};
@@ -149,6 +149,61 @@ fn setup() -> (HostActor<FakePort>, FakePort, Arc<CaptureGate>) {
     )
     .unwrap();
     (actor, wire, gate)
+}
+
+fn active() -> (HostActor<FakePort>, FakePort, Arc<CaptureGate>) {
+    let (mut actor, wire, gate) = setup();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    actor.request(Action::Direct(1), 2);
+    let release = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&release, 1));
+    actor.poll(3);
+    let select = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&select, 2));
+    actor.poll(4);
+    let arm = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&arm, 2));
+    actor.poll(5);
+    actor.observe_all_up();
+    assert_eq!(gate.generation(), 2);
+    (actor, wire, gate)
+}
+
+#[test]
+fn suspend_disarms_sends_release_and_rejects_stale_input() {
+    let (mut actor, wire, gate) = active();
+    actor.suspend();
+    assert_eq!(gate.generation(), 0);
+    assert_eq!(actor.fault(), Some(HostFault::Suspended));
+    let release = wire.sent().last().unwrap().clone();
+    assert_eq!(release.kind, MessageKind::ReleaseAll);
+    assert_eq!(release.route_generation, 2);
+    wire.feed(ack(&release, 3));
+    actor.poll(6);
+    actor.request(Action::Direct(1), 7);
+    actor.on_capture(
+        CaptureEvent {
+            generation: 2,
+            event: PhysicalEvent::Motion(8, 4),
+        },
+        8,
+    );
+    assert_eq!(actor.state(), HostState::Failed);
+    assert_eq!(wire.sent().last().unwrap().kind, MessageKind::ReleaseAll);
+}
+
+#[test]
+fn shutdown_and_drop_restore_local_capture() {
+    let (mut actor, wire, gate) = active();
+    actor.shutdown();
+    assert_eq!(actor.fault(), Some(HostFault::Stopped));
+    assert_eq!(gate.generation(), 0);
+    assert_eq!(wire.sent().last().unwrap().kind, MessageKind::ReleaseAll);
+
+    let (actor, _, gate) = active();
+    drop(actor);
+    assert_eq!(gate.generation(), 0);
 }
 
 #[test]

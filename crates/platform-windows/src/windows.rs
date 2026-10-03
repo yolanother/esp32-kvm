@@ -2,7 +2,8 @@
 // Runs one Windows message-loop thread with low-level keyboard/mouse hooks and a message-only
 // Raw Input window. Hooks handle key/button/wheel transitions and local suppression; only Raw
 // Input supplies relative motion. Physical shortcuts are recognized even while
-// guest capture is disarmed. The worker never routes through the UI.
+// guest capture is disarmed. An independent watcher fails local if either
+// worker stalls; the worker never routes through the UI.
 use crate::{
     CaptureEvent, CaptureFault, CaptureGate, MouseAxis, MouseButton, MouseInput, PhysicalEvent,
     RawMotionOutcome, classify_keyboard, classify_mouse, classify_raw_motion,
@@ -12,12 +13,14 @@ use std::cell::RefCell;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
-use windows_sys::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::{
+    GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -94,6 +97,10 @@ pub struct CaptureService {
     hotkey_settings: Arc<HotkeySettings>,
     thread_id: u32,
     worker: Option<JoinHandle<()>>,
+    started: Instant,
+    watchdog_stop: Arc<AtomicBool>,
+    watchdog: Option<JoinHandle<()>>,
+    cursor_origin: Arc<Mutex<Option<POINT>>>,
 }
 
 impl CaptureService {
@@ -102,17 +109,20 @@ impl CaptureService {
         queue_capacity: usize,
     ) -> Result<(Self, Receiver<CaptureEvent>), CaptureStartError> {
         let (gate, receiver) = CaptureGate::new(queue_capacity);
+        let started = Instant::now();
         let worker_gate = Arc::clone(&gate);
         let hotkey_settings = Arc::new(HotkeySettings {
             config: RwLock::new(HotkeyConfig::defaults()),
             revision: AtomicU64::new(0),
         });
         let worker_hotkeys = Arc::clone(&hotkey_settings);
+        let worker_started = started;
         let (ready_sender, ready_receiver) = sync_channel(1);
         let worker = thread::Builder::new()
             .name("esp32-kvm-capture".into())
             .spawn(move || {
-                let result = Runtime::setup(Arc::clone(&worker_gate), worker_hotkeys);
+                let result =
+                    Runtime::setup(Arc::clone(&worker_gate), worker_hotkeys, worker_started);
                 match result {
                     Ok(runtime) => {
                         let thread_id = unsafe { GetCurrentThreadId() };
@@ -120,8 +130,11 @@ impl CaptureService {
                         let mut message: MSG = unsafe { zeroed() };
                         loop {
                             let outcome = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
-                            if outcome <= 0 {
+                            if outcome < 0 {
                                 worker_gate.mark_fault(CaptureFault::MessagePumpFailure);
+                                break;
+                            }
+                            if outcome == 0 {
                                 break;
                             }
                             unsafe {
@@ -139,15 +152,47 @@ impl CaptureService {
             })
             .map_err(CaptureStartError::Thread)?;
         match ready_receiver.recv() {
-            Ok(Ok(thread_id)) => Ok((
-                Self {
-                    gate,
-                    hotkey_settings,
-                    thread_id,
-                    worker: Some(worker),
-                },
-                receiver,
-            )),
+            Ok(Ok(thread_id)) => {
+                let watchdog_stop = Arc::new(AtomicBool::new(false));
+                let stop = Arc::clone(&watchdog_stop);
+                let watchdog_gate = Arc::clone(&gate);
+                let cursor_origin = Arc::new(Mutex::new(None));
+                let watchdog_cursor = Arc::clone(&cursor_origin);
+                let watchdog = match thread::Builder::new()
+                    .name("esp32-kvm-watchdog".into())
+                    .spawn(move || {
+                        while !stop.load(Ordering::Acquire) {
+                            thread::sleep(Duration::from_millis(25));
+                            watchdog_gate.check_watchdog_at(started.elapsed().as_millis() as u64);
+                            if watchdog_gate.generation() == 0 {
+                                restore_cursor(&watchdog_cursor);
+                            }
+                        }
+                    }) {
+                    Ok(watchdog) => watchdog,
+                    Err(error) => {
+                        gate.disarm();
+                        unsafe {
+                            PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
+                        }
+                        let _ = worker.join();
+                        return Err(CaptureStartError::Thread(error));
+                    }
+                };
+                Ok((
+                    Self {
+                        gate,
+                        hotkey_settings,
+                        thread_id,
+                        worker: Some(worker),
+                        started,
+                        watchdog_stop,
+                        watchdog: Some(watchdog),
+                        cursor_origin,
+                    },
+                    receiver,
+                ))
+            }
             Ok(Err(error)) => {
                 let _ = worker.join();
                 Err(error)
@@ -161,11 +206,38 @@ impl CaptureService {
 
     /// Arm a fresh route only when no capture fault is pending.
     pub fn arm(&self, generation: u32) -> bool {
-        os_all_up() && self.gate.arm(generation)
+        self.actor_heartbeat();
+        if !self
+            .gate
+            .capture_pump_recent_at(self.started.elapsed().as_millis() as u64)
+        {
+            self.gate.mark_fault(CaptureFault::CaptureWorkerStalled);
+            return false;
+        }
+        if !os_all_up() {
+            return false;
+        }
+        let mut point: POINT = unsafe { zeroed() };
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            return false;
+        }
+        let mut origin = self
+            .cursor_origin
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if origin.is_some() {
+            return false;
+        }
+        if !self.gate.arm(generation) {
+            return false;
+        }
+        *origin = Some(point);
+        true
     }
     /// Restore local pass-through immediately.
     pub fn disarm(&self) {
         self.gate.disarm();
+        restore_cursor(&self.cursor_origin);
     }
     /// Read the active route generation, or zero when locally disarmed.
     pub fn generation(&self) -> u32 {
@@ -174,6 +246,16 @@ impl CaptureService {
     /// Read the first capture fault; the actor must release remote state on faults.
     pub fn fault(&self) -> Option<CaptureFault> {
         self.gate.fault()
+    }
+    /// Renews the serialized routing actor's independent watchdog lease.
+    pub fn actor_heartbeat(&self) {
+        self.gate
+            .actor_heartbeat_at(self.started.elapsed().as_millis() as u64);
+    }
+    /// Disarms on lock, suspend, shutdown, or resume before a fresh session.
+    pub fn system_transition(&self) {
+        self.gate.system_transition();
+        restore_cursor(&self.cursor_origin);
     }
     /// Returns true only when every observed physical key and mouse button is up.
     pub fn physical_all_up(&self) -> bool {
@@ -202,14 +284,36 @@ impl CaptureService {
 fn os_all_up() -> bool {
     (1..=255).all(|virtual_key| unsafe { GetAsyncKeyState(virtual_key) as u16 & 0x8000 == 0 })
 }
+
+// Only this service's saved position is restored. It never changes ClipCursor
+// or ShowCursor, so it must not undo another application's cursor ownership.
+fn restore_cursor(origin: &Mutex<Option<POINT>>) {
+    let mut saved = origin.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(point) = saved.as_ref()
+        && unsafe { SetCursorPos(point.x, point.y) } != 0
+    {
+        *saved = None;
+    }
+}
 impl Drop for CaptureService {
     fn drop(&mut self) {
         self.gate.disarm();
+        restore_cursor(&self.cursor_origin);
+        self.watchdog_stop.store(true, Ordering::Release);
         unsafe {
             PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
         }
+        if let Some(watchdog) = self.watchdog.take() {
+            let _ = watchdog.join();
+        }
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while !worker.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if worker.is_finished() {
+                let _ = worker.join();
+            }
         }
     }
 }
@@ -226,6 +330,7 @@ impl Runtime {
     fn setup(
         gate: Arc<CaptureGate>,
         hotkey_settings: Arc<HotkeySettings>,
+        started: Instant,
     ) -> Result<Self, CaptureStartError> {
         let instance = unsafe { GetModuleHandleW(null()) };
         if instance.is_null() {
@@ -276,12 +381,19 @@ impl Runtime {
                 hotkeys: HotkeyMatcher::new(HotkeyConfig::defaults()),
                 hotkey_settings,
                 hotkey_revision: 0,
-                started: Instant::now(),
+                started,
             })
         });
         if unsafe { SetTimer(runtime.window, HOTKEY_TIMER, 20, None) } == 0 {
             return Err(win_error("SetTimer hotkey"));
         }
+        CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow().as_ref() {
+                context
+                    .gate
+                    .capture_heartbeat_at(started.elapsed().as_millis() as u64);
+            }
+        });
         let device = RAWINPUTDEVICE {
             usUsagePage: 1,
             usUsage: 2,
@@ -509,15 +621,27 @@ unsafe extern "system" fn window_proc(
         CONTEXT.with(|cell| {
             if let Ok(mut slot) = cell.try_borrow_mut()
                 && let Some(context) = slot.as_mut()
-                && let Some(action) = context
-                    .hotkeys
-                    .tick(context.started.elapsed().as_millis() as u64)
             {
-                context.gate.disarm();
-                context.gate.offer_hotkey(action);
+                let now_ms = context.started.elapsed().as_millis() as u64;
+                context.gate.capture_heartbeat_at(now_ms);
+                if let Some(action) = context.hotkeys.tick(now_ms) {
+                    context.gate.disarm();
+                    context.gate.offer_hotkey(action);
+                }
             }
         });
         return 0;
+    }
+    if (message == WM_ENDSESSION && wparam != 0)
+        || (message == WM_POWERBROADCAST && matches!(wparam, 0x4 | 0x7 | 0x12))
+    {
+        CONTEXT.with(|cell| {
+            if let Ok(slot) = cell.try_borrow()
+                && let Some(context) = slot.as_ref()
+            {
+                context.gate.system_transition();
+            }
+        });
     }
     if message == WM_INPUT {
         process_raw_input(lparam);

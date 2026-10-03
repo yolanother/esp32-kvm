@@ -1,7 +1,8 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
 // Owns the serialized native host USB session and routes capture events through
 // a verified protocol session, input policy, fail-local capture gate, and
-// numeric pairing state reported by negotiated firmware STATUS.
+// numeric pairing state reported by negotiated firmware STATUS. Terminal
+// suspend and shutdown end the session without input replay.
 
 #![forbid(unsafe_code)]
 
@@ -61,6 +62,8 @@ pub trait CaptureControl {
     fn fault(&self) -> Option<CaptureFault>;
     /// Proves all non-injected physical keys and buttons are released.
     fn physical_all_up(&self) -> bool;
+    /// Renews the independent routing actor watchdog while this actor advances.
+    fn actor_heartbeat(&self) {}
 }
 
 impl CaptureControl for CaptureGate {
@@ -98,6 +101,9 @@ impl CaptureControl for CaptureService {
     fn physical_all_up(&self) -> bool {
         CaptureService::physical_all_up(self)
     }
+    fn actor_heartbeat(&self) {
+        CaptureService::actor_heartbeat(self);
+    }
 }
 
 impl<T: CaptureControl + ?Sized> CaptureControl for Arc<T> {
@@ -115,6 +121,9 @@ impl<T: CaptureControl + ?Sized> CaptureControl for Arc<T> {
     }
     fn physical_all_up(&self) -> bool {
         (**self).physical_all_up()
+    }
+    fn actor_heartbeat(&self) {
+        (**self).actor_heartbeat();
     }
 }
 
@@ -171,6 +180,10 @@ pub enum HostFault {
     Timeout,
     /// Capture was faulted or could not be armed safely.
     Capture,
+    /// The operating system is suspending or ending the interactive session.
+    Suspended,
+    /// The host actor was explicitly shut down.
+    Stopped,
 }
 
 /// One bonded slot reported by firmware STATUS.
@@ -580,6 +593,7 @@ impl<S: Read + Write> HostActor<S> {
         if self.fault.is_some() {
             return;
         }
+        self.capture.actor_heartbeat();
         if self
             .pairing_deadline_ms
             .is_some_and(|deadline| now_ms >= deadline)
@@ -1045,6 +1059,35 @@ impl<S: Read + Write> HostActor<S> {
             router.link_lost();
         }
         self.fault = Some(fault);
+    }
+
+    /// Ends the current session for sleep or desktop-session changes. A fresh
+    /// verified actor is required after resume; queued input is discarded.
+    pub fn suspend(&mut self) {
+        self.stop(HostFault::Suspended);
+    }
+
+    /// Ends the current session for a clean application exit.
+    pub fn shutdown(&mut self) {
+        self.stop(HostFault::Stopped);
+    }
+
+    fn stop(&mut self, reason: HostFault) {
+        if self.fault.is_some() {
+            self.capture.disarm();
+            return;
+        }
+        self.capture.disarm();
+        if self.router.is_some() {
+            let _ = self.send(MessageKind::ReleaseAll, self.confirmed_generation, vec![]);
+        }
+        self.fail(reason);
+    }
+}
+
+impl<S: Read + Write> Drop for HostActor<S> {
+    fn drop(&mut self) {
+        self.capture.disarm();
     }
 }
 

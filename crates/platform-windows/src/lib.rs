@@ -1,7 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
 // Defines bounded Windows physical-input capture and handoff to a native routing actor.
 // Keyboard/buttons/wheels and physical shortcuts use hooks; relative motion
-// uses Raw Input, outside the webview.
+// uses Raw Input, outside the webview. Independent worker leases fail local.
 use esp32_kvm_input_core::Action;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -170,6 +170,12 @@ pub enum CaptureFault {
     MessagePumpFailure = 5,
     /// Editable shortcut configuration was unavailable to the hook.
     HotkeyConfigBusy = 6,
+    /// Serialized routing actor stopped issuing liveness beats while armed.
+    RoutingWorkerStalled = 7,
+    /// Windows hook/message-pump worker stopped issuing liveness beats while armed.
+    CaptureWorkerStalled = 8,
+    /// Windows lock, suspend, shutdown, or another desktop transition paused capture.
+    SystemTransition = 9,
 }
 
 /// Atomic route gate and bounded sender shared by native callbacks.
@@ -177,6 +183,8 @@ pub struct CaptureGate {
     state: AtomicU64,
     sender: SyncSender<CaptureEvent>,
     physical: Mutex<PhysicalLedger>,
+    last_actor_ms: AtomicU64,
+    last_capture_ms: AtomicU64,
 }
 
 struct PhysicalLedger {
@@ -202,6 +210,8 @@ impl CaptureGate {
                     keys: [false; 512],
                     buttons: 0,
                 }),
+                last_actor_ms: AtomicU64::new(0),
+                last_capture_ms: AtomicU64::new(0),
             }),
             receiver,
         )
@@ -263,6 +273,35 @@ impl CaptureGate {
             .unwrap_or_else(|error| error.into_inner())
             .all_up()
     }
+    /// Records a routing-actor beat in a caller-owned monotonic millisecond epoch.
+    pub fn actor_heartbeat_at(&self, now_ms: u64) {
+        self.last_actor_ms.store(now_ms, Ordering::Release);
+    }
+    /// Records a hook/message-pump beat in the same monotonic epoch.
+    pub fn capture_heartbeat_at(&self, now_ms: u64) {
+        self.last_capture_ms.store(now_ms, Ordering::Release);
+    }
+    /// Reports whether the capture message pump has run in the last 250 ms.
+    /// The Windows service checks this just before arming a guest route.
+    pub fn capture_pump_recent_at(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.last_capture_ms.load(Ordering::Acquire)) < 250
+    }
+    /// Independently checks worker leases and disarms a stalled active route.
+    /// The production watcher runs this on a thread separate from both workers.
+    pub fn check_watchdog_at(&self, now_ms: u64) {
+        if self.generation() == 0 {
+            return;
+        }
+        if !self.capture_pump_recent_at(now_ms) {
+            self.mark_fault(CaptureFault::CaptureWorkerStalled);
+        } else if now_ms.saturating_sub(self.last_actor_ms.load(Ordering::Acquire)) >= 500 {
+            self.mark_fault(CaptureFault::RoutingWorkerStalled);
+        }
+    }
+    /// Disarms on a system/session transition; reopening requires reconciliation.
+    pub fn system_transition(&self) {
+        self.mark_fault(CaptureFault::SystemTransition);
+    }
     /// Stop suppression and forwarding immediately.
     pub fn disarm(&self) {
         self.state.fetch_and(!0xffff_ffff, Ordering::AcqRel);
@@ -280,6 +319,9 @@ impl CaptureGate {
             4 => Some(CaptureFault::RawInputFailure),
             5 => Some(CaptureFault::MessagePumpFailure),
             6 => Some(CaptureFault::HotkeyConfigBusy),
+            7 => Some(CaptureFault::RoutingWorkerStalled),
+            8 => Some(CaptureFault::CaptureWorkerStalled),
+            9 => Some(CaptureFault::SystemTransition),
             _ => None,
         }
     }
