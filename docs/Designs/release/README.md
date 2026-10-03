@@ -26,10 +26,12 @@ must contain the desktop Cargo version. Then run, for example:
 
 Replace the input filenames and versions with the actual built release. The
 script checks the desktop version against `apps/desktop/src-tauri/Cargo.toml`,
-the ESP-IDF image's `0xE9` magic, and image size against both the 8 MiB update
-limit and the `factory` app partition in `firmware/partitions.csv`. The checked
-board partition is currently offset `0x20000`, capacity `0x650000` bytes. The
-magic check alone does not prove a binary was built from this source; the
+the ESP-IDF v5.5.1 image header and first-segment app descriptor, the embedded
+ESP32-S3 chip ID, project name `esp32_kvm`, embedded firmware version, and
+image size against both the 8 MiB update limit and the `factory` app partition
+in `firmware/partitions.csv`. The checked board partition is currently offset
+`0x20000`, capacity `0x650000` bytes. The descriptor check alone does not prove
+a binary was built from this source; the
 release operator must retain the native build log and source commit.
 
 The output directory has exactly five files:

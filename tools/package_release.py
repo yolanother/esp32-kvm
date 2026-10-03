@@ -10,12 +10,16 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import struct
 import sys
 import tempfile
 import tomllib
 
 
 BOARD_ID = "esp32-kvm-s3"
+PROJECT_NAME = "esp32_kvm"
+ESP32_S3_CHIP_ID = 0x0009
+APP_DESC_MAGIC = 0xABCD5432
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 4096
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +56,33 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def app_identity(image: bytes) -> tuple[str, str]:
+    """Read the bounded first-segment IDF app descriptor for ESP32-S3."""
+    # ESP-IDF v5.5.1 esp_app_format.h: 24-byte image header, then an 8-byte
+    # segment header. esp_app_desc.h places a 256-byte descriptor first in DROM.
+    if len(image) < 32 + 256 or image[0] != 0xE9 or not 1 <= image[1] <= 16:
+        raise ValueError("missing bounded ESP-IDF application header")
+    if struct.unpack_from("<H", image, 12)[0] != ESP32_S3_CHIP_ID:
+        raise ValueError("image chip ID is not ESP32-S3")
+    segment_len = struct.unpack_from("<I", image, 28)[0]
+    if segment_len < 256 or 32 + segment_len > len(image):
+        raise ValueError("first app segment is truncated")
+    if struct.unpack_from("<I", image, 32)[0] != APP_DESC_MAGIC:
+        raise ValueError("missing ESP-IDF app descriptor")
+
+    def field(start: int) -> str:
+        raw = image[start:start + 32]
+        if b"\x00" not in raw:
+            raise ValueError("app descriptor string is not terminated")
+        value = raw.split(b"\x00", 1)[0]
+        try:
+            return value.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise ValueError("app descriptor string is not ASCII") from error
+
+    return field(48), field(80)
+
+
 def package(args: argparse.Namespace) -> None:
     """Validate all inputs before atomically placing one immutable release directory."""
     firmware_version = safe_version(args.firmware_version)
@@ -64,10 +95,11 @@ def package(args: argparse.Namespace) -> None:
 
     image = args.app_image.read_bytes()
     offset, capacity = app_partition(args.partition_table)
-    if not image or image[0] != 0xE9:
-        raise ValueError("app image lacks ESP-IDF image magic 0xE9")
     if len(image) > min(MAX_IMAGE_BYTES, capacity):
         raise ValueError("app image exceeds update or factory partition capacity")
+    embedded_version, embedded_project = app_identity(image)
+    if embedded_project != PROJECT_NAME or embedded_version != firmware_version:
+        raise ValueError("embedded app project/version differs from release labels")
     installer = args.installer.read_bytes()
     installer_name = args.installer.name
     if not installer or args.installer.suffix.lower() not in {".msi", ".exe"}:

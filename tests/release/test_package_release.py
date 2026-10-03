@@ -5,6 +5,7 @@
 import hashlib
 import json
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,18 @@ import unittest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "package_release.py"
 REAL_PARTITIONS = Path(__file__).resolve().parents[2] / "firmware" / "partitions.csv"
+
+
+def app_image(project="esp32_kvm", version="0.2.0", chip_id=9):
+    """Make a bounded IDF header, first segment, and app descriptor fixture."""
+    header = bytearray(24)
+    header[0:2] = b"\xe9\x01"
+    struct.pack_into("<H", header, 12, chip_id)
+    descriptor = bytearray(256)
+    struct.pack_into("<I", descriptor, 0, 0xABCD5432)
+    descriptor[16:16 + len(version)] = version.encode("ascii")
+    descriptor[48:48 + len(project)] = project.encode("ascii")
+    return bytes(header) + struct.pack("<II", 0x3C000020, len(descriptor)) + bytes(descriptor)
 
 
 class PackageReleaseTests(unittest.TestCase):
@@ -24,7 +37,7 @@ class PackageReleaseTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.image = self.root / "esp32_kvm.bin"
-        self.image.write_bytes(b"\xe9\x01\x00\x00firmware")
+        self.image.write_bytes(app_image())
         self.installer = self.root / "ESP32-KVM_0.1.0_x64.msi"
         self.installer.write_bytes(b"offline installer fixture")
         self.partitions = self.root / "partitions.csv"
@@ -81,7 +94,7 @@ class PackageReleaseTests(unittest.TestCase):
         failed = self.run_package()
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(self.out.exists())
-        self.image.write_bytes(b"\xe9" + b"x" * 0x1000)
+        self.image.write_bytes(app_image() + b"x" * 0x1000)
         failed = self.run_package()
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(self.out.exists())
@@ -112,6 +125,18 @@ class PackageReleaseTests(unittest.TestCase):
         firmware = json.loads((self.out / "release.json").read_text())["firmware"]
         self.assertEqual(firmware["app_partition_offset"], 0x20000)
         self.assertEqual(firmware["app_partition_bytes"], 0x650000)
+
+    def test_rejects_embedded_project_version_chip_or_truncated_descriptor(self):
+        """CLI labels cannot override the built image identity."""
+        for image in (
+            app_image(project="other"), app_image(version="9.9.9"),
+            app_image(chip_id=0), app_image()[:90],
+        ):
+            with self.subTest(image=image[:20]):
+                self.image.write_bytes(image)
+                failed = self.run_package()
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertFalse(self.out.exists())
 
 
 if __name__ == "__main__":
