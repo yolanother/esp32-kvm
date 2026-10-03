@@ -82,6 +82,15 @@ void kvm_router_init(kvm_router_t *r, kvm_router_output_t output, void *context)
     memset(r, 0, sizeof(*r));
     r->output = output;
     r->context = context;
+    r->capacity = 1;
+}
+
+bool kvm_router_set_capacity(kvm_router_t *r, uint8_t capacity)
+{
+    if (!r || r->slot || r->armed || capacity < 1 || capacity > KVM_ROUTER_MAX_SLOTS)
+        return false;
+    r->capacity = capacity;
+    return true;
 }
 
 void kvm_router_reset(kvm_router_t *r)
@@ -148,7 +157,7 @@ kvm_router_result_t kvm_router_switch(kvm_router_t *r, uint64_t session, uint32_
     if (expected != r->generation || requested == expected ||
         (uint32_t)(requested - expected) >= 0x80000000u)
         return record(r, seq, 0x20, arg, slot, KVM_ROUTER_STALE_ROUTE);
-    if (slot > 1 || (slot && (!r->output.ready || !r->output.ready(r->context, slot))))
+    if (slot > r->capacity || (slot && (!r->output.ready || !r->output.ready(r->context, slot))))
         return record(r, seq, 0x20, arg, slot, KVM_ROUTER_NOT_READY);
     uint8_t old = r->slot;
     r->armed = false;

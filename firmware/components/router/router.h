@@ -17,6 +17,8 @@
 #define KVM_ROUTER_CONGESTION_MS 100u
 /** Bound on pending input events from the serialized actor. */
 #define KVM_ROUTER_QUEUE_CAPACITY 8u
+/** Maximum source-side HID slots; advertised capacity remains gated at one. */
+#define KVM_ROUTER_MAX_SLOTS 3u
 
 /** Protocol-compatible command outcomes. */
 typedef enum {
@@ -85,6 +87,7 @@ typedef struct {
     uint32_t generation;
     uint32_t last_result_generation;
     uint8_t slot;
+    uint8_t capacity;
     bool session_open;
     bool has_host_tick;
     bool armed;
@@ -102,6 +105,8 @@ typedef struct {
 
 /** Initializes the router disarmed on local slot zero. */
 void kvm_router_init(kvm_router_t *router, kvm_router_output_t output, void *context);
+/** Sets an admitted slot capacity only while local and disarmed. Defaults to one. */
+bool kvm_router_set_capacity(kvm_router_t *router, uint8_t capacity);
 /** Opens a fresh transport session, releasing any old output. */
 void kvm_router_session_open(kvm_router_t *router, uint64_t session, uint64_t now_ms);
 /** Handles USB disconnect or board reset and returns to disarmed local state. */

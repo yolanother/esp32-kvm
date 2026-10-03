@@ -167,6 +167,23 @@ static void physical_emergency_release(void)
     kvm_router_emergency_release(&r);
     assert(r.generation == 2 && f.releases == 1);
 }
+static void gated_three_slot_switching(void)
+{
+    kvm_router_t r; fake_t f; setup(&r, &f);
+    assert(kvm_router_switch(&r, 7, 1, 2, 0, 1, 1) == KVM_ROUTER_NOT_READY);
+    assert(kvm_router_set_capacity(&r, 3));
+    assert(kvm_router_switch(&r, 7, 2, 2, 0, 1, 2) == KVM_ROUTER_OK);
+    assert(kvm_router_arm(&r, 7, 3, 2, 1, 3) == KVM_ROUTER_OK);
+    kvm_router_input_t key = {0}; key.kind = KVM_ROUTER_KEYBOARD; key.keyboard[2] = 5;
+    assert(kvm_router_input(&r, 7, 1, 4, key, 4) == KVM_ROUTER_OK);
+    kvm_router_tick(&r, 5);
+    assert(f.last_slot == 2 && f.last_input.keyboard[2] == 5);
+    assert(kvm_router_switch(&r, 7, 5, 3, 1, 2, 6) == KVM_ROUTER_OK);
+    assert(f.last_slot == 2 && f.releases == 1 && !r.armed);
+    assert(kvm_router_arm(&r, 7, 6, 3, 2, 7) == KVM_ROUTER_OK);
+    kvm_router_tick(&r, 507);
+    assert(f.last_slot == 3 && f.releases == 2 && r.slot == 0 && !r.armed);
+}
 int main(void)
 {
     switching_and_fencing();
@@ -176,5 +193,6 @@ int main(void)
     release_failure();
     reset_each_stage_and_replay();
     physical_emergency_release();
+    gated_three_slot_switching();
     return 0;
 }
