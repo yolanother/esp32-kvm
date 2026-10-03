@@ -116,6 +116,9 @@ int main(void)
     assert(touched == KVM_DISPLAY_PAIR_BEGIN);
     status.pairing_state = KVM_DISPLAY_PAIRING_WAITING;
     assert(kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_CANCEL, &request));
+    assert(!kvm_display_pair_touch_action(&status, 180, 180, &touched));
+    assert(kvm_display_pair_touch_action(&status, 40, 180, &touched));
+    assert(touched == KVM_DISPLAY_PAIR_CANCEL);
     status.pairing_state = KVM_DISPLAY_PAIRING_CAPACITY;
     assert(!kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_BEGIN, &request));
     status.pairing_state = KVM_DISPLAY_PAIRING_CLOSED;

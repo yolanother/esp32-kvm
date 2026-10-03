@@ -207,6 +207,7 @@ static void display_worker(void *context)
 {
     (void)context;
     kvm_display_view_t shown = {0};
+    uint64_t last_touch_ms = 0;
     for (;;) {
         kvm_display_status_t next;
         portENTER_CRITICAL(&status_lock);
@@ -238,9 +239,9 @@ static void display_worker(void *context)
                     lv_obj_set_width(left_action, 216);
                     break;
                 case KVM_DISPLAY_PAIRING_WAITING:
+                    lv_obj_set_width(left_action, 103);
                     set_action(left_action, next.pairing_local_owner ? "CANCEL" : NULL);
                     set_action(right_action, NULL);
-                    lv_obj_set_width(left_action, 216);
                     break;
                 case KVM_DISPLAY_PAIRING_CHALLENGE:
                     lv_obj_set_width(left_action, 103);
@@ -268,10 +269,14 @@ static void display_worker(void *context)
             if (esp_lcd_touch_get_data(touch_handle, &point, &count, 1) == ESP_OK && count) {
                 kvm_display_pair_action_t action;
                 kvm_display_pair_request_t request;
-                if (kvm_display_pair_touch_action(&next, point.x, point.y, &action) &&
-                    kvm_display_pair_request(&next, (uint64_t)esp_timer_get_time() / 1000,
-                                             action, &request) && pair_callback)
+                uint64_t touch_ms = (uint64_t)esp_timer_get_time() / 1000;
+                if ((!last_touch_ms || touch_ms - last_touch_ms >= 750u) &&
+                    kvm_display_pair_touch_action(&next, point.x, point.y, &action) &&
+                    kvm_display_pair_request(&next, touch_ms, action, &request) &&
+                    pair_callback) {
+                    last_touch_ms = touch_ms;
                     pair_callback(request);
+                }
             }
         }
     }

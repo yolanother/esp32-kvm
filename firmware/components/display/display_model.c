@@ -136,7 +136,7 @@ bool kvm_display_pair_touch_action(const kvm_display_status_t *s,
     case KVM_DISPLAY_PAIRING_TIMEOUT:
         *action = KVM_DISPLAY_PAIR_BEGIN; return true;
     case KVM_DISPLAY_PAIRING_WAITING:
-        if (!s->pairing_local_owner) return false;
+        if (!s->pairing_local_owner || x >= 115u) return false;
         *action = KVM_DISPLAY_PAIR_CANCEL; return true;
     case KVM_DISPLAY_PAIRING_CHALLENGE:
         if (!s->pairing_local_owner) return false;
