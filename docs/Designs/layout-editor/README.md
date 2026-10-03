@@ -27,9 +27,23 @@ portals are discarded on a change or enumeration failure. `layout_apply`
 re-enumerates and checks draft hosts exactly against the current validated
 snapshot, then swaps the portal graph and edge policy together. The current
 edge policy has one dwell setting, so applied portals must share a dwell value.
-The Enable control remains disabled until native capture, physical all-up,
-guest readiness, and actor edge routing are connected. Preparation sends no
-cursor or input events.
+The Enable control becomes available only after the native capture worker has
+started, the one confirmed host actor is local, every physical key and button
+is up, at least one firmware STATUS slot is both ready and HID subscribed, and
+the prepared portal graph matches the current topology. The user must enable
+crossing explicitly. The actor worker polls physical cursor coordinates and
+feeds bounded samples to `CrossingPolicy`; an eligible destination is resolved
+by opaque bond identity to the current verified slot, then sent as a direct
+selection through the same `HostActor` serial stream. The webview does not
+sample input or control timing.
+
+The actor worker re-enumerates monitors every 100 ms. A changed or unreadable
+topology invalidates prepared portals, disables edge observation, disarms
+capture and requests local routing if a guest or switch was active. Missing
+capture, unavailable guest readiness, held physical input and sample gaps
+cancel pending dwell. Failed capture startup leaves setup available but no
+crossing route can arm. The guest route itself still waits for exact switch and
+arm acknowledgments and a fresh physical all-up baseline.
 
 Windows display device names identify monitors within the current connected
 arrangement. They can change after driver or cable changes; that invalidates
@@ -47,5 +61,5 @@ Source checks: `cargo test --workspace --offline`,
 `cargo fmt --all -- --check`, Node tests in `apps/desktop/src/*.test.mjs`, and
 `npm run build`. A physical multi-monitor gate must separately confirm native
 bounds and DPI for negative-origin and rotated monitors, unplug/replug
-invalidation, and a future captured host-edge crossing with safe local return.
+invalidation, and a captured host-edge crossing with safe local return.
 Source tests do not claim that physical gate.

@@ -44,7 +44,6 @@ test("manual guest placeholders are profile-named and portals stay dry-run only"
   const portal = portalForSegment(segment, token);
   assert.equal(portal.direction, "outward");
   assert.equal(portal.dwellMs, 200);
-  assert.equal(standardCapabilities().canEnablePortals, false);
   assert.equal(standardCapabilities().canReturnFromGuestEdge, false);
 });
 

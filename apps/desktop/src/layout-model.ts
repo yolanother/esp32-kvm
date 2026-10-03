@@ -108,7 +108,7 @@ export function validDraft(draft: LayoutDraft): boolean {
     draft.guests.some((guest) => guest.bondToken === portal.destinationToken) && exposed.some((segment) => segment.monitorId === portal.monitorId && segment.edge === portal.edge && segment.start <= portal.start && portal.end <= segment.end));
 }
 
-/** Current capability truth until native discovery/capture and guest helper land. */
-export function standardCapabilities(): { canEnablePortals: false; canReturnFromGuestEdge: false; canPlaceGuestCursor: false } {
-  return { canEnablePortals: false, canReturnFromGuestEdge: false, canPlaceGuestCursor: false };
+/** Helper-only capabilities; native crossing availability comes from LayoutStatus. */
+export function standardCapabilities(): { canReturnFromGuestEdge: false; canPlaceGuestCursor: false } {
+  return { canReturnFromGuestEdge: false, canPlaceGuestCursor: false };
 }

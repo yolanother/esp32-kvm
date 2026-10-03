@@ -8,7 +8,10 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 
 mod monitors;
-pub use monitors::{DisplayRecord, MonitorInventory, discover_monitors};
+pub use monitors::{
+    DisplayRecord, MonitorInventory, discover_monitors, foreground_fullscreen,
+    physical_cursor_position,
+};
 
 #[cfg(windows)]
 mod windows;

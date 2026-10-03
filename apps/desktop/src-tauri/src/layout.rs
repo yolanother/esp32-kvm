@@ -2,10 +2,14 @@
 // Validates manual layout drafts and atomically prepares exposed-edge portals
 // against discovered Windows monitors. Crossing stays inactive until capture owns it.
 
-use esp32_kvm_edge_policy::{CrossingConfig, CrossingPolicy};
+use esp32_kvm_edge_policy::{CrossingConfig, CrossingGuards, CrossingPolicy, CursorSample};
+use esp32_kvm_input_core::Action;
 use esp32_kvm_platform_windows::{DisplayRecord, MonitorInventory, discover_monitors};
-use esp32_kvm_topology_core::{Edge, Monitor, Portal, PortalGraph, Rect, Rotation, Topology};
+use esp32_kvm_topology_core::{
+    Edge, Monitor, PhysicalPoint, Portal, PortalGraph, Rect, Rotation, Topology,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 use tauri::State;
 
@@ -117,8 +121,35 @@ pub struct LayoutStatus {
     pub applied_portals: usize,
     /// False until the capture lifecycle owns edge observations and physical all-up.
     pub activation_available: bool,
+    /// Whether the user explicitly enabled native host-edge observations.
+    pub enabled: bool,
     /// Exact reason crossing is unavailable or the OS snapshot failed.
     pub reason: String,
+}
+
+/// Live actor and capture facts required before requesting a guest route.
+#[derive(Clone, Default)]
+pub struct EdgeGate {
+    /// Native hook/message-loop worker started and has no capture fault.
+    pub capture_running: bool,
+    /// The one confirmed actor reports local control.
+    pub local: bool,
+    /// The capture service verifies every physical key and button is up.
+    pub physical_all_up: bool,
+    /// The foreground window covers its monitor or Windows could not verify it.
+    pub fullscreen_active: bool,
+    /// Verified ready and subscribed slot identities from the actor STATUS.
+    pub ready_slots: Vec<(String, u8)>,
+}
+
+impl EdgeGate {
+    fn can_enable(&self) -> bool {
+        self.capture_running
+            && self.local
+            && self.physical_all_up
+            && !self.fullscreen_active
+            && !self.ready_slots.is_empty()
+    }
 }
 
 /// Serializes native monitor replacement and edge-graph preparation.
@@ -129,9 +160,24 @@ pub struct LayoutRuntime {
     policy: Option<CrossingPolicy>,
     discovery_error: Option<String>,
     topology_notice: Option<String>,
+    capture_error: Option<String>,
+    cursor_error: Option<String>,
+    enabled: bool,
+    gate: EdgeGate,
+    last_cursor: Option<(PhysicalPoint, u64)>,
 }
 
 impl LayoutRuntime {
+    fn destination_ready(&self, gate: &EdgeGate) -> bool {
+        self.graph.as_ref().is_some_and(|graph| {
+            graph.portals().iter().any(|portal| {
+                gate.ready_slots
+                    .iter()
+                    .any(|(token, _)| *token == portal.destination_guest_id)
+            })
+        })
+    }
+
     /// Replace a validated OS snapshot and discard prepared portals on any change.
     pub fn refresh(&mut self, records: Vec<DisplayRecord>) -> Result<(), String> {
         match self.inventory.update(records) {
@@ -143,6 +189,8 @@ impl LayoutRuntime {
                     }
                     self.graph = None;
                     self.policy = None;
+                    self.enabled = false;
+                    self.last_cursor = None;
                 }
                 Ok(())
             }
@@ -159,6 +207,8 @@ impl LayoutRuntime {
         self.policy = None;
         self.discovery_error = Some(reason);
         self.topology_notice = None;
+        self.enabled = false;
+        self.last_cursor = None;
     }
 
     /// Validates exact OS geometry and swaps the portal graph and edge policy together.
@@ -197,7 +247,157 @@ impl LayoutRuntime {
         self.graph = Some(graph);
         self.policy = Some(policy);
         self.topology_notice = None;
+        self.enabled = false;
+        self.last_cursor = None;
         Ok(self.status())
+    }
+
+    /// Updates authoritative actor/capture readiness; lost service or guest readiness disables edges.
+    pub fn set_gate(&mut self, gate: EdgeGate) {
+        if gate.capture_running {
+            self.capture_error = None;
+        }
+        if !gate.capture_running || !self.destination_ready(&gate) {
+            self.enabled = false;
+            self.last_cursor = None;
+            if let Some(policy) = &mut self.policy {
+                policy.cancel_pending();
+            }
+        }
+        if !gate.local || !gate.physical_all_up || gate.fullscreen_active {
+            self.last_cursor = None;
+            if let Some(policy) = &mut self.policy {
+                policy.cancel_pending();
+            }
+        }
+        self.gate = gate;
+    }
+
+    /// Preserves a native capture startup failure as a concrete disabled reason.
+    pub fn capture_failed(&mut self, error: String) {
+        self.capture_error = Some(error);
+        self.disable();
+    }
+
+    /// Disables edge observations when physical cursor sampling cannot be trusted.
+    pub fn cursor_failed(&mut self, error: String) {
+        self.disable();
+        self.cursor_error = Some(error);
+    }
+
+    /// Enables prepared portals only after a direct user request and live native guards.
+    pub fn enable(&mut self, gate: &EdgeGate) -> Result<LayoutStatus, String> {
+        self.set_gate(gate.clone());
+        if !gate.can_enable() || !self.destination_ready(gate) {
+            return Err("Crossing needs a running capture worker, local control, all physical input released, and a ready subscribed guest.".into());
+        }
+        let topology = self
+            .inventory
+            .topology()
+            .ok_or("Windows monitors have not been discovered.")?;
+        if self
+            .graph
+            .as_ref()
+            .is_none_or(|graph| !graph.is_current(topology))
+            || self.policy.is_none()
+        {
+            return Err("Apply portals against the current Windows monitor snapshot first.".into());
+        }
+        if self.discovery_error.is_some() {
+            return Err("Windows monitor discovery failed; crossing remains disabled.".into());
+        }
+        if let Some(error) = &self.cursor_error {
+            return Err(error.clone());
+        }
+        self.enabled = true;
+        self.last_cursor = None;
+        Ok(self.status())
+    }
+
+    /// Disables all host-edge requests without changing the saved draft or local route.
+    pub fn disable(&mut self) -> LayoutStatus {
+        self.enabled = false;
+        self.last_cursor = None;
+        if let Some(policy) = &mut self.policy {
+            policy.cancel_pending();
+        }
+        self.status()
+    }
+
+    /// Selects explicit enable or disable from a Tauri request using cached actor facts.
+    pub fn set_enabled(&mut self, enabled: bool) -> Result<LayoutStatus, String> {
+        if enabled {
+            self.enable(&self.gate.clone())
+        } else {
+            Ok(self.disable())
+        }
+    }
+
+    /// Evaluates a physical Windows cursor sample and returns only a verified actor action.
+    pub fn observe_cursor(
+        &mut self,
+        x: i32,
+        y: i32,
+        now_ms: u64,
+        gate: &EdgeGate,
+    ) -> Option<Action> {
+        self.set_gate(gate.clone());
+        self.cursor_error = None;
+        let point = PhysicalPoint { x, y };
+        let previous = self.last_cursor.replace((point, now_ms));
+        let policy = self.policy.as_mut()?;
+        if !self.enabled || !gate.can_enable() {
+            policy.cancel_pending();
+            return None;
+        }
+        let topology = self.inventory.topology()?;
+        let graph = self.graph.as_ref()?;
+        if !graph.is_current(topology) {
+            policy.cancel_pending();
+            return None;
+        }
+        let (dx, dy) = match previous {
+            Some((prior, prior_ms)) if now_ms >= prior_ms && now_ms - prior_ms <= 100 => {
+                (x.saturating_sub(prior.x), y.saturating_sub(prior.y))
+            }
+            _ => {
+                policy.cancel_pending();
+                return None;
+            }
+        };
+        let monitor = topology.monitors().iter().find(|monitor| {
+            let rect = monitor.rect;
+            x >= rect.x
+                && y >= rect.y
+                && i64::from(x) < i64::from(rect.x) + i64::from(rect.width)
+                && i64::from(y) < i64::from(rect.y) + i64::from(rect.height)
+        });
+        let Some(monitor) = monitor else {
+            policy.cancel_pending();
+            return None;
+        };
+        let ready: BTreeSet<String> = gate
+            .ready_slots
+            .iter()
+            .map(|(token, _)| token.clone())
+            .collect();
+        let request = policy.observe(
+            topology,
+            graph,
+            CursorSample {
+                monitor_id: monitor.id.clone(),
+                point,
+                dx,
+                dy,
+                now_ms,
+            },
+            CrossingGuards::default(),
+            &ready,
+        )?;
+        gate.ready_slots
+            .iter()
+            .find(|(token, _)| *token == request.destination_guest_id)
+            .map(|(_, slot)| Action::Direct(*slot))
     }
 
     /// Current discovery and prepared graph state for the UI.
@@ -223,11 +423,53 @@ impl LayoutRuntime {
                     .collect()
             })
             .unwrap_or_default();
-        LayoutStatus { generation: self.inventory.topology().map(Topology::generation), hosts,
-            applied_portals: if self.policy.is_some() { self.graph.as_ref().map_or(0, |graph| graph.portals().len()) } else { 0 },
-            activation_available: false,
-            reason: self.discovery_error.clone().or_else(|| self.topology_notice.clone()).unwrap_or_else(||
-                "Crossing awaits native capture lifecycle, physical all-up ledger, and actor edge routing.".into()) }
+        let reason = self
+            .discovery_error
+            .clone()
+            .or_else(|| self.topology_notice.clone())
+            .or_else(|| self.capture_error.clone())
+            .or_else(|| self.cursor_error.clone())
+            .unwrap_or_else(|| {
+                if self.graph.is_none() {
+                    "Apply portals against detected Windows monitors first.".into()
+                } else if !self.gate.capture_running {
+                    "Native capture worker is unavailable.".into()
+                } else if !self.gate.local {
+                    "Return to local control before crossing.".into()
+                } else if !self.gate.physical_all_up {
+                    "Release all physical keys and mouse buttons before crossing.".into()
+                } else if self.gate.fullscreen_active {
+                    "Foreground app covers its monitor; crossing is paused.".into()
+                } else if !self.destination_ready(&self.gate) {
+                    "No configured portal destination is ready and subscribed.".into()
+                } else if self.enabled {
+                    "Host-edge crossing is enabled while native guards remain valid.".into()
+                } else {
+                    "Validated portals are ready. Enable crossing to start host-edge observations."
+                        .into()
+                }
+            });
+        LayoutStatus {
+            generation: self.inventory.topology().map(Topology::generation),
+            hosts,
+            applied_portals: if self.policy.is_some() {
+                self.graph.as_ref().map_or(0, |graph| graph.portals().len())
+            } else {
+                0
+            },
+            activation_available: self.gate.can_enable()
+                && self.destination_ready(&self.gate)
+                && self.graph.as_ref().is_some_and(|graph| {
+                    self.inventory
+                        .topology()
+                        .is_some_and(|topology| graph.is_current(topology))
+                })
+                && self.discovery_error.is_none()
+                && self.capture_error.is_none()
+                && self.cursor_error.is_none(),
+            enabled: self.enabled,
+            reason,
+        }
     }
 }
 
@@ -348,7 +590,9 @@ fn portal_graph(topology: &Topology, portals: Vec<PortalDraft>) -> Result<Portal
 
 /// Re-enumerates Windows monitors and invalidates prepared portals on any change.
 #[tauri::command]
-pub fn layout_discover(state: State<'_, Mutex<LayoutRuntime>>) -> Result<LayoutStatus, String> {
+pub fn layout_discover(
+    state: State<'_, std::sync::Arc<Mutex<LayoutRuntime>>>,
+) -> Result<LayoutStatus, String> {
     let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
     let records = discover_monitors();
     match records {
@@ -368,7 +612,7 @@ pub fn layout_discover(state: State<'_, Mutex<LayoutRuntime>>) -> Result<LayoutS
 pub fn layout_apply(
     hosts: Vec<HostDraft>,
     portals: Vec<PortalDraft>,
-    state: State<'_, Mutex<LayoutRuntime>>,
+    state: State<'_, std::sync::Arc<Mutex<LayoutRuntime>>>,
 ) -> Result<LayoutStatus, String> {
     let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
     let records = discover_monitors();
@@ -382,6 +626,18 @@ pub fn layout_apply(
             Err(error)
         }
     }
+}
+
+/// Enables or disables native edge observation using the worker's latest verified gate.
+#[tauri::command]
+pub fn layout_set_enabled(
+    enabled: bool,
+    state: State<'_, std::sync::Arc<Mutex<LayoutRuntime>>>,
+) -> Result<LayoutStatus, String> {
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .set_enabled(enabled)
 }
 
 /// Runs the native dry-run validator without saving or activating any portal.
@@ -477,6 +733,104 @@ mod tests {
         assert_eq!(state.status().applied_portals, 0);
         assert!(state.status().generation.unwrap() > generation);
         assert!(state.status().reason.contains("invalidated"));
+    }
+
+    #[test]
+    fn edge_intent_requires_explicit_enable_capture_all_up_and_ready_identity() {
+        let mut state = LayoutRuntime::default();
+        state
+            .refresh(vec![
+                os_display("west", -1600, 1600, 144, false),
+                os_display("main", 0, 1920, 96, true),
+            ])
+            .unwrap();
+        let hosts = vec![
+            HostDraft {
+                id: "west".into(),
+                x: -1600,
+                y: -100,
+                width: 1600,
+                height: 900,
+                dpi_x: 144,
+                dpi_y: 144,
+                rotation: "deg0".into(),
+                primary: false,
+            },
+            HostDraft {
+                id: "main".into(),
+                x: 0,
+                y: -100,
+                width: 1920,
+                height: 900,
+                dpi_x: 96,
+                dpi_y: 96,
+                rotation: "deg0".into(),
+                primary: true,
+            },
+        ];
+        let mut p = portal("left", -90, 790);
+        p.monitor_id = "west".into();
+        state.apply(hosts, vec![p]).unwrap();
+        let ready = EdgeGate {
+            capture_running: true,
+            local: true,
+            physical_all_up: true,
+            fullscreen_active: false,
+            ready_slots: vec![("ab".repeat(16), 2)],
+        };
+        assert!(state.observe_cursor(-1600, 400, 0, &ready).is_none());
+        assert!(
+            state
+                .enable(&EdgeGate {
+                    physical_all_up: false,
+                    ..ready.clone()
+                })
+                .is_err()
+        );
+        assert!(
+            state
+                .enable(&EdgeGate {
+                    fullscreen_active: true,
+                    ..ready.clone()
+                })
+                .is_err()
+        );
+        assert!(
+            state
+                .enable(&EdgeGate {
+                    ready_slots: vec![("cd".repeat(16), 2)],
+                    ..ready.clone()
+                })
+                .is_err()
+        );
+        state.enable(&ready).unwrap();
+        assert!(state.observe_cursor(-1590, 400, 10, &ready).is_none());
+        assert!(state.observe_cursor(-1600, 400, 20, &ready).is_none());
+        assert!(state.observe_cursor(-1600, 400, 90, &ready).is_none());
+        assert!(state.observe_cursor(-1600, 400, 160, &ready).is_none());
+        assert_eq!(
+            state.observe_cursor(-1600, 400, 220, &ready),
+            Some(Action::Direct(2))
+        );
+        assert!(
+            state
+                .observe_cursor(
+                    -1600,
+                    400,
+                    440,
+                    &EdgeGate {
+                        local: false,
+                        ..ready.clone()
+                    }
+                )
+                .is_none()
+        );
+        state
+            .refresh(vec![os_display("main", 0, 1920, 96, true)])
+            .unwrap();
+        assert!(!state.status().enabled);
+        assert_eq!(state.status().applied_portals, 0);
+        assert!(state.observe_cursor(-1600, 400, 460, &ready).is_none());
     }
 
     fn host(id: &str, x: i32) -> HostDraft {

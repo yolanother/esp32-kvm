@@ -141,6 +141,12 @@ pub struct CrossingPolicy {
 }
 
 impl CrossingPolicy {
+    /// Cancels an unfinished dwell after a missing sample or lost native guard.
+    /// A saved local return point survives while the guest route is active.
+    pub fn cancel_pending(&mut self) {
+        self.candidate = None;
+    }
+
     /// Validates parameters before processing cursor samples.
     pub fn new(config: CrossingConfig) -> Result<Self, ConfigError> {
         if config.dwell_ms > 1000 {

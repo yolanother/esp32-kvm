@@ -1,18 +1,22 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
-// Owns the desktop setup worker's one verified host actor and maps STATUS and
-// retained inventory into fail-closed Tauri setup facts. No UI thread opens
-// a serial port or removes a local profile before actor confirmation.
+// Owns the desktop's one verified host actor, native capture worker, and
+// prepared host-edge routing. It maps STATUS into fail-closed Tauri setup facts;
+// no UI thread opens serial or controls input timing.
 
+use crate::layout::{EdgeGate, LayoutRuntime};
 use crate::setup::{
     BackendSnapshot, DeviceState, PairingState, RouteState, SetupBackend, token_bytes,
 };
 use esp32_kvm_host_actor::{
-    ConnectError, ForgetError, HostActor, HostState, InventoryError, KeyMapper, MappedKey,
-    PairingError, PairingStatus, SetupSnapshot as ActorSnapshot, connect_system,
+    CaptureControl, ConnectError, ForgetError, HostActor, HostState, InventoryError, PairingError,
+    PairingStatus, SetOneKeyMapper, SetupSnapshot as ActorSnapshot, connect_system,
 };
 use esp32_kvm_input_core::Action;
 use esp32_kvm_input_core::MappingProfile;
-use esp32_kvm_platform_windows::{CaptureEvent, CaptureGate};
+use esp32_kvm_platform_windows::{
+    CaptureEvent, CaptureGate, CaptureService, discover_monitors, foreground_fullscreen,
+    physical_cursor_position,
+};
 use esp32_kvm_usb_transport::{ProbeError, available_usb_ports, candidate_ports};
 use std::collections::BTreeMap;
 use std::sync::{
@@ -32,7 +36,7 @@ const FORGET_TIMEOUT: Duration = Duration::from_millis(2500);
 pub struct ActorBackend {
     snapshot: Arc<Mutex<BackendSnapshot>>,
     commands: SyncSender<Command>,
-    gate: Arc<CaptureGate>,
+    capture: Arc<dyn CaptureControl + Send + Sync>,
 }
 
 enum CommandKind {
@@ -60,31 +64,67 @@ struct Command {
     reply: SyncSender<Result<(), String>>,
 }
 
-/// This mapper cannot produce guest output while setup has no physical ledger.
-struct NoGuestMapper;
-
-impl KeyMapper for NoGuestMapper {
-    fn map_key(&self, _virtual_key: u32, _scan_code: u32, _extended: bool) -> Option<MappedKey> {
+/// Keeps setup available if hooks fail while refusing every route arm.
+struct DisabledCapture {
+    gate: Arc<CaptureGate>,
+}
+impl CaptureControl for DisabledCapture {
+    fn arm(&self, _generation: u32) -> bool {
+        false
+    }
+    fn disarm(&self) {
+        self.gate.disarm();
+    }
+    fn generation(&self) -> u32 {
+        0
+    }
+    fn fault(&self) -> Option<esp32_kvm_platform_windows::CaptureFault> {
         None
+    }
+    fn physical_all_up(&self) -> bool {
+        false
     }
 }
 
 impl ActorBackend {
     /// Starts a disarmed worker; its first verified session is opened on that thread.
-    pub fn start() -> Self {
+    pub fn start(layout: Arc<Mutex<LayoutRuntime>>) -> Self {
         let snapshot = Arc::new(Mutex::new(empty_snapshot(DeviceState::Missing)));
         let (commands, receiver) = mpsc::sync_channel(8);
         let worker_snapshot = Arc::clone(&snapshot);
-        let (gate, capture_events) = CaptureGate::new(64);
-        let worker_gate = Arc::clone(&gate);
+        let (capture, capture_events, capture_running): (
+            Arc<dyn CaptureControl + Send + Sync>,
+            Receiver<CaptureEvent>,
+            bool,
+        ) = match CaptureService::start(64) {
+            Ok((service, receiver)) => (Arc::new(service), receiver, true),
+            Err(error) => {
+                layout
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .capture_failed(format!("Native capture worker could not start: {error}"));
+                let (gate, receiver) = CaptureGate::new(64);
+                (Arc::new(DisabledCapture { gate }), receiver, false)
+            }
+        };
+        let worker_capture = Arc::clone(&capture);
         thread::Builder::new()
             .name("esp32-kvm-setup-actor".into())
-            .spawn(move || worker(receiver, worker_snapshot, worker_gate, capture_events))
+            .spawn(move || {
+                worker(
+                    receiver,
+                    worker_snapshot,
+                    worker_capture,
+                    capture_events,
+                    layout,
+                    capture_running,
+                )
+            })
             .expect("failed to start setup actor thread");
         Self {
             snapshot,
             commands,
-            gate,
+            capture,
         }
     }
 
@@ -122,7 +162,7 @@ impl SetupBackend for ActorBackend {
             profile,
         });
         if result.is_err() {
-            self.gate.disarm();
+            self.capture.disarm();
         }
         result
     }
@@ -321,13 +361,16 @@ fn forget_error(error: ForgetError) -> String {
 fn worker(
     receiver: Receiver<Command>,
     shared: Arc<Mutex<BackendSnapshot>>,
-    gate: Arc<CaptureGate>,
+    capture: Arc<dyn CaptureControl + Send + Sync>,
     capture_events: Receiver<CaptureEvent>,
+    layout: Arc<Mutex<LayoutRuntime>>,
+    capture_running: bool,
 ) {
     let started = Instant::now();
     let mut actor: Option<HostActor<Box<dyn serialport::SerialPort>>> = None;
     let mut mappings = BTreeMap::<[u8; 16], MappingProfile>::new();
     let mut next_scan = Instant::now();
+    let mut next_topology_scan = Instant::now();
     loop {
         match receiver.recv_timeout(Duration::from_millis(20)) {
             Ok(command) => {
@@ -336,7 +379,7 @@ fn worker(
                     CommandKind::RefreshInventory | CommandKind::Forget { .. }
                 );
                 if matches!(command.kind, CommandKind::Quit) {
-                    gate.disarm();
+                    capture.disarm();
                     if let Some(current) = actor.as_mut() {
                         current.request(Action::Local, started.elapsed().as_millis() as u64);
                         let deadline = Instant::now() + Duration::from_millis(400);
@@ -417,6 +460,14 @@ fn worker(
 
         if let Some(current) = actor.as_mut() {
             current.drive(&capture_events, started.elapsed().as_millis() as u64);
+            edge_tick(
+                current,
+                &layout,
+                capture.as_ref(),
+                capture_running,
+                &mut next_topology_scan,
+                started.elapsed().as_millis() as u64,
+            );
             let now_ms = started.elapsed().as_millis() as u64;
             let wall_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -426,6 +477,11 @@ fn worker(
             let failed = matches!(next.device, DeviceState::Unavailable { .. });
             publish(&shared, next);
             if failed {
+                capture.disarm();
+                layout
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .set_gate(EdgeGate::default());
                 actor = None;
                 next_scan = Instant::now() + Duration::from_secs(1);
             }
@@ -451,9 +507,9 @@ fn worker(
                         match connect_system(
                             EXPECTED_BOARD,
                             HOST_VERSION,
-                            Box::new(Arc::clone(&gate)),
+                            Box::new(Arc::clone(&capture)),
                             Vec::new(),
-                            Box::new(NoGuestMapper),
+                            Box::new(SetOneKeyMapper),
                             started.elapsed().as_millis() as u64,
                         ) {
                             Ok(mut connected) => {
@@ -476,6 +532,90 @@ fn worker(
                 },
             }
         }
+    }
+}
+
+/// Samples the physical host edge only on the one serial-owning actor thread.
+fn edge_tick(
+    actor: &mut HostActor<Box<dyn serialport::SerialPort>>,
+    layout: &Mutex<LayoutRuntime>,
+    capture: &dyn CaptureControl,
+    capture_running: bool,
+    next_topology_scan: &mut Instant,
+    now_ms: u64,
+) {
+    let mut request_local = false;
+    let mut selection = None;
+    {
+        let mut layout = layout.lock().unwrap_or_else(|error| error.into_inner());
+        if Instant::now() >= *next_topology_scan {
+            *next_topology_scan = Instant::now() + Duration::from_millis(100);
+            let before = layout.status().generation;
+            match discover_monitors() {
+                Ok(monitors) => {
+                    if layout.refresh(monitors).is_err() || layout.status().generation != before {
+                        request_local =
+                            !matches!(actor.state(), HostState::Local | HostState::AwaitStatus);
+                    }
+                }
+                Err(error) => {
+                    layout.invalidate(error);
+                    request_local =
+                        !matches!(actor.state(), HostState::Local | HostState::AwaitStatus);
+                }
+            }
+        }
+        let snapshot = actor.setup_snapshot();
+        if let HostState::Guest(slot) = snapshot.state
+            && !snapshot
+                .slots
+                .iter()
+                .any(|seen| seen.slot == slot && seen.ready && seen.subscribed)
+        {
+            request_local = true;
+        }
+        let gate = edge_gate(
+            &snapshot,
+            capture_running && capture.fault().is_none(),
+            capture.physical_all_up(),
+            foreground_fullscreen().unwrap_or(true),
+        );
+        layout.set_gate(gate.clone());
+        if !request_local && gate.local {
+            match physical_cursor_position() {
+                Ok((x, y)) => selection = layout.observe_cursor(x, y, now_ms, &gate),
+                Err(error) => {
+                    layout.cursor_failed(error);
+                }
+            }
+        }
+    }
+    if request_local {
+        capture.disarm();
+        actor.request(Action::Local, now_ms);
+    } else if let Some(action) = selection {
+        actor.request(action, now_ms);
+    }
+}
+
+/// Projects verified actor slot readiness and physical capture facts into edge guards.
+fn edge_gate(
+    snapshot: &ActorSnapshot,
+    capture_running: bool,
+    physical_all_up: bool,
+    fullscreen_active: bool,
+) -> EdgeGate {
+    EdgeGate {
+        capture_running,
+        local: snapshot.state == HostState::Local,
+        physical_all_up,
+        fullscreen_active,
+        ready_slots: snapshot
+            .slots
+            .iter()
+            .filter(|slot| slot.ready && slot.subscribed)
+            .map(|slot| (token_hex(&slot.bond_token), slot.slot))
+            .collect(),
     }
 }
 
@@ -522,6 +662,28 @@ mod tests {
             comparison_value: None,
             fault: None,
         }
+    }
+
+    #[test]
+    fn edge_gate_uses_only_ready_subscribed_verified_slots() {
+        let mut snapshot = actor(HostState::Local);
+        let gate = edge_gate(&snapshot, true, true, false);
+        assert_eq!(gate.ready_slots, vec![("ab".repeat(16), 1)]);
+        snapshot.slots[0].subscribed = false;
+        assert!(
+            edge_gate(&snapshot, true, true, false)
+                .ready_slots
+                .is_empty()
+        );
+        snapshot.slots[0].subscribed = true;
+        snapshot.slots[0].ready = false;
+        assert!(
+            edge_gate(&snapshot, true, true, false)
+                .ready_slots
+                .is_empty()
+        );
+        assert!(!edge_gate(&actor(HostState::Guest(1)), true, true, false).local);
+        assert!(!edge_gate(&actor(HostState::Local), false, true, false).capture_running);
     }
 
     #[test]

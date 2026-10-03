@@ -91,6 +91,30 @@ pub fn discover_monitors() -> Result<Vec<DisplayRecord>, String> {
     windows::discover()
 }
 
+/// Reads the physical virtual-desktop cursor location for edge-policy sampling.
+#[cfg(windows)]
+pub fn physical_cursor_position() -> Result<(i32, i32), String> {
+    windows::cursor_position()
+}
+
+/// Conservatively reports whether the foreground window covers its host monitor.
+#[cfg(windows)]
+pub fn foreground_fullscreen() -> Result<bool, String> {
+    windows::foreground_fullscreen()
+}
+
+/// Reports unavailable native cursor sampling outside Windows.
+#[cfg(not(windows))]
+pub fn physical_cursor_position() -> Result<(i32, i32), String> {
+    Err("Windows physical cursor sampling requires Windows.".into())
+}
+
+/// Reports unavailable foreground geometry outside Windows.
+#[cfg(not(windows))]
+pub fn foreground_fullscreen() -> Result<bool, String> {
+    Err("Windows foreground geometry requires Windows.".into())
+}
+
 /// Reports unavailable native enumeration on non-Windows test hosts.
 #[cfg(not(windows))]
 pub fn discover_monitors() -> Result<Vec<DisplayRecord>, String> {
@@ -103,13 +127,18 @@ mod windows {
     use std::mem::size_of;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::LPARAM;
+    use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::Graphics::Gdi::{
         DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW,
-        GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+        GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONULL, MONITORINFO, MONITORINFOEXW,
+        MonitorFromWindow,
     };
     use windows_sys::Win32::UI::HiDpi::{
         DPI_AWARENESS_PER_MONITOR_AWARE, GetAwarenessFromDpiAwarenessContext, GetDpiForMonitor,
         GetThreadDpiAwarenessContext, MDT_EFFECTIVE_DPI,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowRect,
     };
 
     struct Enumeration {
@@ -204,5 +233,54 @@ mod windows {
             return Err("Windows display enumeration failed or found no monitors.".into());
         }
         Ok(result.records)
+    }
+
+    pub(super) fn cursor_position() -> Result<(i32, i32), String> {
+        if unsafe { GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) }
+            != DPI_AWARENESS_PER_MONITOR_AWARE
+        {
+            return Err("Windows thread is not per-monitor DPI aware; physical cursor coordinates are unavailable.".into());
+        }
+        let mut point = POINT::default();
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            return Err("Could not read the physical Windows cursor position.".into());
+        }
+        Ok((point.x, point.y))
+    }
+
+    pub(super) fn foreground_fullscreen() -> Result<bool, String> {
+        let window = unsafe { GetForegroundWindow() };
+        if window.is_null() {
+            return Err("Windows foreground window is unavailable.".into());
+        }
+        let mut class = [0u16; 64];
+        let length = unsafe { GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) };
+        if length == 0 {
+            return Err("Could not identify the foreground window.".into());
+        }
+        let class = String::from_utf16_lossy(&class[..length as usize]);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
+            return Ok(false);
+        }
+        let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONULL) };
+        if monitor.is_null() {
+            return Err("Foreground window has no current monitor.".into());
+        }
+        let mut window_rect = windows_sys::Win32::Foundation::RECT::default();
+        if unsafe { GetWindowRect(window, &mut window_rect) } == 0 {
+            return Err("Could not read foreground window bounds.".into());
+        }
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+            return Err("Could not read foreground monitor bounds.".into());
+        }
+        let screen = info.rcMonitor;
+        Ok(window_rect.left <= screen.left
+            && window_rect.top <= screen.top
+            && window_rect.right >= screen.right
+            && window_rect.bottom >= screen.bottom)
     }
 }
