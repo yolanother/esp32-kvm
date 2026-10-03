@@ -124,9 +124,12 @@ static void advertise(void)
     }
     parameters.conn_mode = BLE_GAP_CONN_MODE_UND;
     parameters.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    if (ble_gap_adv_start(own_address_type, NULL, BLE_HS_FOREVER,
-                          &parameters, gap_event, NULL) != 0)
-        ESP_LOGE(tag, "HID advertising failed");
+    /* Apple recommends an exact 20 ms interval for prompt HID discovery. */
+    parameters.itvl_min = 32;
+    parameters.itvl_max = 32;
+    int result = ble_gap_adv_start(own_address_type, NULL, BLE_HS_FOREVER,
+                                   &parameters, gap_event, NULL);
+    if (result != 0) ESP_LOGE(tag, "HID advertising failed: %d", result);
 }
 
 static void on_reset(int reason)
@@ -154,17 +157,16 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     (void)argument;
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT: {
-        if (event->connect.status != 0) { advertise(); return 0; }
-        expire_window();
-        struct ble_gap_conn_desc incoming;
-        if (ble_gap_conn_find(event->connect.conn_handle, &incoming) != 0 ||
-            !hid_pairing_admit(&pairing, peer_identity(&incoming.peer_id_addr), now_ms())) {
-            publish(pairing.bond_count >= HID_PAIRING_MAX_BONDS ?
-                    HID_GUEST_PAIRING_CAPACITY : HID_GUEST_PAIRING_REJECTED,
-                    event->connect.conn_handle, 0, NULL);
-            ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (event->connect.status != 0) {
+            ESP_LOGW(tag, "BLE connection attempt failed: %d", event->connect.status);
+            advertise();
             return 0;
         }
+        expire_window();
+        /* A bonded central may reconnect using a private address.  Its stored
+           identity is not trustworthy until link security has completed; the
+           ENC_CHANGE path checks the authenticated bond before exposing a slot. */
+        ESP_LOGI(tag, "BLE link opened; authenticating handle %u", event->connect.conn_handle);
         if (!hid_gatt_on_connect(event->connect.conn_handle)) {
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
@@ -173,12 +175,14 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         /* The central may have begun SMP first.  An existing procedure is
            still allowed to finish through ENC_CHANGE; only a real failure
            invalidates the link. */
-        if (security_result != 0 && security_result != BLE_HS_EALREADY)
+        if (security_result != 0 && security_result != BLE_HS_EALREADY) {
+            ESP_LOGW(tag, "BLE security start failed: %d", security_result);
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        else advertise();
+        } else advertise();
         return 0;
     }
     case BLE_GAP_EVENT_DISCONNECT: {
+        ESP_LOGI(tag, "BLE link closed: reason %d", event->disconnect.reason);
         uint8_t disconnected_slot = 0;
         for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
             hid_channel_t *channel = hid_gatt_channel_at(slot);
@@ -234,7 +238,10 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             }
         }
         hid_gatt_on_encryption(event->enc_change.conn_handle, secure);
-        if (!secure) ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (!secure) {
+            ESP_LOGW(tag, "BLE authentication rejected: status %d", event->enc_change.status);
+            ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        } else ESP_LOGI(tag, "BLE authenticated handle %u", event->enc_change.conn_handle);
         return 0;
     }
     case BLE_GAP_EVENT_SUBSCRIBE:

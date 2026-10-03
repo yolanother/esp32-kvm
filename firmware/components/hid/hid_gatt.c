@@ -1,6 +1,6 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Registers one composite HID-over-GATT service with keyboard, mouse,
- * consumer and LED reports. Up to three connected peers have separate
+ * Registers the HID, Battery and Device Information services with keyboard,
+ * mouse, consumer and LED reports. Up to three connected peers have separate
  * encryption, CCCD, protocol, and held-report state; every notification
  * targets exactly its channel's BLE connection handle. */
 #include "hid_gatt.h"
@@ -24,7 +24,9 @@ enum attribute {
     ATTR_KEYBOARD_REFERENCE,
     ATTR_MOUSE_REFERENCE,
     ATTR_CONSUMER_REFERENCE,
-    ATTR_LED_REFERENCE
+    ATTR_LED_REFERENCE,
+    ATTR_BATTERY_LEVEL,
+    ATTR_PNP_ID
 };
 
 static hid_channel_t channels[HID_GATT_MAX_CONNECTIONS];
@@ -89,9 +91,26 @@ static const struct ble_gatt_chr_def characteristics[] = {
     {0}
 };
 
+static const struct ble_gatt_chr_def battery_characteristics[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2a19), .access_cb = access_attribute,
+     .arg = (void *)ATTR_BATTERY_LEVEL,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY},
+    {0}
+};
+
+static const struct ble_gatt_chr_def device_information_characteristics[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2a50), .access_cb = access_attribute,
+     .arg = (void *)ATTR_PNP_ID, .flags = BLE_GATT_CHR_F_READ},
+    {0}
+};
+
 static const struct ble_gatt_svc_def services[] = {
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x1812),
      .characteristics = characteristics},
+    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x180f),
+     .characteristics = battery_characteristics},
+    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x180a),
+     .characteristics = device_information_characteristics},
     {0}
 };
 
@@ -108,6 +127,10 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     static const uint8_t mouse_ref[] = {HID_REPORT_MOUSE, 1};
     static const uint8_t consumer_ref[] = {HID_REPORT_CONSUMER, 1};
     static const uint8_t led_ref[] = {HID_REPORT_KEYBOARD, 2};
+    static const uint8_t no_battery = 0;
+    /* Development board's USB-IF VID:PID, already reported by its native USB
+       Serial/JTAG interface. Replace with an assigned product ID for release. */
+    static const uint8_t pnp_id[] = {0x02, 0x3a, 0x30, 0x01, 0x10, 0x00, 0x01};
     static const uint8_t zero_keyboard[HID_KEYBOARD_REPORT_LEN] = {0};
     uint8_t mouse[HID_MOUSE_REPORT_LEN] = {0};
     uint8_t consumer[HID_CONSUMER_REPORT_LEN] = {0};
@@ -132,6 +155,8 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     case ATTR_MOUSE_REFERENCE: return append(context, mouse_ref, sizeof(mouse_ref));
     case ATTR_CONSUMER_REFERENCE: return append(context, consumer_ref, sizeof(consumer_ref));
     case ATTR_LED_REFERENCE: return append(context, led_ref, sizeof(led_ref));
+    case ATTR_BATTERY_LEVEL: return append(context, &no_battery, 1);
+    case ATTR_PNP_ID: return append(context, pnp_id, sizeof(pnp_id));
     default: return BLE_ATT_ERR_UNLIKELY;
     }
 }
@@ -164,6 +189,7 @@ static int access_attribute(uint16_t connection_handle, uint16_t attribute_handl
     if (attribute != ATTR_HID_INFO && attribute != ATTR_REPORT_MAP &&
         attribute != ATTR_KEYBOARD_REFERENCE && attribute != ATTR_MOUSE_REFERENCE &&
         attribute != ATTR_CONSUMER_REFERENCE && attribute != ATTR_LED_REFERENCE &&
+        attribute != ATTR_BATTERY_LEVEL && attribute != ATTR_PNP_ID &&
         (!channel || !channel->encrypted))
         return BLE_ATT_ERR_INSUFFICIENT_ENC;
     if (context->op == BLE_GATT_ACCESS_OP_READ_CHR ||
