@@ -1,8 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Drives the Waveshare 240-by-240 ST7789 through ESP-IDF LCD and LVGL, using
  * small DMA draw buffers and a low-rate derived screen update. The panel stays
- * opt-in while pins remain unverified. A separate GPIO sampler emits BOOT
- * emergency events; PLUS and touch inputs are disabled pending pin validation. */
+ * opt-in behind a validated board profile. A separate GPIO sampler emits BOOT
+ * emergency events even if panel startup fails; PLUS and touch remain disabled. */
 #include "display.h"
 #include <stdio.h>
 #include <string.h>
@@ -21,12 +21,14 @@
 #define LCD_DRAW_LINES 20
 #define BOOT_GPIO GPIO_NUM_0
 #define PLUS_GPIO GPIO_NUM_NC
+#define BACKLIGHT_GPIO GPIO_NUM_46
 
 static kvm_display_event_fn event_callback;
 static kvm_display_status_t latest_status;
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool started;
 static bool panel_started;
+static bool backlight_started;
 static lv_obj_t *title_label;
 static lv_obj_t *primary_label;
 static lv_obj_t *detail_label;
@@ -62,18 +64,24 @@ static void button_worker(void *context)
 
 static esp_err_t init_panel(void)
 {
+    gpio_config_t backlight_cfg = {
+        .pin_bit_mask = 1ULL << BACKLIGHT_GPIO, .mode = GPIO_MODE_OUTPUT,
+    };
+    esp_err_t err = gpio_set_level(BACKLIGHT_GPIO, 0);
+    if (err != ESP_OK) return err;
+    if ((err = gpio_config(&backlight_cfg)) != ESP_OK) return err;
     spi_bus_config_t bus = {
         .sclk_io_num = GPIO_NUM_38, .mosi_io_num = GPIO_NUM_39,
         .miso_io_num = GPIO_NUM_NC, .quadwp_io_num = GPIO_NUM_NC,
         .quadhd_io_num = GPIO_NUM_NC,
         .max_transfer_sz = LCD_WIDTH * LCD_DRAW_LINES * 2 + 8,
     };
-    esp_err_t err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
+    err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
     if (err != ESP_OK) return err;
     esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .cs_gpio_num = GPIO_NUM_21, .dc_gpio_num = GPIO_NUM_45,
-        .spi_mode = 3, .pclk_hz = 40000000, .trans_queue_depth = 10,
+        .spi_mode = 0, .pclk_hz = 40000000, .trans_queue_depth = 10,
         .lcd_cmd_bits = 8, .lcd_param_bits = 8,
     };
     err = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_cfg, &io);
@@ -106,16 +114,12 @@ static esp_err_t init_panel(void)
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x101820), 0);
     title_label = make_label(screen, 12, 0xb4c5ce);
     primary_label = make_label(screen, 42, 0xeef5f7);
+    lv_obj_set_height(primary_label, 42);
     detail_label = make_label(screen, 94, 0xb4c5ce);
     footer_label = make_label(screen, 210, 0x75e2c3);
     for (unsigned i = 0; i < 3; ++i)
         row_labels[i] = make_label(screen, 64 + 44 * i, 0xeef5f7);
     lvgl_port_unlock();
-    gpio_config_t backlight_cfg = {
-        .pin_bit_mask = 1ULL << GPIO_NUM_46, .mode = GPIO_MODE_OUTPUT,
-    };
-    if ((err = gpio_config(&backlight_cfg)) != ESP_OK) return err;
-    if ((err = gpio_set_level(GPIO_NUM_46, 1)) != ESP_OK) return err;
     panel_started = true;
     return ESP_OK;
 }
@@ -133,6 +137,9 @@ static void display_worker(void *context)
         kvm_display_make_view(&next, (uint64_t)esp_timer_get_time() / 1000, &view);
         if (panel_started && memcmp(&shown, &view, sizeof(view)) != 0 && lvgl_port_lock(20)) {
             lv_label_set_text(title_label, view.title);
+            lv_obj_set_style_text_font(primary_label,
+                view.screen == KVM_DISPLAY_PAIRING && strlen(view.primary) == 6u
+                    ? &lv_font_montserrat_28 : LV_FONT_DEFAULT, 0);
             lv_label_set_text(primary_label, view.primary);
             lv_label_set_text(detail_label, view.detail);
             lv_label_set_text(footer_label, view.footer);
@@ -140,6 +147,8 @@ static void display_worker(void *context)
                 lv_label_set_text(row_labels[i], view.rows[i]);
             shown = view;
             lvgl_port_unlock();
+            if (!backlight_started && gpio_set_level(BACKLIGHT_GPIO, 1) == ESP_OK)
+                backlight_started = true;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -155,12 +164,13 @@ esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn)
     };
     esp_err_t err = gpio_config(&boot_cfg);
     if (err != ESP_OK) return err;
-    if (enable_panel && (err = init_panel()) != ESP_OK) return err;
     if (xTaskCreate(button_worker, "kvm_buttons", 3072, NULL, 8, NULL) != pdPASS)
         return ESP_ERR_NO_MEM;
-    if (enable_panel && xTaskCreate(display_worker, "kvm_display", 4096, NULL, 4, NULL) != pdPASS)
-        return ESP_ERR_NO_MEM;
     started = true;
+    if (!enable_panel) return ESP_OK;
+    if ((err = init_panel()) != ESP_OK) return err;
+    if (xTaskCreate(display_worker, "kvm_display", 4096, NULL, 4, NULL) != pdPASS)
+        return ESP_ERR_NO_MEM;
     return ESP_OK;
 }
 

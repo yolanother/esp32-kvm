@@ -1,0 +1,16 @@
+# Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
+# Gates the on-board Waveshare ST7789 panel behind explicit physical profile verification.
+# The default leaves LCD pins untouched while the BOOT emergency button still operates.
+menu "ESP32 KVM device screen"
+
+    config KVM_DISPLAY_WAVESHARE_TOUCH_154_VERIFIED
+        bool "Enable the validated Waveshare ESP32-S3-Touch-LCD-1.54 panel"
+        default n
+        help
+            Select only after verifying the board model and PCB revision against
+            the Waveshare schematic and performing the staged panel bring-up in
+            docs/Designs/device-screens/screen-state.md. This enables ST7789 SPI
+            and GPIO46 backlight output. The default keeps the panel off while
+            preserving BOOT emergency sampling and USB/BLE routing.
+
+endmenu

@@ -1,8 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Implements the portable device screen state model. It debounces runtime
  * PLUS/BOOT presses and emits requests while preserving the BOOT-at-power-on
- * recovery chord. It derives display text from confirmed status and never
- * mutates a HID route directly. */
+ * recovery chord. It derives display text and pairing-window/challenge
+ * countdowns from confirmed status and never mutates a HID route directly. */
 #include "display_model.h"
 #include <stdio.h>
 #include <string.h>
@@ -29,12 +29,14 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         snprintf(v->primary, sizeof(v->primary), "%u%%",
                  s->update_percent > 100 ? 100u : s->update_percent);
         COPY_TEXT(v->detail, "Do not unplug");
-    } else if (!s->usb_connected || s->fault) {
+    } else if (!s->usb_connected || s->fault || (s->armed && !s->guest_ready)) {
         v->screen = KVM_DISPLAY_PAUSED;
-        COPY_TEXT(v->title, "LOCAL CONTROL");
+        COPY_TEXT(v->title, s->armed && !s->guest_ready ? "ROUTING FAULT" : "LOCAL CONTROL");
         COPY_TEXT(v->primary, "INPUT PAUSED");
-        COPY_TEXT(v->detail, s->fault ? "Routing fault" : "USB disconnected");
-        COPY_TEXT(v->footer, "Reconnect host to resume");
+        COPY_TEXT(v->detail, s->fault ? "Routing fault" :
+                  !s->usb_connected ? "USB disconnected" : "Guest not ready");
+        COPY_TEXT(v->footer, s->armed && !s->guest_ready ?
+                  "Use host to release" : "Reconnect host to resume");
     } else if (s->pairing_state != KVM_DISPLAY_PAIRING_CLOSED) {
         v->screen = KVM_DISPLAY_PAIRING;
         COPY_TEXT(v->title, "PAIR GUEST");
@@ -45,9 +47,12 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
             snprintf(v->detail, sizeof(v->detail), "%llus remaining",
                      (unsigned long long)((s->pairing_deadline_ms - now_ms + 999u) / 1000u));
             COPY_TEXT(v->footer, "Compare on guest and host");
-        } else if (s->pairing_state == KVM_DISPLAY_PAIRING_WAITING) {
+        } else if (s->pairing_state == KVM_DISPLAY_PAIRING_WAITING &&
+                   s->pairing_deadline_ms > now_ms) {
             COPY_TEXT(v->primary, "WAITING FOR GUEST");
-            COPY_TEXT(v->detail, "Open Bluetooth settings");
+            snprintf(v->detail, sizeof(v->detail), "%llus remaining",
+                     (unsigned long long)((s->pairing_deadline_ms - now_ms + 999u) / 1000u));
+            COPY_TEXT(v->footer, "Open guest Bluetooth settings");
         } else if (s->pairing_state == KVM_DISPLAY_PAIRING_REJECTED) {
             COPY_TEXT(v->primary, "PAIRING REJECTED");
             COPY_TEXT(v->detail, "Retry from host");
@@ -152,6 +157,7 @@ const char *kvm_display_target_label(const kvm_display_status_t *status)
     if (!status) return "UNKNOWN";
     if (status->fault) return "LOCAL ERROR";
     if (status->armed) {
+        if (!status->guest_ready) return "LOCAL ERROR";
         switch (status->selected_slot) {
         case 1: return "GUEST 1";
         case 2: return "GUEST 2";

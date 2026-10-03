@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
  * Starts the one-guest BLE service and binary USB routing transport on ESP32-S3.
  * Startup selects local with no armed HID output; routing requires a validated
- * session, READY encrypted guest, explicit switch, and explicit arm. */
+ * session, READY encrypted guest, explicit switch, and explicit arm. The
+ * Waveshare panel starts only with the explicitly validated board profile. */
 #include "esp_log.h"
 #include "hid_guest.h"
 #include "display.h"
@@ -14,6 +15,11 @@ void app_main(void)
     if (hid_result != ESP_OK) ESP_LOGE("esp32-kvm", "HID startup failed: %d", hid_result);
     esp_err_t usb_result = kvm_transport_usb_serial_jtag_start();
     if (usb_result != ESP_OK) ESP_LOGE("esp32-kvm", "USB startup failed: %d", usb_result);
-    esp_err_t display_result = kvm_display_start(false, kvm_transport_button_event);
+#if CONFIG_KVM_DISPLAY_WAVESHARE_TOUCH_154_VERIFIED
+    const bool enable_panel = true;
+#else
+    const bool enable_panel = false;
+#endif
+    esp_err_t display_result = kvm_display_start(enable_panel, kvm_transport_button_event);
     if (display_result != ESP_OK) ESP_LOGE("esp32-kvm", "Display/button startup failed: %d", display_result);
 }
