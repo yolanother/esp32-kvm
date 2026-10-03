@@ -36,13 +36,16 @@ static hid_pairing_t pairing;
 static hid_guest_pairing_event_fn pairing_events;
 static void *pairing_event_context;
 static bool started;
-static struct ble_npl_event disconnect_event;
+static struct ble_npl_event disconnect_events[HID_GATT_MAX_CONNECTIONS];
 static struct ble_npl_callout pairing_timeout;
 
 static void disconnect_on_host(struct ble_npl_event *event)
 {
-    (void)event;
-    hid_guest_disconnect_current();
+    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot)
+        if (event == &disconnect_events[slot - 1]) {
+            (void)hid_guest_disconnect_slot(slot);
+            return;
+        }
 }
 
 static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000; }
@@ -301,7 +304,8 @@ esp_err_t hid_guest_start(void)
     ble_store_config_init();
     result = hid_guest_rpc_init();
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
-    ble_npl_event_init(&disconnect_event, disconnect_on_host, NULL);
+    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot)
+        ble_npl_event_init(&disconnect_events[slot - 1], disconnect_on_host, NULL);
     ble_npl_callout_init(&pairing_timeout, nimble_port_get_dflt_eventq(),
                          pairing_timeout_on_host, NULL);
     nimble_port_freertos_init(host_task);
@@ -434,8 +438,12 @@ esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed)
 }
 
 esp_err_t hid_guest_disconnect_current(void)
+{ return hid_guest_disconnect_slot(1); }
+
+esp_err_t hid_guest_disconnect_slot(uint8_t slot)
 {
-    hid_channel_t *channel = hid_gatt_channel();
+    hid_channel_t *channel = hid_gatt_channel_at(slot);
+    if (!channel) return ESP_ERR_INVALID_ARG;
     channel->armed = false;
     channel->needs_disconnect = true;
     if (!channel->connected) return ESP_OK;
@@ -444,8 +452,12 @@ esp_err_t hid_guest_disconnect_current(void)
 }
 
 esp_err_t hid_guest_request_disconnect(void)
+{ return hid_guest_request_disconnect_slot(1); }
+
+esp_err_t hid_guest_request_disconnect_slot(uint8_t slot)
 {
     if (!started) return ESP_ERR_INVALID_STATE;
-    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &disconnect_event);
+    if (!slot || slot > HID_GATT_MAX_CONNECTIONS) return ESP_ERR_INVALID_ARG;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &disconnect_events[slot - 1]);
     return ESP_OK;
 }

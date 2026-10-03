@@ -61,22 +61,39 @@ esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed);
 /** Disarms and terminates the current guest after uncertain all-up delivery.
  * Call on the NimBLE host thread; a disconnected channel succeeds. */
 esp_err_t hid_guest_disconnect_current(void);
+/** Disarms and terminates one channel on the NimBLE host thread. */
+esp_err_t hid_guest_disconnect_slot(uint8_t slot);
 /** Queues a coalesced disconnect on NimBLE's host event loop from another task.
  * Returns success when queued; it does not await the radio disconnect. */
 esp_err_t hid_guest_request_disconnect(void);
 /** Reads readiness on the NimBLE host loop within a bounded wait. */
 bool hid_guest_request_ready(void);
+/** Reads readiness for one bounded, one-based GATT channel. */
+bool hid_guest_request_ready_slot(uint8_t slot);
 /** Arms after an all-up baseline on the NimBLE host loop. */
 bool hid_guest_request_arm(void);
+/** Arms one selected channel after its all-up baseline. */
+bool hid_guest_request_arm_slot(uint8_t slot);
 /** Sends all-up reports and disarms on the NimBLE host loop. */
 bool hid_guest_request_release(void);
+/** Releases and disarms one selected channel. */
+bool hid_guest_request_release_slot(uint8_t slot);
 /** Sends one keyboard state through the bounded host-loop bridge. */
 bool hid_guest_request_keyboard(const uint8_t keys[HID_KEYBOARD_REPORT_LEN]);
+/** Sends keyboard state to one selected channel. */
+bool hid_guest_request_keyboard_slot(uint8_t slot, const uint8_t keys[HID_KEYBOARD_REPORT_LEN]);
 /** Sends relative mouse state through the bounded host-loop bridge. */
 bool hid_guest_request_mouse(uint8_t buttons, int16_t dx, int16_t dy,
                              int8_t wheel, int8_t pan);
+/** Sends pointer state to one selected channel. */
+bool hid_guest_request_mouse_slot(uint8_t slot, uint8_t buttons, int16_t dx, int16_t dy,
+                                  int8_t wheel, int8_t pan);
 /** Sends one consumer usage through the bounded host-loop bridge. */
 bool hid_guest_request_consumer(uint16_t usage);
+/** Sends consumer usage to one selected channel. */
+bool hid_guest_request_consumer_slot(uint8_t slot, uint16_t usage);
+/** Queues a fail-local disconnect of one selected channel. */
+esp_err_t hid_guest_request_disconnect_slot(uint8_t slot);
 /** Opens a pairing window on the NimBLE host loop within a bounded wait. */
 bool hid_guest_request_pair_begin(void);
 /** Cancels pairing on the NimBLE host loop within a bounded wait. */

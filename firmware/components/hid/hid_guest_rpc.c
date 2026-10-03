@@ -4,7 +4,7 @@
  * queues a disconnect; pairing commands use the same bounded host-loop bridge
  * and no HID or pairing state is read on the USB worker. Confirmed bond
  * deletion uses the same bounded bridge and preserves opaque token bytes.
- * Current-bond and retained inventory lookups copy only opaque tokens into
+ * Each HID request carries its one-based target slot. Current-bond and retained inventory lookups copy only opaque tokens into
  * the requesting worker; timeout output is cleared. */
 #include "hid_guest.h"
 #include "hid_guest_rpc.h"
@@ -29,6 +29,7 @@ typedef struct {
     bool finished;
     bool result;
     rpc_op_t operation;
+    uint8_t slot;
     ble_npl_time_t deadline;
     uint8_t keyboard[HID_KEYBOARD_REPORT_LEN];
     uint8_t buttons;
@@ -61,7 +62,7 @@ static void on_host(struct ble_npl_event *event)
     memset(&rpc.current_token, 0, sizeof(rpc.current_token));
     memset(rpc.inventory, 0, sizeof(rpc.inventory));
     if (execute) {
-        hid_channel_t *channel = hid_gatt_channel();
+        hid_channel_t *channel = hid_gatt_channel_at(rpc.slot);
         switch (rpc.operation) {
         case RPC_READY: rpc.result = channel_ready(channel); break;
         case RPC_ARM: rpc.result = hid_channel_arm(channel); break;
@@ -97,8 +98,8 @@ static void on_host(struct ble_npl_event *event)
             break;
         }
         }
-        if (channel->needs_disconnect && channel->connected)
-            hid_guest_disconnect_current();
+        if (channel && channel->needs_disconnect && channel->connected)
+            hid_guest_disconnect_slot(rpc.slot);
     }
     rpc.finished = true;
     if (atomic_load(&rpc.cancelled)) rpc.busy = false;
@@ -115,11 +116,13 @@ esp_err_t hid_guest_rpc_init(void)
     return ESP_OK;
 }
 
-static bool request(rpc_op_t operation, const void *payload, uint8_t *output)
+static bool request(rpc_op_t operation, uint8_t slot, const void *payload, uint8_t *output)
 {
     size_t output_length = operation == RPC_INVENTORY ? sizeof(rpc.inventory) : HID_PAIRING_TOKEN_LEN;
     if (output) memset(output, 0, output_length);
-    if (!rpc.initialized ||
+    if (slot > HID_GATT_MAX_CONNECTIONS ||
+        (!slot && operation <= RPC_CONSUMER) ||
+        !rpc.initialized ||
         ble_npl_mutex_pend(&rpc.mutex, 0) != BLE_NPL_OK) return false;
     if (rpc.busy) { ble_npl_mutex_release(&rpc.mutex); return false; }
     while (ble_npl_sem_pend(&rpc.completion, 0) == BLE_NPL_OK) { }
@@ -128,6 +131,7 @@ static bool request(rpc_op_t operation, const void *payload, uint8_t *output)
     rpc.finished = false;
     rpc.result = false;
     rpc.operation = operation;
+    rpc.slot = slot;
     rpc.deadline = ble_npl_time_get() + ble_npl_time_ms_to_ticks32(RPC_TIMEOUT_MS);
     if (operation == RPC_KEYBOARD) memcpy(rpc.keyboard, payload, sizeof(rpc.keyboard));
     else if (operation == RPC_MOUSE) {
@@ -143,7 +147,7 @@ static bool request(rpc_op_t operation, const void *payload, uint8_t *output)
                       ble_npl_time_ms_to_ticks32(RPC_TIMEOUT_MS)) == BLE_NPL_OK;
     if (!completed) atomic_store(&rpc.cancelled, true);
     if (ble_npl_mutex_pend(&rpc.mutex, 0) != BLE_NPL_OK) {
-        hid_guest_request_disconnect();
+        if (slot) hid_guest_request_disconnect_slot(slot);
         return false;
     }
     bool result = completed && rpc.result;
@@ -158,33 +162,43 @@ static bool request(rpc_op_t operation, const void *payload, uint8_t *output)
     }
     else rpc.busy = false;
     ble_npl_mutex_release(&rpc.mutex);
-    if (!completed) hid_guest_request_disconnect();
+    if (!completed && slot) hid_guest_request_disconnect_slot(slot);
     return result;
 }
 
-bool hid_guest_request_ready(void) { return request(RPC_READY, NULL, NULL); }
-bool hid_guest_request_arm(void) { return request(RPC_ARM, NULL, NULL); }
-bool hid_guest_request_release(void) { return request(RPC_RELEASE, NULL, NULL); }
+bool hid_guest_request_ready_slot(uint8_t slot) { return request(RPC_READY, slot, NULL, NULL); }
+bool hid_guest_request_arm_slot(uint8_t slot) { return request(RPC_ARM, slot, NULL, NULL); }
+bool hid_guest_request_release_slot(uint8_t slot) { return request(RPC_RELEASE, slot, NULL, NULL); }
+bool hid_guest_request_ready(void) { return hid_guest_request_ready_slot(1); }
+bool hid_guest_request_arm(void) { return hid_guest_request_arm_slot(1); }
+bool hid_guest_request_release(void) { return hid_guest_request_release_slot(1); }
+bool hid_guest_request_keyboard_slot(uint8_t slot, const uint8_t keys[HID_KEYBOARD_REPORT_LEN])
+{ return keys && request(RPC_KEYBOARD, slot, keys, NULL); }
 bool hid_guest_request_keyboard(const uint8_t keys[HID_KEYBOARD_REPORT_LEN])
-{ return request(RPC_KEYBOARD, keys, NULL); }
-bool hid_guest_request_mouse(uint8_t buttons, int16_t dx, int16_t dy,
-                             int8_t wheel, int8_t pan)
+{ return hid_guest_request_keyboard_slot(1, keys); }
+bool hid_guest_request_mouse_slot(uint8_t slot, uint8_t buttons, int16_t dx, int16_t dy,
+                                  int8_t wheel, int8_t pan)
 {
     const mouse_args_t mouse = {buttons, dx, dy, wheel, pan};
-    return request(RPC_MOUSE, &mouse, NULL);
+    return request(RPC_MOUSE, slot, &mouse, NULL);
 }
-bool hid_guest_request_consumer(uint16_t usage) { return request(RPC_CONSUMER, &usage, NULL); }
-bool hid_guest_request_pair_begin(void) { return request(RPC_PAIR_BEGIN, NULL, NULL); }
-bool hid_guest_request_pair_cancel(void) { return request(RPC_PAIR_CANCEL, NULL, NULL); }
+bool hid_guest_request_mouse(uint8_t buttons, int16_t dx, int16_t dy,
+                             int8_t wheel, int8_t pan)
+{ return hid_guest_request_mouse_slot(1, buttons, dx, dy, wheel, pan); }
+bool hid_guest_request_consumer_slot(uint8_t slot, uint16_t usage)
+{ return request(RPC_CONSUMER, slot, &usage, NULL); }
+bool hid_guest_request_consumer(uint16_t usage) { return hid_guest_request_consumer_slot(1, usage); }
+bool hid_guest_request_pair_begin(void) { return request(RPC_PAIR_BEGIN, 0, NULL, NULL); }
+bool hid_guest_request_pair_cancel(void) { return request(RPC_PAIR_CANCEL, 0, NULL, NULL); }
 bool hid_guest_request_pair_reply(uint32_t challenge_id, bool approved)
 {
     const pair_reply_args_t args = {challenge_id, approved};
-    return request(RPC_PAIR_REPLY, &args, NULL);
+    return request(RPC_PAIR_REPLY, 0, &args, NULL);
 }
 bool hid_guest_request_forget_bond(const uint8_t token[HID_PAIRING_TOKEN_LEN])
-{ return token && request(RPC_FORGET_BOND, token, NULL); }
+{ return token && request(RPC_FORGET_BOND, 0, token, NULL); }
 bool hid_guest_request_current_bond_token(uint8_t output[HID_PAIRING_TOKEN_LEN])
-{ return output && request(RPC_CURRENT_TOKEN, NULL, output); }
+{ return output && request(RPC_CURRENT_TOKEN, 1, NULL, output); }
 bool hid_guest_request_retained_bonds(uint8_t output[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN],
                                       uint8_t *count)
 {
@@ -192,7 +206,7 @@ bool hid_guest_request_retained_bonds(uint8_t output[HID_PAIRING_MAX_BONDS][HID_
     memset(output, 0, HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN);
     *count = 0;
     uint8_t response[1 + HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN];
-    bool result = request(RPC_INVENTORY, NULL, response);
+    bool result = request(RPC_INVENTORY, 0, NULL, response);
     if (result && response[0] <= HID_PAIRING_MAX_BONDS) {
         *count = response[0];
         memcpy(output, response + 1, (size_t)*count * HID_PAIRING_TOKEN_LEN);

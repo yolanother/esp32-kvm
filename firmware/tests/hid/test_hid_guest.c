@@ -14,7 +14,8 @@
 
 struct ble_hs_cfg ble_hs_cfg;
 static hid_channel_t channel;
-static hid_channel_t idle_channels[HID_GATT_MAX_CONNECTIONS - 1];
+static hid_channel_t other_channels[HID_GATT_MAX_CONNECTIONS - 1];
+static uint16_t last_report_handle;
 static int (*gap_callback)(struct ble_gap_event *, void *);
 static ble_addr_t active_peer;
 static int64_t time_us;
@@ -34,7 +35,8 @@ static int send_report(void *context, uint16_t handle, uint8_t report,
                        const uint8_t *bytes, size_t length)
 {
     (void)context; (void)bytes;
-    assert(handle == 17 && report >= HID_REPORT_KEYBOARD && report <= HID_REPORT_CONSUMER);
+    assert((handle == 17 || handle == 18) && report >= HID_REPORT_KEYBOARD && report <= HID_REPORT_CONSUMER);
+    last_report_handle = handle;
     assert(length == (report == HID_REPORT_KEYBOARD ? HID_KEYBOARD_REPORT_LEN :
                       report == HID_REPORT_MOUSE ? HID_MOUSE_REPORT_LEN : HID_CONSUMER_REPORT_LEN));
     sent_reports++;
@@ -120,19 +122,21 @@ int ble_gap_conn_find(uint16_t handle, struct ble_gap_conn_desc *description)
 { description->conn_handle = handle; description->peer_id_addr = active_peer;
   description->sec_state.encrypted = 1; description->sec_state.bonded = 1;
   description->sec_state.authenticated = 1; return 0; }
-int hid_gatt_register(void) { hid_channel_init(&channel, NULL, NULL); return 0; }
+int hid_gatt_register(void)
+{ hid_channel_init(&channel, NULL, NULL); for (size_t i = 0; i < 2; ++i) hid_channel_init(&other_channels[i], NULL, NULL); return 0; }
 hid_channel_t *hid_gatt_channel(void) { return &channel; }
 hid_channel_t *hid_gatt_channel_at(uint8_t slot)
-{ return slot == 1 ? &channel : slot <= HID_GATT_MAX_CONNECTIONS ? &idle_channels[slot - 2] : NULL; }
+{ return slot == 1 ? &channel : slot >= 2 && slot <= HID_GATT_MAX_CONNECTIONS ? &other_channels[slot - 2] : NULL; }
 hid_channel_t *hid_gatt_channel_for(uint16_t handle)
-{ return channel.connected && channel.connection_handle == handle ? &channel : NULL; }
-size_t hid_gatt_connection_count(void) { return channel.connected ? 1 : 0; }
+{ for (uint8_t slot = 1; slot <= 3; ++slot) { hid_channel_t *c = hid_gatt_channel_at(slot); if (c->connected && c->connection_handle == handle) return c; } return NULL; }
+size_t hid_gatt_connection_count(void)
+{ size_t count = 0; for (uint8_t slot = 1; slot <= 3; ++slot) count += hid_gatt_channel_at(slot)->connected; return count; }
 bool hid_gatt_on_connect(uint16_t handle)
-{ if (channel.connected) return false; hid_channel_connected(&channel, handle); return true; }
+{ if (hid_gatt_channel_for(handle)) return false; for (uint8_t slot = 1; slot <= 3; ++slot) { hid_channel_t *c = hid_gatt_channel_at(slot); if (!c->connected) { hid_channel_connected(c, handle); return true; } } return false; }
 void hid_gatt_on_disconnect(uint16_t handle)
-{ if (channel.connected && channel.connection_handle == handle) hid_channel_disconnected(&channel); }
+{ hid_channel_t *c = hid_gatt_channel_for(handle); if (c) hid_channel_disconnected(c); }
 void hid_gatt_on_encryption(uint16_t handle, bool encrypted)
-{ if (channel.connected && channel.connection_handle == handle) hid_channel_encrypted(&channel, encrypted); }
+{ hid_channel_t *c = hid_gatt_channel_for(handle); if (c) hid_channel_encrypted(c, encrypted); }
 void hid_gatt_on_subscribe(uint16_t handle, uint16_t value_handle, bool enabled)
 { (void)handle; (void)value_handle; (void)enabled; }
 
@@ -255,5 +259,30 @@ int main(void)
     assert(terminations == previous_terminations && !channel.armed);
     assert(hid_guest_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 0);
+    hid_channel_disconnected(&channel);
+    assert(hid_gatt_on_connect(17) && hid_gatt_on_connect(18));
+    hid_channel_t *second = hid_gatt_channel_at(2);
+    second->send = send_report;
+    hid_gatt_on_encryption(18, true);
+    second->subscribed[HID_REPORT_KEYBOARD] = true;
+    second->subscribed[HID_REPORT_MOUSE] = true;
+    second->subscribed[HID_REPORT_CONSUMER] = true;
+    assert(hid_guest_request_ready_slot(2));
+    assert(hid_guest_request_arm_slot(2));
+    assert(hid_guest_request_keyboard_slot(2, keys) && last_report_handle == 18);
+    assert(!channel.armed && !channel.keyboard[2]);
+    assert(hid_guest_request_release_slot(2) && !second->armed);
+    hold_host = true;
+    unsigned prior_terminations = terminations;
+    assert(!hid_guest_request_keyboard_slot(2, keys));
+    assert(!channel.needs_disconnect && host_queue.pending && host_queue.next);
+    hold_host = false;
+    struct ble_npl_event *late = host_queue.pending;
+    host_queue.pending = host_queue.next; host_queue.next = NULL;
+    late->callback(late);
+    host_queue.pending->callback(host_queue.pending);
+    host_queue.pending = NULL;
+    assert(second->needs_disconnect && !channel.needs_disconnect &&
+           terminations == prior_terminations + 1);
     return 0;
 }
