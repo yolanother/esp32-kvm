@@ -41,6 +41,8 @@ int main(void)
     kvm_display_make_view(&status, 1000, &view);
     assert(view.screen == KVM_DISPLAY_PAUSED);
     assert(strcmp(view.primary, "INPUT PAUSED") == 0);
+    assert(strcmp(view.detail, "1 guest connected") == 0);
+    assert(strcmp(view.footer, "USB off | reconnect host") == 0);
     status.usb_connected = true;
     status.show_guest_list = true;
     status.touch_available = true;

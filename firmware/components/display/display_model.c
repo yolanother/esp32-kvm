@@ -68,9 +68,15 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         v->screen = KVM_DISPLAY_PAUSED;
         COPY_TEXT(v->title, "LOCAL CONTROL");
         COPY_TEXT(v->primary, "INPUT PAUSED");
-        COPY_TEXT(v->detail, "USB disconnected");
-        COPY_TEXT(v->footer, s->touch_available ? "Pair here or reconnect host" :
-                  "Reconnect host to resume");
+        if (s->ready_slots) {
+            snprintf(v->detail, sizeof(v->detail), "%u guest%s connected",
+                     s->ready_slots, s->ready_slots == 1 ? "" : "s");
+            COPY_TEXT(v->footer, "USB off | reconnect host");
+        } else {
+            COPY_TEXT(v->detail, "USB disconnected");
+            COPY_TEXT(v->footer, s->touch_available ? "Pair here or reconnect host" :
+                      "Reconnect host to resume");
+        }
     } else if (s->show_guest_list) {
         v->screen = KVM_DISPLAY_GUEST_LIST;
         COPY_TEXT(v->title, "GUESTS");

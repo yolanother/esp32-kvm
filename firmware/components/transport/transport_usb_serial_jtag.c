@@ -164,11 +164,25 @@ void kvm_transport_button_event(kvm_display_event_t event)
     if (bit) (void)xTaskNotify(usb_task, bit, eSetBits);
 }
 
-static void publish_status(bool connected, bool guest_ready)
+static void publish_status(bool connected, bool guest_ready,
+                           const kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS])
 {
     kvm_display_status_t status;
     kvm_transport_display_status(&core, &router, connected, guest_ready,
                                  (uint64_t)(esp_timer_get_time() / 1000), &status);
+    /* The USB session core is cleared on host disconnect, but the authenticated
+       BLE slot snapshot remains current. Keep its connection visible locally. */
+    if (!connected) {
+        for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot) {
+            bool has_token = false;
+            for (size_t i = 0; i < sizeof(slots[slot].token); ++i)
+                has_token |= slots[slot].token[i] != 0;
+            if (!has_token) continue;
+            status.guest_slots++;
+            if (slots[slot].ready && slots[slot].subscribed)
+                status.ready_slots++;
+        }
+    }
     if (display_pairing.state != KVM_DISPLAY_PAIRING_CLOSED) {
         status.pairing_state = display_pairing.state;
         status.pairing_local_owner = display_pairing.local_owner;
@@ -259,7 +273,7 @@ static void usb_worker(void *context)
                 kvm_transport_core_reset(&core);
             }
             was_connected = false;
-            publish_status(false, guest_ready);
+            publish_status(false, guest_ready, slots);
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -281,7 +295,7 @@ static void usb_worker(void *context)
         kvm_transport_core_tick(&core);
         if ((button_bits & 1u) && !(button_bits & 2u))
             (void)kvm_transport_core_device_select_request(&core, router.slot ? 0 : 1);
-        publish_status(true, guest_ready);
+        publish_status(true, guest_ready, slots);
     }
 }
 
