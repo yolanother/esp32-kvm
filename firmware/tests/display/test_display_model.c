@@ -63,8 +63,16 @@ int main(void)
     assert(view.screen == KVM_DISPLAY_PAIRING);
     assert(strcmp(view.primary, "000123") == 0);
     assert(strcmp(view.detail, "60s remaining") == 0);
+    status.ready_slots = 0;
     kvm_display_make_view(&status, 61000, &view);
     assert(strcmp(view.primary, "PAIRING EXPIRED") == 0);
+    status.ready_slots = 1;
+    status.usb_connected = false;
+    kvm_display_make_view(&status, 61000, &view);
+    assert(view.screen == KVM_DISPLAY_PAUSED);
+    assert(strcmp(view.detail, "1 guest connected") == 0);
+    status.usb_connected = true;
+    status.ready_slots = 1;
     status.pairing_challenge_id = 0;
     kvm_display_make_view(&status, 1000, &view);
     assert(strcmp(view.primary, "PAIRING EXPIRED") == 0);
@@ -72,6 +80,7 @@ int main(void)
     status.pairing_number = 1000000;
     kvm_display_make_view(&status, 1000, &view);
     assert(strcmp(view.primary, "PAIRING EXPIRED") == 0);
+    status.ready_slots = 0;
     status.pairing_state = KVM_DISPLAY_PAIRING_WAITING;
     status.pairing_deadline_ms = 6100;
     kvm_display_make_view(&status, 1000, &view);

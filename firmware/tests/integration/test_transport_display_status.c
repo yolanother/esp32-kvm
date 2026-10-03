@@ -48,7 +48,7 @@ int main(void)
     assert(status.pairing_state == KVM_DISPLAY_PAIRING_TIMEOUT);
     assert(status.pairing_challenge_id == 0 && status.pairing_number == 0);
     kvm_display_make_view(&status, now, &view);
-    assert(strcmp(view.primary, "PAIRING EXPIRED") == 0);
+    assert(strcmp(view.primary, "GUEST 1") == 0);
 
     kvm_transport_core_pairing_event(&core, KVM_PAIRING_WAITING, 0, 0, now + 5000);
     kvm_transport_display_status(&core, &router, true, true, now, &status);

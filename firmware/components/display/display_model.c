@@ -18,6 +18,11 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
     memset(v, 0, sizeof(*v));
     if (!s) return;
     v->touch_available = s->touch_available;
+    bool pairing_expired = (s->pairing_state == KVM_DISPLAY_PAIRING_WAITING ||
+                            s->pairing_state == KVM_DISPLAY_PAIRING_CHALLENGE) &&
+                           s->pairing_deadline_ms <= now_ms;
+    bool pairing_terminal = s->pairing_state == KVM_DISPLAY_PAIRING_REJECTED ||
+                            s->pairing_state == KVM_DISPLAY_PAIRING_TIMEOUT || pairing_expired;
     if (s->recovery_required) {
         v->screen = KVM_DISPLAY_RECOVERY;
         COPY_TEXT(v->title, "RECOVERY");
@@ -37,7 +42,8 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
                   !s->usb_connected ? "USB disconnected" : "Guest not ready");
         COPY_TEXT(v->footer, s->armed && !s->guest_ready ?
                   "Use host to release" : "Reconnect host to resume");
-    } else if (s->pairing_state != KVM_DISPLAY_PAIRING_CLOSED) {
+    } else if (s->pairing_state != KVM_DISPLAY_PAIRING_CLOSED &&
+               !(s->ready_slots && pairing_terminal)) {
         v->screen = KVM_DISPLAY_PAIRING;
         COPY_TEXT(v->title, "PAIR GUEST");
         if (s->pairing_state == KVM_DISPLAY_PAIRING_CHALLENGE &&
