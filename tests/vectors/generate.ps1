@@ -1,6 +1,6 @@
 # Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
-# Generates independent version-one wire fixtures using bitwise CRC32C and COBS
-# routines that do not call the Rust protocol implementation.
+# Generates independent version-one wire fixtures, including the minor-two
+# retained bond inventory, without calling the Rust protocol implementation.
 
 $ErrorActionPreference = 'Stop'
 
@@ -59,8 +59,10 @@ function New-Frame([byte]$kind, [byte[]]$payload, [uint64]$session = 5, [uint32]
 $examples = @(
     @('hello-v1', 0x01, [byte[]](0,0,0,0,0,0), [uint64]0, [uint32]7, [uint32]0),
     @('hello-m1', 0x01, [byte[]](1,0,0,0,0,0), [uint64]0, [uint32]8, [uint32]0),
+    @('hello-m2', 0x01, [byte[]](2,0,0,0,0,0), [uint64]0, [uint32]10, [uint32]0),
     @('caps', 0x02, [byte[]](0xa8,1,0x61,0x31,2,0x61,0x62,3,0,4,0,5,1,6,1,7,0,8,5), [uint64]5, [uint32]1, [uint32]2),
     @('caps-m1', 0x02, [byte[]](0xa8,1,0x61,0x31,2,0x61,0x62,3,0,4,1,5,1,6,8,7,0,8,5), [uint64]5, [uint32]8, [uint32]0),
+    @('caps-m2', 0x02, [byte[]](0xa8,1,0x61,0x31,2,0x61,0x62,3,0,4,2,5,1,6,8,7,0,8,5), [uint64]5, [uint32]10, [uint32]0),
     @('session-open', 0x03, [byte[]](0xa2,1,0x61,0x31,2,0), [uint64]5, [uint32]1, [uint32]2),
     @('heartbeat', 0x10, [byte[]](42,0,0,0,0,0,0,0), [uint64]5, [uint32]1, [uint32]2),
     @('get-status', 0x11, [byte[]]@(), [uint64]5, [uint32]1, [uint32]2),
@@ -76,6 +78,8 @@ $examples = @(
     @('pair-cancel', 0x41, [byte[]]@(), [uint64]5, [uint32]1, [uint32]2),
     @('forget-bond', 0x42, [byte[]](0xa1,1,0x50,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0), [uint64]5, [uint32]1, [uint32]2),
     @('pair-reply', 0x43, [byte[]](0xa3,1,1,2,0,3,0xf5), [uint64]5, [uint32]1, [uint32]2),
+    @('get-bonds', 0x44, [byte[]](1), [uint64]5, [uint32]11, [uint32]2),
+    @('bonds', 0x45, [byte[]](1,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2), [uint64]5, [uint32]11, [uint32]2),
     @('device-select-request', 0x50, [byte[]](1,1,0,0,0), [uint64]5, [uint32]1, [uint32]2),
     @('update-prepare', 0x60, [byte[]]@(), [uint64]5, [uint32]1, [uint32]2),
     @('ack', 0x70, [byte[]](0x20,1,0,0,0,0,3,0,0,0), [uint64]5, [uint32]1, [uint32]2),

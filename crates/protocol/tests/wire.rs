@@ -3,8 +3,24 @@
 // replay semantics against changes to the protocol implementation.
 
 use esp32_kvm_protocol::{
-    Frame, FrameDecoder, MessageKind, ProtocolError, RetryCache, cobs_decode, crc32c,
+    BondInventory, Frame, FrameDecoder, MessageKind, ProtocolError, RetryCache, cobs_decode, crc32c,
 };
+
+#[test]
+fn retained_bond_inventory_is_bounded_versioned_and_unique() {
+    let tokens = vec![[1; 16], [2; 16]];
+    let inventory = BondInventory::new(tokens.clone()).unwrap();
+    let payload = inventory.encode();
+    assert_eq!(payload.len(), 34);
+    assert_eq!(BondInventory::decode(&payload).unwrap().tokens, tokens);
+    assert_eq!(BondInventory::decode(&[2, 0]), Err(ProtocolError::Version));
+    assert_eq!(BondInventory::decode(&[1, 1]), Err(ProtocolError::Payload));
+    assert_eq!(BondInventory::new(vec![[0; 16]]), Err(ProtocolError::Payload));
+    assert_eq!(BondInventory::new(vec![[1; 16]; 2]), Err(ProtocolError::Payload));
+    assert_eq!(BondInventory::new(vec![[1; 16]; 9]), Err(ProtocolError::Payload));
+    assert!(Frame::new(MessageKind::GetBonds, 5, 9, 0, vec![1]).encode().is_ok());
+    assert!(Frame::new(MessageKind::Bonds, 5, 9, 0, payload).encode().is_ok());
+}
 
 #[test]
 fn crc32c_standard_check_value() {
@@ -16,8 +32,10 @@ fn independent_fixtures_cover_every_message_kind() {
     let fixtures: &[(&str, u8)] = &[
         ("hello-v1", 0x01),
         ("hello-m1", 0x01),
+        ("hello-m2", 0x01),
         ("caps", 0x02),
         ("caps-m1", 0x02),
+        ("caps-m2", 0x02),
         ("session-open", 0x03),
         ("heartbeat", 0x10),
         ("get-status", 0x11),
@@ -33,6 +51,8 @@ fn independent_fixtures_cover_every_message_kind() {
         ("pair-cancel", 0x41),
         ("forget-bond", 0x42),
         ("pair-reply", 0x43),
+        ("get-bonds", 0x44),
+        ("bonds", 0x45),
         ("device-select-request", 0x50),
         ("update-prepare", 0x60),
         ("ack", 0x70),

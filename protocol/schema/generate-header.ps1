@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $source = Get-Content (Join-Path $PSScriptRoot '../../crates/protocol/src/lib.rs') -Raw
 $enum = [regex]::Match($source, '(?s)pub enum MessageKind \{(.*?)\}').Groups[1].Value
 $names = [regex]::Matches($enum, '([A-Za-z][A-Za-z0-9]*)\s*=\s*(0x[0-9a-f]+),')
-if ($names.Count -ne 21) { throw "Expected 21 message kinds; found $($names.Count)" }
+if ($names.Count -ne 23) { throw "Expected 23 message kinds; found $($names.Count)" }
 $lines = [System.Collections.Generic.List[string]]::new()
 $lines.Add('/* Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.')
 $lines.Add(' * Generated version-one USB protocol identifiers and envelope limits for')
@@ -15,7 +15,7 @@ $lines.Add('#ifndef ESP32_KVM_PROTOCOL_V1_H')
 $lines.Add('#define ESP32_KVM_PROTOCOL_V1_H')
 $lines.Add('#define KVM_PROTOCOL_MAGIC 0x4B56u')
 $lines.Add('#define KVM_PROTOCOL_MAJOR 1u')
-$lines.Add('#define KVM_PROTOCOL_MINOR_MAX 1u')
+$lines.Add('#define KVM_PROTOCOL_MINOR_MAX 2u')
 $lines.Add('#define KVM_PROTOCOL_HEADER_LEN 24u')
 $lines.Add('#define KVM_PROTOCOL_MAX_PAYLOAD 512u')
 $lines.Add('#define KVM_PROTOCOL_MAX_FRAME 540u')

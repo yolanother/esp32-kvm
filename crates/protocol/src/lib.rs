@@ -1,6 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
 // This crate defines the version-one USB wire envelope, fixed payload validation,
-// stream framing, and bounded duplicate-control detection shared by host tooling.
+// stream framing, bounded retained-bond inventory, and duplicate-control
+// detection shared by host tooling.
 
 mod cbor;
 
@@ -17,7 +18,51 @@ pub const MAGIC: u16 = 0x4b56;
 /// Current incompatible protocol version.
 pub const MAJOR: u8 = 1;
 /// Highest compatible minor supported by this implementation.
-pub const MINOR: u16 = 1;
+pub const MINOR: u16 = 2;
+
+/// Retained bond inventory format version for negotiated minor two.
+pub const BOND_INVENTORY_VERSION: u8 = 1;
+/// Maximum opaque retained bond identities in one inventory response.
+pub const MAX_BONDS: usize = 8;
+
+/// Authoritative, bounded retained identities; never BLE addresses or keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondInventory {
+    /// Nonzero distinct opaque bond tokens retained by firmware.
+    pub tokens: Vec<[u8; 16]>,
+}
+
+impl BondInventory {
+    /// Validates a retained token snapshot before it crosses the wire.
+    pub fn new(tokens: Vec<[u8; 16]>) -> Result<Self, ProtocolError> {
+        if tokens.len() > MAX_BONDS || tokens.iter().any(|token| *token == [0; 16]) ||
+            tokens.iter().enumerate().any(|(i, token)| tokens[..i].contains(token)) {
+            return Err(ProtocolError::Payload);
+        }
+        Ok(Self { tokens })
+    }
+
+    /// Encodes format version, count, then contiguous opaque tokens.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut payload = vec![BOND_INVENTORY_VERSION, self.tokens.len() as u8];
+        for token in &self.tokens { payload.extend_from_slice(token); }
+        payload
+    }
+
+    /// Decodes an exact, versioned response with at most eight distinct tokens.
+    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+        if payload.first() != Some(&BOND_INVENTORY_VERSION) {
+            return Err(ProtocolError::Version);
+        }
+        let count = *payload.get(1).ok_or(ProtocolError::Payload)? as usize;
+        if count > MAX_BONDS || payload.len() != 2 + count * 16 {
+            return Err(ProtocolError::Payload);
+        }
+        let tokens = payload[2..].chunks_exact(16)
+            .map(|bytes| bytes.try_into().unwrap()).collect();
+        Self::new(tokens)
+    }
+}
 
 /// Wire message kinds frozen for version one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +84,8 @@ pub enum MessageKind {
     PairCancel = 0x41,
     ForgetBond = 0x42,
     PairReply = 0x43,
+    GetBonds = 0x44,
+    Bonds = 0x45,
     DeviceSelectRequest = 0x50,
     UpdatePrepare = 0x60,
     Ack = 0x70,
@@ -68,6 +115,8 @@ impl TryFrom<u8> for MessageKind {
             0x41 => PairCancel,
             0x42 => ForgetBond,
             0x43 => PairReply,
+            0x44 => GetBonds,
+            0x45 => Bonds,
             0x50 => DeviceSelectRequest,
             0x60 => UpdatePrepare,
             0x70 => Ack,
@@ -204,18 +253,20 @@ pub fn validate_payload(kind: MessageKind, payload: &[u8]) -> Result<(), Protoco
         ConsumerState => Some(2),
         PairBegin => Some(2),
         PairCancel => Some(0),
+        GetBonds => Some(1),
         DeviceSelectRequest => Some(5),
         UpdatePrepare => Some(0),
         Ack | Nack => Some(10),
         InputProgress => Some(8),
-        Caps | SessionOpen | Status | ForgetBond | PairReply => None,
+        Caps | SessionOpen | Status | ForgetBond | PairReply | Bonds => None,
     };
     if let Some(size) = size {
         if payload.len() != size {
             return Err(ProtocolError::Payload);
         }
     } else {
-        cbor::validate(kind, payload)?;
+        if kind == Bonds { BondInventory::decode(payload)?; }
+        else { cbor::validate(kind, payload)?; }
     }
     match kind {
         Hello
@@ -228,6 +279,7 @@ pub fn validate_payload(kind: MessageKind, payload: &[u8]) -> Result<(), Protoco
         PairBegin if !(1..=60).contains(&u16::from_le_bytes(payload.try_into().unwrap())) => {
             return Err(ProtocolError::Payload);
         }
+        GetBonds if payload[0] != BOND_INVENTORY_VERSION => return Err(ProtocolError::Version),
         Switch => {
             let old = u32::from_le_bytes(payload[1..5].try_into().unwrap());
             let new = u32::from_le_bytes(payload[5..9].try_into().unwrap());
