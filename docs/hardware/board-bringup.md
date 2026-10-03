@@ -40,13 +40,15 @@ The factory BSP creates an ST7789 panel with 16-bit RGB pixels and display inver
 
 The [Waveshare user guide](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54/Instructions-For-Use) says to hold BOOT while connecting USB, then release BOOT to enter download mode when the port is not recognized; power cycle after programming. It also suggests holding BOOT and power cycling if a flashing tool waits for synchronization. This is the documented manual recovery procedure, **not a completed test on this board**.
 
-Automatic ROM access via esptool succeeded on three read-only queries (two `flash_id`, one `get_security_info`) and a full read-only backup on COM7. The user reported performing the BOOT-held reconnect sequence and returning the board to BOOT mode; COM7 was readable afterward. The responses did not explicitly confirm COM enumeration on *both* manual cycles or that the usual factory screen returned after ordinary boot. Do not claim repeatable manual recovery until both entry and normal reboot are logged. No firmware has been flashed.
+Automatic ROM access via esptool succeeded on three read-only queries (two `flash_id`, one `get_security_info`) and a full read-only backup on COM7. The user reported performing the BOOT-held reconnect sequence and returning the board to BOOT mode; COM7 was readable afterward. The responses did not explicitly confirm COM enumeration on *both* manual cycles or that the usual factory screen returned after ordinary boot. Do not claim repeatable manual recovery until both entry and normal reboot are logged.
+
+The first project firmware image was flashed with ESP-IDF 5.5.1 at 460800 baud. Esptool reported verified hashes for the bootloader, partition table, OTA data, and factory app, then requested a hard reset. A live host HELLO on COM7 timed out with no bytes returned. A subsequent `esptool --before no_reset --after no_reset chip_id` succeeded and explicitly reported that it remained in the bootloader, establishing that the board was still in ROM download mode at the time of the failed handshake. The display is intentionally disabled in this first firmware. A normal BOOT-released reconnect and live app handshake remain pending.
 
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
 2. With the factory image intact, observe display output and touch response. Record whether CST816 is present, its I²C address, screen offset/orientation, and backlight behavior with a non-destructive probe or vendor demo.
-3. Finish logging the two reported manual BOOT-entry cycles and an ordinary boot: record whether COM7 appeared after each and whether the usual factory screen returned. Confirm PLUS and PWR behavior separately without repurposing PWR.
+3. Finish logging the two reported manual BOOT-entry cycles and an ordinary BOOT-released boot: record whether COM7 appeared after each, whether the project app answers HELLO/CAPS, and what the display shows. Confirm PLUS and PWR behavior separately without repurposing PWR.
 4. Only after identity and pins match, use these values in a board configuration and run the CDC, BLE, and display coexistence test.
 
 ## Commands and source files
