@@ -190,6 +190,7 @@ mod tests {
                 custom_base_preset: None,
                 modifier_bindings: Vec::new(),
             }],
+            mapping_pending_tokens: Vec::new(),
             pairing_available: true,
         }
     }

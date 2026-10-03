@@ -12,8 +12,11 @@ The Key mappings page shows the complete list of changed modifier bindings
 for the selected guest before Apply. It offers a custom copy of a selected
 preset, sided modifier edits, reset to the copied base, and discard. Applying
 saves only this guest's choice and custom bindings in the crash-tolerant local
-profile store. The desktop worker restores each saved mapping into the single
-host actor on startup and again on reconnection. The input engine validates
+profile store. The setup service keeps saved profiles visible if the actor is
+temporarily unavailable, marks their mapping installation pending, and retries
+one pending mapping per status refresh. The desktop worker caches each accepted
+mapping and restores it to the single host actor on reconnection. A failed
+installation disarms the capture gate. The input engine validates
 rules and defers a live edit until all physical keys are released. Local host
 input is never remapped.
 

@@ -55,6 +55,7 @@ export interface SetupSnapshot {
   connectedTokens: string[];
   readyTokens: string[];
   profiles: GuestProfile[];
+  mappingPendingTokens: string[];
   pairingAvailable: boolean;
 }
 

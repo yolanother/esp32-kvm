@@ -6,6 +6,7 @@ use esp32_kvm_input_core::{
     Destination, MappingPreset, MappingProfile, MappingRule, Side, SourceKey, preset_profile,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -217,6 +218,8 @@ pub struct SetupSnapshot {
     pub ready_tokens: Vec<String>,
     /// Host-local names retained across unplug and restart.
     pub profiles: Vec<GuestProfile>,
+    /// Saved mappings that await installation in the native actor.
+    pub mapping_pending_tokens: Vec<String>,
     /// Whether native pairing commands can be sent to a verified session.
     pub pairing_available: bool,
 }
@@ -250,6 +253,7 @@ impl BackendSnapshot {
             connected_tokens: self.connected_tokens,
             ready_tokens: self.ready_tokens,
             profiles,
+            mapping_pending_tokens: Vec::new(),
             pairing_available: self.pairing_available,
         }
     }
@@ -515,21 +519,51 @@ fn valid_profile(profile: &GuestProfile) -> bool {
 pub struct SetupService {
     backend: Box<dyn SetupBackend>,
     profiles: Mutex<Result<ProfileStore, String>>,
+    mapping_pending: Mutex<BTreeSet<String>>,
 }
 
 impl SetupService {
     /// Loads local labels and uses the supplied sole serial-session owner.
     pub fn new(directory: PathBuf, backend: Box<dyn SetupBackend>) -> Self {
-        let profiles = ProfileStore::load(directory).and_then(|store| {
-            for guest in &store.profiles {
-                backend
-                    .install_mapping(token_bytes(&guest.bond_token)?, mapping_profile(guest)?)?;
-            }
-            Ok(store)
-        });
+        let profiles = ProfileStore::load(directory);
+        let pending = profiles
+            .as_ref()
+            .map(|store| {
+                store
+                    .profiles
+                    .iter()
+                    .map(|guest| guest.bond_token.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             backend,
             profiles: Mutex::new(profiles),
+            mapping_pending: Mutex::new(pending),
+        }
+    }
+
+    fn reconcile_one(&self, pending: &mut BTreeSet<String>) {
+        let Some(token) = pending.iter().next().cloned() else {
+            return;
+        };
+        let profile = self.profiles.lock().ok().and_then(|guard| {
+            guard.as_ref().ok().and_then(|store| {
+                store
+                    .profiles
+                    .iter()
+                    .find(|guest| guest.bond_token == token)
+                    .cloned()
+            })
+        });
+        let Some(profile) = profile else {
+            pending.remove(&token);
+            return;
+        };
+        if let (Ok(bytes), Ok(mapping)) = (token_bytes(&token), mapping_profile(&profile))
+            && self.backend.install_mapping(bytes, mapping).is_ok()
+        {
+            pending.remove(&token);
         }
     }
 
@@ -544,15 +578,22 @@ impl SetupService {
     }
 
     pub(crate) fn snapshot(&self) -> Result<SetupSnapshot, String> {
+        let mut pending = self
+            .mapping_pending
+            .lock()
+            .map_err(|error| error.to_string())?;
+        self.reconcile_one(&mut pending);
         let backend = self.backend.snapshot()?;
         let guard = self.profiles.lock().map_err(|error| error.to_string())?;
         let profiles = guard.as_ref().map_err(Clone::clone)?.profiles.clone();
-        Ok(backend.into_setup_snapshot(profiles))
+        let mut snapshot = backend.into_setup_snapshot(profiles);
+        snapshot.mapping_pending_tokens = pending.iter().cloned().collect();
+        Ok(snapshot)
     }
 
     fn save_profile(&self, profile: GuestProfile) -> Result<(), String> {
-        let mapping = mapping_profile(&profile)?;
-        let token = token_bytes(&profile.bond_token)?;
+        mapping_profile(&profile)?;
+        token_bytes(&profile.bond_token)?;
         let known = self
             .profiles
             .lock()
@@ -571,12 +612,20 @@ impl SetupService {
         {
             return Err("Firmware has not reported this bond identity.".into());
         }
+        let mut pending = self
+            .mapping_pending
+            .lock()
+            .map_err(|error| error.to_string())?;
         let mut guard = self.profiles.lock().map_err(|error| error.to_string())?;
+        let token = profile.bond_token.clone();
         guard
             .as_mut()
             .map_err(|error| error.clone())?
             .save(profile)?;
-        self.backend.install_mapping(token, mapping)
+        pending.insert(token);
+        drop(guard);
+        self.reconcile_one(&mut pending);
+        Ok(())
     }
 
     fn forget_profile(&self, token: &str) -> Result<ForgetOutcome, String> {
@@ -616,6 +665,11 @@ impl SetupService {
             .as_mut()
             .map_err(|error| error.clone())?
             .remove(token)?;
+        drop(guard);
+        self.mapping_pending
+            .lock()
+            .map_err(|error| error.to_string())?
+            .remove(token);
         Ok(ForgetOutcome::Forgot)
     }
 }
@@ -1092,10 +1146,11 @@ mod tests {
         .unwrap();
         assert_eq!(installed.lock().unwrap().len(), 1);
         installed.lock().unwrap().clear();
-        let _restored = SetupService::new(
+        let restored = SetupService::new(
             directory.clone(),
             Box::new(MappingRecorder(installed.clone())),
         );
+        restored.snapshot().unwrap();
         let records = installed.lock().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -1104,6 +1159,58 @@ mod tests {
         );
         assert_eq!(records[0].1.preset[0].source[0].usage, 0xe3);
         drop(records);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    struct FlakyMappingBackend(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl SetupBackend for FlakyMappingBackend {
+        fn snapshot(&self) -> Result<BackendSnapshot, String> {
+            OneBondBackend.snapshot()
+        }
+
+        fn install_mapping(
+            &self,
+            _token: [u8; 16],
+            _profile: MappingProfile,
+        ) -> Result<(), String> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err("worker temporarily unavailable".into())
+            }
+        }
+    }
+
+    #[test]
+    fn transient_mapping_failure_keeps_saved_profiles_visible_and_retries() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-map-pending-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let available = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let service = SetupService::new(
+            directory.clone(),
+            Box::new(FlakyMappingBackend(available.clone())),
+        );
+        let token = "00112233445566778899aabbccddeeff";
+        service.save_profile(profile(token)).unwrap();
+        let pending = service.snapshot().unwrap();
+        assert_eq!(pending.profiles.len(), 1);
+        assert_eq!(pending.mapping_pending_tokens, vec![token]);
+        drop(service);
+        let restored = SetupService::new(
+            directory.clone(),
+            Box::new(FlakyMappingBackend(available.clone())),
+        );
+        assert_eq!(restored.snapshot().unwrap().profiles.len(), 1);
+        available.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            restored
+                .snapshot()
+                .unwrap()
+                .mapping_pending_tokens
+                .is_empty()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

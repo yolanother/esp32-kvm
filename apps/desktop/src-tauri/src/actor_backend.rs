@@ -9,7 +9,7 @@ use esp32_kvm_host_actor::{
 };
 use esp32_kvm_input_core::Action;
 use esp32_kvm_input_core::MappingProfile;
-use esp32_kvm_platform_windows::CaptureGate;
+use esp32_kvm_platform_windows::{CaptureEvent, CaptureGate};
 use esp32_kvm_usb_transport::{ProbeError, available_usb_ports, candidate_ports};
 use std::collections::BTreeMap;
 use std::sync::{
@@ -27,6 +27,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 pub struct ActorBackend {
     snapshot: Arc<Mutex<BackendSnapshot>>,
     commands: SyncSender<Command>,
+    gate: Arc<CaptureGate>,
 }
 
 enum CommandKind {
@@ -65,11 +66,17 @@ impl ActorBackend {
         let snapshot = Arc::new(Mutex::new(empty_snapshot(DeviceState::Missing)));
         let (commands, receiver) = mpsc::sync_channel(8);
         let worker_snapshot = Arc::clone(&snapshot);
+        let (gate, capture_events) = CaptureGate::new(64);
+        let worker_gate = Arc::clone(&gate);
         thread::Builder::new()
             .name("esp32-kvm-setup-actor".into())
-            .spawn(move || worker(receiver, worker_snapshot))
+            .spawn(move || worker(receiver, worker_snapshot, worker_gate, capture_events))
             .expect("failed to start setup actor thread");
-        Self { snapshot, commands }
+        Self {
+            snapshot,
+            commands,
+            gate,
+        }
     }
 
     fn request(&self, kind: CommandKind) -> Result<(), String> {
@@ -96,10 +103,14 @@ impl SetupBackend for ActorBackend {
     }
 
     fn install_mapping(&self, bond_token: [u8; 16], profile: MappingProfile) -> Result<(), String> {
-        self.request(CommandKind::SetMapping {
+        let result = self.request(CommandKind::SetMapping {
             bond_token,
             profile,
-        })
+        });
+        if result.is_err() {
+            self.gate.disarm();
+        }
+        result
     }
 
     fn begin(&self) -> Result<(), String> {
@@ -252,8 +263,12 @@ fn pair_error(error: PairingError) -> String {
     .to_owned()
 }
 
-fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
-    let (gate, capture_events) = CaptureGate::new(64);
+fn worker(
+    receiver: Receiver<Command>,
+    shared: Arc<Mutex<BackendSnapshot>>,
+    gate: Arc<CaptureGate>,
+    capture_events: Receiver<CaptureEvent>,
+) {
     let started = Instant::now();
     let mut actor: Option<HostActor<Box<dyn serialport::SerialPort>>> = None;
     let mut mappings = BTreeMap::<[u8; 16], MappingProfile>::new();
