@@ -64,6 +64,8 @@ The user requested device-local pairing to avoid delays from the host chat confi
 
 The user then reported that macOS showed ESP32 KVM as connected. A fresh HostActor session on COM7 independently reported `Local`, pairing `Closed`, no fault, one retained bond in the authoritative inventory, and slot 1 `ready=true` and `subscribed=true`. This establishes a persistent Mac bond and a live BLE HID notification subscription while Windows input remains local and disarmed. The exact successful pairing exchange was not captured. Touch input, actual HID key/pointer delivery, and retention across a further power cycle remain to be checked.
 
+With the user focused in a blank Mac TextEdit document, a bounded diagnostic used the production HostActor routing sequence to select guest 1. It reached `Guest(1)` with capture generation 4, submitted one synthetic set-one `A` press/release (USB HID usage 4), and requested Local immediately afterward. The actor returned `Local`, capture generation 0, and no fault. The user has not yet reported whether TextEdit displayed the character; that observation is required to confirm end-to-end BLE HID delivery.
+
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
