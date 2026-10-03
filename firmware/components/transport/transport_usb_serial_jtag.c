@@ -4,10 +4,12 @@
  * disconnect, ticks the fail-local lease, and queues NimBLE pairing events
  * for serialized minor-one STATUS. It refreshes only the authenticated
  * connected peer's opaque token through a bounded HID host-loop RPC. A
- * separate on-demand RPC supplies retained tokens for minor-two inventory. */
+ * separate on-demand RPC supplies retained tokens for minor-two inventory.
+ * The same serialized facts feed a fail-closed device screen projection. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "router_hid_bridge.h"
+#include "transport_display_status.h"
 #include "display.h"
 #include "hid_guest.h"
 #include "driver/usb_serial_jtag.h"
@@ -98,14 +100,9 @@ void kvm_transport_button_event(kvm_display_event_t event)
 
 static void publish_status(bool connected, bool guest_ready)
 {
-    kvm_display_status_t status = {
-        .usb_connected = connected,
-        .armed = router.armed,
-        .guest_ready = guest_ready,
-        .fault = router.fault,
-        .selected_slot = router.slot,
-        .generation = router.generation,
-    };
+    kvm_display_status_t status;
+    kvm_transport_display_status(&core, &router, connected, guest_ready,
+                                 (uint64_t)(esp_timer_get_time() / 1000), &status);
     kvm_display_post_status(&status);
 }
 
