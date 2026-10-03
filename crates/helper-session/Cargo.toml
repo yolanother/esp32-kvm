@@ -1,0 +1,10 @@
+# Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
+# Builds the pure optional-helper admission policy and its security/fault tests independently.
+[package]
+name = "esp32-kvm-helper-session"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+
+# This source-only leaf builds independently until the coordinator adds it to the root workspace.
+[workspace]
