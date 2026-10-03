@@ -8,6 +8,7 @@ import { exampleGuests } from "./preview-fixtures";
 import SetupWizard from "./SetupWizard";
 import ProfileEditor from "./ProfileEditor";
 import MappingPresets from "./MappingPresets";
+import LayoutEditor from "./LayoutEditor";
 import { mappingLabel } from "./mapping-presets";
 import { returnToHost, setupSnapshot, unavailableSnapshot } from "./setup-api";
 import { type SetupSnapshot } from "./setup-model";
@@ -50,17 +51,6 @@ function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEd
   </>;
 }
 
-/** Screen layout destination; preview geometry is deliberately non-operational. */
-function LayoutPage({ preview, headingRef }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null> }): JSX.Element {
-  return <>
-    <PageIntro title="Screen layout" description="Place systems and assign exposed host edges to guests." headingRef={headingRef} />
-    <div className="toolbar"><StatusPill>Layout unavailable</StatusPill><span className="muted">Host monitor detection is not connected yet.</span></div>
-    {preview ? <div className="layout-preview card" aria-label="Example monitor arrangement, not detected displays"><div className="monitor monitor--side"><span>EXAMPLE HOST</span><strong>Display 2</strong><small>Illustrative geometry</small></div><div className="monitor monitor--main"><span>EXAMPLE HOST</span><strong>Main display</strong><small>Illustrative right edge</small></div><span className="layout-arrow" aria-hidden="true">→</span><div className="monitor monitor--guest"><span>EXAMPLE GUEST</span><strong>MacBook</strong><small>Manual placeholder</small></div></div> : <div className="card empty-panel"><h2>No layout detected</h2><p>Detected monitor geometry and portal editing will appear when the Windows topology feature is connected.</p></div>}
-    {preview && <PreviewNotice />}
-    <div className="notice notice--warning"><strong>Standard BLE limit</strong><span>A guest keeps its existing cursor position. Return by a configured host shortcut when switching is available; automatic return needs the optional helper.</span></div>
-  </>;
-}
-
 const proposedShortcuts = [
   { action: "Next connected system", keys: ["Ctrl", "Alt", "F12"] },
   { action: "Previous connected system", keys: ["Ctrl", "Alt", "F11"] },
@@ -94,6 +84,7 @@ export default function App(): JSX.Element {
   const [setupOpen, setSetupOpen] = useState(false);
   const [editingToken, setEditingToken] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<SetupSnapshot>(unavailableSnapshot());
+  const [snapshotLoaded, setSnapshotLoaded] = useState(false);
   const [announcement, setAnnouncement] = useState<SwitchAnnouncement | null>(null);
   const lastSnapshot = useRef<SetupSnapshot | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -114,6 +105,7 @@ export default function App(): JSX.Element {
       if (change) setAnnouncement(change);
       lastSnapshot.current = next;
       setSnapshot(next);
+      setSnapshotLoaded(true);
     }
     void refresh();
     const timer = window.setInterval(() => { void refresh(); }, 2000);
@@ -176,7 +168,7 @@ export default function App(): JSX.Element {
       <div className="workspace">
         <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "No verified device"}</StatusPill></div></header>
         <div className="connection-status" role="status" aria-live="polite">{route.title}. {route.detail}</div>
-        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} />}{page === "layout" && <LayoutPage preview={preview} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
+        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} />}{page === "layout" && <LayoutEditor profiles={snapshot.profiles} profilesReady={snapshotLoaded} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
         <footer className="footer"><span>{snapshot.route.kind === "guest" ? "Guest route confirmed" : "Local control"} · Proposed return shortcut <KeyChord keys={["Ctrl", "Alt", "F10"]} /> is inactive</span><span>Emergency shortcut is not active yet</span></footer>
       </div>
     </div>

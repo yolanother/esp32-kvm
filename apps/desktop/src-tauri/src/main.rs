@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actor_backend;
+mod layout;
 mod setup;
 mod tray;
 
@@ -37,6 +38,7 @@ fn main() {
             setup::setup_forget_guest,
             setup::setup_test_controls,
             setup::dashboard_return_local,
+            layout::layout_validate_draft,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run ESP32 KVM desktop shell");

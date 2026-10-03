@@ -12,6 +12,7 @@ tauri = { version = "=2.12.0", features = ["tray-icon"] }
 esp32-kvm-input-core = { path = "../../../crates/input-core" }
 esp32-kvm-host-actor = { path = "../../../crates/host-actor" }
 esp32-kvm-platform-windows = { path = "../../../crates/platform-windows" }
+esp32-kvm-topology-core = { path = "../../../crates/topology-core" }
 esp32-kvm-usb-transport = { path = "../../../crates/usb-transport" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

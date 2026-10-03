@@ -738,6 +738,7 @@ dependencies = [
  "esp32-kvm-host-actor",
  "esp32-kvm-input-core",
  "esp32-kvm-platform-windows",
+ "esp32-kvm-topology-core",
  "esp32-kvm-usb-transport",
  "serde",
  "serde_json",
