@@ -50,6 +50,8 @@ The integrated follow-up image (`ebebc0e`, 934,176-byte app) adds connected-peer
 
 The retained-inventory image (`baaabe5`, 935,360-byte app) built with ESP-IDF 5.5.1 and flashed on COM7. Esptool verified hashes for the bootloader, app, partition table, and OTA data and issued a hard reset. An immediate host probe returned a transient COBS error; a retry without a manual power cycle opened a verified app session and reported `Local`, one slot, pairing closed, firmware `0.1.0-m1`, and no fault. Its protocol-minor-two `GET_BONDS` request returned an authoritative empty inventory (`Ok(0)`), observed at 2000 ms of host runtime. This verifies the new inventory path on an unpaired device, not pairing, forgetting a populated bond, or BLE HID output. COM7 remained present after the user's ordinary reconnect and at flash time.
 
+The next integrated image (935,712-byte app) uses the ESP-IDF descriptor as the sole USB-reported version source (`0.1.0-m1`) and projects serialized transport, pairing, and authenticated peer state into the device screen model. The panel driver remains disabled, so no visible screen output is expected. ESP-IDF linked the image; `idf.py flash` verified all four written regions on COM7. Its first immediate app probe again returned a transient COBS error; a retry, without manual power cycling, returned `Local`, one slot, pairing closed, firmware `0.1.0-m1`, no fault, and authoritative empty retained inventory at 2000 ms. Physical LCD/touch response, BLE pairing, HID output, and bond removal with a populated inventory remain untested.
+
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
