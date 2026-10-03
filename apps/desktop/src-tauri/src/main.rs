@@ -8,11 +8,13 @@ mod layout;
 mod setup;
 mod tray;
 
+use std::sync::Mutex;
 use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            app.manage(Mutex::new(layout::LayoutRuntime::default()));
             let directory = app.path().app_config_dir()?;
             app.manage(setup::SetupService::new(
                 directory,
@@ -39,6 +41,8 @@ fn main() {
             setup::setup_test_controls,
             setup::dashboard_return_local,
             layout::layout_validate_draft,
+            layout::layout_discover,
+            layout::layout_apply,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run ESP32 KVM desktop shell");

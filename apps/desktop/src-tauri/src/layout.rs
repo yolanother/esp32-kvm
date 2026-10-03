@@ -1,12 +1,16 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
-// Validates manual host-monitor layout drafts and dry-run portals against the
-// native topology core. It never enables crossing or infers guest geometry.
+// Validates manual layout drafts and atomically prepares exposed-edge portals
+// against discovered Windows monitors. Crossing stays inactive until capture owns it.
 
+use esp32_kvm_edge_policy::{CrossingConfig, CrossingPolicy};
+use esp32_kvm_platform_windows::{DisplayRecord, MonitorInventory, discover_monitors};
 use esp32_kvm_topology_core::{Edge, Monitor, Portal, PortalGraph, Rect, Rotation, Topology};
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use tauri::State;
 
 /// User-entered host rectangle for dry-run arrangement, not OS enumeration.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostDraft {
     /// Stable draft identifier.
@@ -30,7 +34,7 @@ pub struct HostDraft {
 }
 
 /// One directed host-to-saved-guest dry-run portal.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PortalDraft {
     /// Stable draft portal identifier.
@@ -77,6 +81,165 @@ pub struct LayoutPreview {
     pub activation_available: bool,
 }
 
+/// One authoritative Windows display returned to the editor.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedHost {
+    /// OS display device name, scoped to the current connected arrangement.
+    pub id: String,
+    /// Physical left and top coordinates, including negative origins.
+    pub x: i32,
+    /// Physical top coordinate.
+    pub y: i32,
+    /// Physical dimensions.
+    pub width: u32,
+    /// Physical height.
+    pub height: u32,
+    /// Effective horizontal DPI.
+    pub dpi_x: u32,
+    /// Effective vertical DPI.
+    pub dpi_y: u32,
+    /// Current orientation.
+    pub rotation: &'static str,
+    /// Windows primary display flag.
+    pub primary: bool,
+}
+
+/// Authoritative discovery and prepared-portal state; activation remains gated.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutStatus {
+    /// Monotonic native topology generation, absent until a successful enumeration.
+    pub generation: Option<u64>,
+    /// Validated detected host monitors.
+    pub hosts: Vec<DetectedHost>,
+    /// Number of portals prepared for the current generation.
+    pub applied_portals: usize,
+    /// False until the capture lifecycle owns edge observations and physical all-up.
+    pub activation_available: bool,
+    /// Exact reason crossing is unavailable or the OS snapshot failed.
+    pub reason: String,
+}
+
+/// Serializes native monitor replacement and edge-graph preparation.
+#[derive(Default)]
+pub struct LayoutRuntime {
+    inventory: MonitorInventory,
+    graph: Option<PortalGraph>,
+    policy: Option<CrossingPolicy>,
+    discovery_error: Option<String>,
+    topology_notice: Option<String>,
+}
+
+impl LayoutRuntime {
+    /// Replace a validated OS snapshot and discard prepared portals on any change.
+    pub fn refresh(&mut self, records: Vec<DisplayRecord>) -> Result<(), String> {
+        match self.inventory.update(records) {
+            Ok(changed) => {
+                self.discovery_error = None;
+                if changed {
+                    if self.graph.is_some() {
+                        self.topology_notice = Some("Windows display topology changed; prepared portals were invalidated. Copy detected monitors and apply again. Crossing remains disabled pending native capture.".into());
+                    }
+                    self.graph = None;
+                    self.policy = None;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.invalidate(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    /// Fail closed if Windows enumeration or validation cannot be trusted.
+    pub fn invalidate(&mut self, reason: String) {
+        self.graph = None;
+        self.policy = None;
+        self.discovery_error = Some(reason);
+        self.topology_notice = None;
+    }
+
+    /// Validates exact OS geometry and swaps the portal graph and edge policy together.
+    pub fn apply(
+        &mut self,
+        hosts: Vec<HostDraft>,
+        portals: Vec<PortalDraft>,
+    ) -> Result<LayoutStatus, String> {
+        if let Some(error) = &self.discovery_error {
+            return Err(error.clone());
+        }
+        let current = self
+            .inventory
+            .topology()
+            .ok_or("Windows monitors have not been discovered.")?;
+        let proposed = host_topology(hosts)?;
+        if proposed.monitors() != current.monitors() {
+            return Err("Draft host geometry, DPI, rotation, or identity differs from current Windows monitors. Refresh detected monitors before applying.".into());
+        }
+        let dwell_ms = portals
+            .first()
+            .map(|portal| portal.dwell_ms)
+            .unwrap_or_default();
+        if portals.iter().any(|portal| portal.dwell_ms != dwell_ms) {
+            return Err("All applied portals must use the same dwell until per-portal edge timing is supported.".into());
+        }
+        let graph = portal_graph(current, portals)?;
+        if graph.portals().is_empty() {
+            return Err("Add at least one exposed host-edge portal before applying.".into());
+        }
+        let policy = CrossingPolicy::new(CrossingConfig {
+            dwell_ms,
+            ..CrossingConfig::default()
+        })
+        .map_err(|error| format!("Edge policy configuration failed: {error:?}"))?;
+        self.graph = Some(graph);
+        self.policy = Some(policy);
+        self.topology_notice = None;
+        Ok(self.status())
+    }
+
+    /// Current discovery and prepared graph state for the UI.
+    pub fn status(&self) -> LayoutStatus {
+        let hosts = self
+            .inventory
+            .topology()
+            .map(|topology| {
+                topology
+                    .monitors()
+                    .iter()
+                    .map(|monitor| DetectedHost {
+                        id: monitor.id.clone(),
+                        x: monitor.rect.x,
+                        y: monitor.rect.y,
+                        width: monitor.rect.width,
+                        height: monitor.rect.height,
+                        dpi_x: monitor.dpi_x,
+                        dpi_y: monitor.dpi_y,
+                        rotation: rotation_name(monitor.rotation),
+                        primary: monitor.primary,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        LayoutStatus { generation: self.inventory.topology().map(Topology::generation), hosts,
+            applied_portals: if self.policy.is_some() { self.graph.as_ref().map_or(0, |graph| graph.portals().len()) } else { 0 },
+            activation_available: false,
+            reason: self.discovery_error.clone().or_else(|| self.topology_notice.clone()).unwrap_or_else(||
+                "Crossing awaits native capture lifecycle, physical all-up ledger, and actor edge routing.".into()) }
+    }
+}
+
+fn rotation_name(value: Rotation) -> &'static str {
+    match value {
+        Rotation::Deg0 => "deg0",
+        Rotation::Deg90 => "deg90",
+        Rotation::Deg180 => "deg180",
+        Rotation::Deg270 => "deg270",
+    }
+}
+
 fn rotation(value: &str) -> Result<Rotation, String> {
     match value {
         "deg0" => Ok(Rotation::Deg0),
@@ -111,6 +274,25 @@ pub fn validate_draft(
     hosts: Vec<HostDraft>,
     portals: Vec<PortalDraft>,
 ) -> Result<LayoutPreview, String> {
+    let topology = host_topology(hosts)?;
+    let graph = portal_graph(&topology, portals)?;
+    Ok(LayoutPreview {
+        segments: topology
+            .exposed_edges()
+            .into_iter()
+            .map(|segment| PreviewSegment {
+                monitor_id: segment.monitor_id,
+                edge: edge_name(segment.edge),
+                start: segment.start,
+                end: segment.end,
+            })
+            .collect(),
+        portal_count: graph.portals().len(),
+        activation_available: false,
+    })
+}
+
+fn host_topology(hosts: Vec<HostDraft>) -> Result<Topology, String> {
     let monitors = hosts
         .into_iter()
         .map(|draft| {
@@ -129,8 +311,10 @@ pub fn validate_draft(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let topology = Topology::new(monitors)
-        .map_err(|error| format!("Monitor geometry is invalid: {error:?}"))?;
+    Topology::new(monitors).map_err(|error| format!("Monitor geometry is invalid: {error:?}"))
+}
+
+fn portal_graph(topology: &Topology, portals: Vec<PortalDraft>) -> Result<PortalGraph, String> {
     let portals = portals
         .into_iter()
         .map(|draft| {
@@ -158,22 +342,46 @@ pub fn validate_draft(
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let graph = PortalGraph::new(&topology, portals)
-        .map_err(|error| format!("Portal must use a unique exposed edge segment: {error:?}"))?;
-    Ok(LayoutPreview {
-        segments: topology
-            .exposed_edges()
-            .into_iter()
-            .map(|segment| PreviewSegment {
-                monitor_id: segment.monitor_id,
-                edge: edge_name(segment.edge),
-                start: segment.start,
-                end: segment.end,
-            })
-            .collect(),
-        portal_count: graph.portals().len(),
-        activation_available: false,
-    })
+    PortalGraph::new(topology, portals)
+        .map_err(|error| format!("Portal must use a unique exposed edge segment: {error:?}"))
+}
+
+/// Re-enumerates Windows monitors and invalidates prepared portals on any change.
+#[tauri::command]
+pub fn layout_discover(state: State<'_, Mutex<LayoutRuntime>>) -> Result<LayoutStatus, String> {
+    let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+    let records = discover_monitors();
+    match records {
+        Ok(records) => {
+            state.refresh(records)?;
+            Ok(state.status())
+        }
+        Err(error) => {
+            state.invalidate(error.clone());
+            Err(error)
+        }
+    }
+}
+
+/// Prepares a validated portal graph against a fresh OS snapshot without enabling capture.
+#[tauri::command]
+pub fn layout_apply(
+    hosts: Vec<HostDraft>,
+    portals: Vec<PortalDraft>,
+    state: State<'_, Mutex<LayoutRuntime>>,
+) -> Result<LayoutStatus, String> {
+    let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+    let records = discover_monitors();
+    match records {
+        Ok(records) => {
+            state.refresh(records)?;
+            state.apply(hosts, portals)
+        }
+        Err(error) => {
+            state.invalidate(error.clone());
+            Err(error)
+        }
+    }
 }
 
 /// Runs the native dry-run validator without saving or activating any portal.
@@ -188,6 +396,88 @@ pub fn layout_validate_draft(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use esp32_kvm_platform_windows::DisplayRecord;
+
+    fn os_display(id: &str, x: i32, width: u32, dpi: u32, primary: bool) -> DisplayRecord {
+        DisplayRecord {
+            id: id.into(),
+            x,
+            y: -100,
+            width,
+            height: 900,
+            dpi_x: dpi,
+            dpi_y: dpi,
+            rotation_degrees: 0,
+            primary,
+        }
+    }
+
+    #[test]
+    fn applies_only_exact_os_geometry_and_invalidates_on_hotplug() {
+        let mut state = LayoutRuntime::default();
+        state
+            .refresh(vec![
+                os_display("west", -1600, 1600, 144, false),
+                os_display("main", 0, 1920, 96, true),
+            ])
+            .unwrap();
+        let hosts = vec![
+            HostDraft {
+                id: "west".into(),
+                x: -1600,
+                y: -100,
+                width: 1600,
+                height: 900,
+                dpi_x: 144,
+                dpi_y: 144,
+                rotation: "deg0".into(),
+                primary: false,
+            },
+            HostDraft {
+                id: "main".into(),
+                x: 0,
+                y: -100,
+                width: 1920,
+                height: 900,
+                dpi_x: 96,
+                dpi_y: 96,
+                rotation: "deg0".into(),
+                primary: true,
+            },
+        ];
+        let mut wrong = hosts.clone();
+        wrong[0].dpi_x = 96;
+        assert!(state.apply(wrong, vec![portal("left", -90, 790)]).is_err());
+        assert_eq!(state.status().applied_portals, 0);
+        let mut p = portal("left", -90, 790);
+        p.monitor_id = "west".into();
+        assert_eq!(
+            state
+                .apply(hosts.clone(), vec![p.clone()])
+                .unwrap()
+                .applied_portals,
+            1
+        );
+        let mut mixed = p.clone();
+        mixed.id = "second".into();
+        mixed.start = 790;
+        mixed.end = 799;
+        mixed.dwell_ms = 100;
+        assert!(state.apply(hosts.clone(), vec![p.clone(), mixed]).is_err());
+        assert_eq!(state.status().applied_portals, 1);
+        let mut hidden = p;
+        hidden.monitor_id = "missing".into();
+        assert!(state.apply(hosts, vec![hidden]).is_err());
+        assert_eq!(state.status().applied_portals, 1);
+        assert!(!state.status().activation_available);
+        let generation = state.status().generation.unwrap();
+        state
+            .refresh(vec![os_display("main", 0, 1920, 96, true)])
+            .unwrap();
+        assert_eq!(state.status().applied_portals, 0);
+        assert!(state.status().generation.unwrap() > generation);
+        assert!(state.status().reason.contains("invalidated"));
+    }
 
     fn host(id: &str, x: i32) -> HostDraft {
         HostDraft {

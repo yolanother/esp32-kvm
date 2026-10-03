@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 
+mod monitors;
+pub use monitors::{DisplayRecord, MonitorInventory, discover_monitors};
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]

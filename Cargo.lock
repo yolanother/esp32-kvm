@@ -735,6 +735,7 @@ dependencies = [
 name = "esp32-kvm-desktop"
 version = "0.1.0"
 dependencies = [
+ "esp32-kvm-edge-policy",
  "esp32-kvm-host-actor",
  "esp32-kvm-input-core",
  "esp32-kvm-platform-windows",
@@ -774,6 +775,7 @@ name = "esp32-kvm-platform-windows"
 version = "0.1.0"
 dependencies = [
  "esp32-kvm-input-core",
+ "esp32-kvm-topology-core",
  "windows-sys 0.61.2",
 ]
 

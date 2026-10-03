@@ -1,9 +1,11 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
-// Models explicitly manual monitor and guest placement drafts for the layout
-// editor. It previews exposed edges; native topology validation owns dry runs.
+// Models local layout drafts and authoritative Windows host snapshots for the
+// editor. It previews exposed edges; native topology validation owns application.
 
 /** Physical host rectangle entered by the user, never claimed as OS detected. */
-export interface HostDisplay { id: string; name: string; x: number; y: number; width: number; height: number; dpiX: number; dpiY: number; rotation: "deg0" | "deg90" | "deg180" | "deg270"; primary: boolean; source: "manual" }
+export interface HostDisplay { id: string; name: string; x: number; y: number; width: number; height: number; dpiX: number; dpiY: number; rotation: "deg0" | "deg90" | "deg180" | "deg270"; primary: boolean; source: "manual" | "windows" }
+/** One Windows-enumerated physical monitor returned by the native layout service. */
+export type DetectedHost = Omit<HostDisplay, "name" | "source">;
 /** Manual visual placeholder tied to one saved opaque guest identity. */
 export interface GuestDisplay { bondToken: string; name: string; x: number; y: number; width: number; height: number; source: "manual" }
 /** Exposed half-open physical interval on one host edge. */
@@ -16,6 +18,22 @@ export interface LayoutDraft { version: 1; hosts: HostDisplay[]; guests: GuestDi
 /** Starts with an explicitly manual host rectangle for editing. */
 export function defaultDraft(): LayoutDraft {
   return { version: 1, hosts: [{ id: "host-1", name: "Manual host display 1", x: 0, y: 0, width: 1920, height: 1080, dpiX: 96, dpiY: 96, rotation: "deg0", primary: true, source: "manual" }], guests: [], portals: [] };
+}
+
+/** Checks every host attribute that is safety relevant against the current OS snapshot. */
+export function matchesDetectedHosts(draft: LayoutDraft, detected: readonly DetectedHost[]): boolean {
+  return draft.hosts.length === detected.length && draft.hosts.every((host) => detected.some((item) =>
+    item.id === host.id && item.x === host.x && item.y === host.y && item.width === host.width &&
+    item.height === host.height && item.dpiX === host.dpiX && item.dpiY === host.dpiY &&
+    item.rotation === host.rotation && item.primary === host.primary));
+}
+
+/** Copies the authoritative Windows geometry into the local draft for review. */
+export function withDetectedHosts(draft: LayoutDraft, detected: readonly DetectedHost[]): LayoutDraft {
+  if (detected.length === 0) return draft;
+  const unchanged = matchesDetectedHosts(draft, detected);
+  return { ...draft, hosts: detected.map((item) => ({ ...item, name: item.id, source: "windows" })),
+    portals: unchanged ? draft.portals : [] };
 }
 
 /** Restores only a valid versioned local draft; corrupt data starts fresh. */

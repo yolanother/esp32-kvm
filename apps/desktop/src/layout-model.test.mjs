@@ -3,7 +3,20 @@
 // capability gating before a native monitor snapshot can activate crossing.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addGuestPlaceholders, defaultDraft, exposedSegments, moveDisplay, portalForSegment, restoreDraft, standardCapabilities, validDraft } from "./layout-model.ts";
+import { addGuestPlaceholders, defaultDraft, exposedSegments, moveDisplay, portalForSegment, restoreDraft, standardCapabilities, validDraft, withDetectedHosts, matchesDetectedHosts } from "./layout-model.ts";
+
+test("detected mixed-DPI monitors replace draft hosts and invalidate obsolete portals", () => {
+  const draft = defaultDraft();
+  const hosts = [{ id: "\\\\.\\DISPLAY2", x: -1600, y: -100, width: 1600, height: 900, dpiX: 144, dpiY: 144, rotation: "deg90", primary: false },
+    { id: "\\\\.\\DISPLAY1", x: 0, y: 0, width: 1920, height: 1080, dpiX: 96, dpiY: 96, rotation: "deg0", primary: true }];
+  const next = withDetectedHosts(draft, hosts);
+  assert.equal(next.hosts[0].source, "windows");
+  assert.equal(next.hosts[0].x, -1600);
+  assert.equal(next.hosts[0].dpiX, 144);
+  assert.equal(matchesDetectedHosts(next, hosts), true);
+  assert.equal(matchesDetectedHosts(moveDisplay(next, hosts[0].id, -1500, -100), hosts), false);
+  assert.equal(next.portals.length, 0);
+});
 
 test("adjacent host displays hide their shared seam and retain outer edges", () => {
   const draft = defaultDraft();
