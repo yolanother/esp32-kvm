@@ -41,6 +41,7 @@ fn main() {
             setup::setup_forget_guest,
             setup::setup_test_controls,
             setup::dashboard_return_local,
+            setup::dashboard_select_guest,
             layout::layout_validate_draft,
             layout::layout_discover,
             layout::layout_apply,

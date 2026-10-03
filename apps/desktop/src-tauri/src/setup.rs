@@ -361,6 +361,10 @@ pub trait SetupBackend: Send + Sync {
     fn return_local(&self) -> Result<(), String> {
         Err("Native local-return transport is unavailable.".into())
     }
+    /// Selects a currently ready guest by its opaque bond identity.
+    fn select_guest(&self, _bond_token: [u8; 16]) -> Result<(), String> {
+        Err("Native guest-selection transport is unavailable.".into())
+    }
     /// Disarms capture and closes the verified stream before app exit.
     fn release_for_exit(&self) -> Result<(), String> {
         Err("Native release transport is unavailable.".into())
@@ -694,6 +698,35 @@ impl SetupService {
         self.backend.return_local()
     }
 
+    /// Selects a saved, ready guest only while the verified route is local.
+    pub(crate) fn select_guest(&self, token: &str) -> Result<(), String> {
+        let bond_token = token_bytes(token)?;
+        let snapshot = self.snapshot()?;
+        if !matches!(snapshot.device, DeviceState::Verified { .. })
+            || !matches!(snapshot.route, RouteState::Local)
+        {
+            return Err("Guest selection requires verified local control.".into());
+        }
+        if !snapshot
+            .profiles
+            .iter()
+            .any(|profile| profile.bond_token == token)
+        {
+            return Err("Save a guest profile before selecting it.".into());
+        }
+        if snapshot
+            .mapping_pending_tokens
+            .iter()
+            .any(|pending| pending == token)
+        {
+            return Err("Guest mapping is still being installed.".into());
+        }
+        if !snapshot.ready_tokens.iter().any(|ready| ready == token) {
+            return Err("Guest is offline or HID is not ready.".into());
+        }
+        self.backend.select_guest(bond_token)
+    }
+
     /// Disarms and stops the actor for an explicit tray quit.
     pub(crate) fn release_for_exit(&self) -> Result<(), String> {
         self.backend.release_for_exit()
@@ -894,6 +927,15 @@ pub fn dashboard_return_local(service: State<'_, SetupService>) -> Result<(), St
     service.return_local()
 }
 
+/// Requests a saved ready guest by token; the serial actor chooses its live slot.
+#[tauri::command]
+pub fn dashboard_select_guest(
+    service: State<'_, SetupService>,
+    bond_token: String,
+) -> Result<(), String> {
+    service.select_guest(&bond_token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,6 +993,20 @@ mod tests {
         }
     }
 
+    struct ReadyBondBackend;
+    impl SetupBackend for ReadyBondBackend {
+        fn snapshot(&self) -> Result<BackendSnapshot, String> {
+            let mut snapshot = OneBondBackend.snapshot()?;
+            snapshot.ready_tokens = snapshot.bond_tokens.clone();
+            Ok(snapshot)
+        }
+
+        fn select_guest(&self, token: [u8; 16]) -> Result<(), String> {
+            assert_eq!(token, token_bytes("00112233445566778899aabbccddeeff")?);
+            Ok(())
+        }
+    }
+
     fn profile(token: &str) -> GuestProfile {
         GuestProfile {
             bond_token: token.into(),
@@ -975,6 +1031,21 @@ mod tests {
         let mut invalid = profile("00112233445566778899aabbccddeeff");
         invalid.name = " ".into();
         assert!(!valid_profile(&invalid));
+    }
+
+    #[test]
+    fn selection_requires_saved_ready_guest_and_forwards_opaque_token() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-selection-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let token = "00112233445566778899aabbccddeeff";
+        let ready = SetupService::new(directory.clone(), Box::new(ReadyBondBackend));
+        assert!(ready.select_guest(token).is_err());
+        ready.save_profile(profile(token)).unwrap();
+        ready.select_guest(token).unwrap();
+        let offline = SetupService::new(directory.clone(), Box::new(OneBondBackend));
+        assert!(offline.select_guest(token).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

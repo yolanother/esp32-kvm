@@ -8,7 +8,7 @@ import { describeRoute, overlayForTransition, systemChoices } from "./dashboard-
 const token = "abababababababababababababababab";
 const base = {
   device: { kind: "verified", boardId: "esp32-kvm-s3", firmwareVersion: null, maxBonds: 8, maxConnections: 1 },
-  pairing: { kind: "closed" }, bondTokens: [token], connectedTokens: [token], readyTokens: [token],
+  pairing: { kind: "closed" }, bondTokens: [token], connectedTokens: [token], readyTokens: [token], mappingPendingTokens: [],
   profiles: [{ bondToken: token, name: "Work Mac", os: "macos", profile: "unchanged" }], pairingAvailable: true,
 };
 
@@ -34,6 +34,16 @@ test("a connected peer without HID subscription stays distinct from ready", () =
   const waiting = systemChoices({ ...base, readyTokens: [], connectedTokens: [token], route: { kind: "local" } });
   assert.equal(waiting[0].state, "Connected");
   assert.equal(waiting[0].selectEnabled, false);
+});
+
+test("only a ready saved guest can be selected from an idle verified route", () => {
+  const local = { ...base, route: { kind: "local" }, mappingPendingTokens: [] };
+  assert.equal(systemChoices(local)[0].selectEnabled, true);
+  assert.equal(systemChoices({ ...local, readyTokens: [] })[0].selectEnabled, false);
+  assert.equal(systemChoices({ ...local, mappingPendingTokens: [token] })[0].selectEnabled, false);
+  assert.equal(systemChoices({ ...local, route: { kind: "switching" } })[0].selectEnabled, false);
+  assert.equal(systemChoices({ ...local, route: { kind: "pairing" } })[0].selectEnabled, false);
+  assert.equal(systemChoices({ ...local, route: { kind: "guest", slot: 1, bondToken: token } })[0].selectEnabled, false);
 });
 
 test("switch overlay appears only after a real route change and persists on loss", () => {

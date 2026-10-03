@@ -47,6 +47,9 @@ enum CommandKind {
         approved: bool,
     },
     Local,
+    Select {
+        token: [u8; 16],
+    },
     RefreshInventory,
     Forget {
         token: [u8; 16],
@@ -195,6 +198,10 @@ impl SetupBackend for ActorBackend {
 
     fn return_local(&self) -> Result<(), String> {
         self.request(CommandKind::Local)
+    }
+
+    fn select_guest(&self, bond_token: [u8; 16]) -> Result<(), String> {
+        self.request(CommandKind::Select { token: bond_token })
     }
 
     fn release_for_exit(&self) -> Result<(), String> {
@@ -358,6 +365,15 @@ fn forget_error(error: ForgetError) -> String {
     }
 }
 
+/// Resolves one HID-ready identity from the latest authoritative slot table.
+fn ready_slot(snapshot: &ActorSnapshot, token: &[u8; 16]) -> Option<u8> {
+    snapshot
+        .slots
+        .iter()
+        .find(|slot| &slot.bond_token == token && slot.ready && slot.subscribed)
+        .map(|slot| slot.slot)
+}
+
 fn worker(
     receiver: Receiver<Command>,
     shared: Arc<Mutex<BackendSnapshot>>,
@@ -425,6 +441,21 @@ fn worker(
                         CommandKind::Local => {
                             current.request(Action::Local, now_ms);
                             Ok(())
+                        }
+                        CommandKind::Select { token } => {
+                            let snapshot = current.setup_snapshot();
+                            if snapshot.state != HostState::Local {
+                                Err("Return to local control before selecting a guest.".into())
+                            } else if !capture_running || capture.fault().is_some() {
+                                Err("Native input capture is unavailable.".into())
+                            } else if !capture.physical_all_up() {
+                                Err("Release all physical keys and buttons, then retry.".into())
+                            } else if let Some(slot) = ready_slot(&snapshot, &token) {
+                                current.request(Action::Direct(slot), now_ms);
+                                Ok(())
+                            } else {
+                                Err("Guest is offline or HID is not ready.".into())
+                            }
                         }
                         CommandKind::RefreshInventory => current
                             .refresh_bond_inventory(now_ms)
@@ -684,6 +715,15 @@ mod tests {
         );
         assert!(!edge_gate(&actor(HostState::Guest(1)), true, true, false).local);
         assert!(!edge_gate(&actor(HostState::Local), false, true, false).capture_running);
+    }
+
+    #[test]
+    fn guest_selection_resolves_only_a_live_subscribed_token() {
+        let mut snapshot = actor(HostState::Local);
+        assert_eq!(ready_slot(&snapshot, &[0xab; 16]), Some(1));
+        assert_eq!(ready_slot(&snapshot, &[0xcd; 16]), None);
+        snapshot.slots[0].subscribed = false;
+        assert_eq!(ready_slot(&snapshot, &[0xab; 16]), None);
     }
 
     #[test]

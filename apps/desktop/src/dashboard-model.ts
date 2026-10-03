@@ -22,6 +22,7 @@ export interface SystemChoice {
 export interface SwitchAnnouncement {
   message: string;
   persistent: boolean;
+  title?: string;
 }
 
 /** Describes the active route without promoting a pending or ready guest. */
@@ -40,13 +41,14 @@ export function describeRoute(snapshot: SetupSnapshot): RouteDescription {
   }
 }
 
-/** Lists saved guests while keeping selection gated by native capture support. */
+/** Lists saved guests and exposes selection only for a ready, idle route. */
 export function systemChoices(snapshot: SetupSnapshot): SystemChoice[] {
   return snapshot.profiles.map((guest) => ({
     bondToken: guest.bondToken,
     name: guest.name,
     state: ({ active: "Controlling", ready: "Ready", connected: "Connected", offline: "Offline" } as const)[liveGuestState(guest.bondToken, snapshot)],
-    selectEnabled: false,
+    selectEnabled: snapshot.device.kind === "verified" && snapshot.route.kind === "local" &&
+      snapshot.readyTokens.includes(guest.bondToken) && !snapshot.mappingPendingTokens.includes(guest.bondToken),
   }));
 }
 
