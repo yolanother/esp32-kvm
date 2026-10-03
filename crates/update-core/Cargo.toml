@@ -1,0 +1,13 @@
+# Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
+# Declares the pure host-side firmware update preflight and recovery state-machine crate.
+[package]
+name = "esp32-kvm-update-core"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+esp32-kvm-protocol = { path = "../protocol" }
