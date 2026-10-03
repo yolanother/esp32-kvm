@@ -2,7 +2,8 @@
  * Sends independently encoded USB frames through transport and router with a
  * fake one-guest HID sink, checking command dispatch, ACKs, report fencing,
  * malformed input rejection, lease expiry, disconnect release, and the
- * connected guest's opaque STATUS token. */
+ * connected guest's opaque STATUS token, and a bounded retained inventory
+ * response tied to a minor-two request. */
 #include "transport_core.h"
 #include "router.h"
 #include <assert.h>
@@ -24,6 +25,16 @@ static bool pair_reply(void *context, uint32_t id, bool approved)
 { (void)context; pair_replies++; last_challenge = id; last_approval = approved; return true; }
 static bool pair_forget(void *context, const uint8_t token[16])
 { (void)context; forgets++; memcpy(forgotten_token, token, 16); return true; }
+static bool inventory_available = true;
+static bool pair_inventory(void *context, uint8_t tokens[8][16], uint8_t *count)
+{
+    (void)context;
+    if (!inventory_available) return false;
+    memset(tokens, 0, 8 * 16);
+    tokens[0][0] = 1; tokens[1][0] = 2;
+    *count = 2;
+    return true;
+}
 
 static uint32_t crc(const uint8_t *p, size_t n)
 {
@@ -214,6 +225,27 @@ int main(void)
                forget_payload, sizeof(forget_payload));
     expect_reply(KVM_MSG_NACK, KVM_ROUTER_PAUSED, router.generation);
     assert(forgets == 1);
+    const uint8_t hello2[] = {2, 0, 0, 0, 0, 0};
+    kvm_transport_core_bind_pairing(&core,
+        (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply,
+                                       pair_forget, pair_inventory}, NULL);
+    send_frame(&core, KVM_MSG_HELLO, 0, 50, 0, hello2, sizeof(hello2));
+    send_frame(&core, KVM_MSG_SESSION_OPEN, 7, 51, 0, open, sizeof(open));
+    const uint8_t inventory_version[] = {1};
+    send_frame(&core, KVM_MSG_GET_BONDS, 7, 52, router.generation,
+               inventory_version, sizeof(inventory_version));
+    size_t inventory_len = decode(decoded);
+    assert(decoded[3] == KVM_MSG_BONDS && decoded[24] == 1 && decoded[25] == 2);
+    assert(inventory_len == KVM_PROTOCOL_HEADER_LEN + 34 + 4);
+    assert(decoded[26] == 1 && decoded[42] == 2);
+    assert(decoded[16] == 52); /* Exact request sequence. */
+    inventory_available = false;
+    send_frame(&core, KVM_MSG_GET_BONDS, 7, 53, router.generation,
+               inventory_version, sizeof(inventory_version));
+    expect_reply(KVM_MSG_NACK, KVM_ROUTER_BUSY, router.generation);
+    send_frame(&core, KVM_MSG_GET_BONDS, 7, 54, router.generation - 1,
+               inventory_version, sizeof(inventory_version));
+    expect_reply(KVM_MSG_NACK, KVM_ROUTER_STALE_ROUTE, router.generation);
     const uint8_t bad_forget[] = {0xa1, 1, 0x4f,
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
     send_frame(&core, KVM_MSG_FORGET_BOND, 7, 39, router.generation,

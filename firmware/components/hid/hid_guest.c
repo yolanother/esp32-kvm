@@ -3,7 +3,8 @@
  * firmware integration. It advertises a composite HID service, requires an
  * authenticated bonded link and explicit pairing consent, while routing stays
  * disarmed until the host actor arms. A connected peer's opaque token is
- * resolved from the persisted pairing table only after link authentication. */
+ * resolved from the persisted pairing table only after link authentication.
+ * Retained inventory copies opaque tokens on the NimBLE host loop. */
 #include "hid_guest.h"
 
 #include <string.h>
@@ -372,6 +373,14 @@ bool hid_guest_current_bond_token(hid_token_t *output)
                          description.sec_state.authenticated;
     return hid_pairing_connected_token(&pairing, true, authenticated,
                                        peer_identity(&description.peer_id_addr), output);
+}
+
+bool hid_guest_retained_bonds(hid_token_t output[HID_PAIRING_MAX_BONDS], size_t *count)
+{
+    if (!output || !count) return false;
+    *count = 0;
+    memset(output, 0, HID_PAIRING_MAX_BONDS * sizeof(*output));
+    return started && hid_pairing_inventory(&pairing, output, count);
 }
 
 esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed)

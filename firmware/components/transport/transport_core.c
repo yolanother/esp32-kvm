@@ -4,7 +4,9 @@
  * stale frames have no HID effects and diagnostic text never enters CDC.
  * Minor-one pairing replies match the active challenge and bond deletion
  * accepts only an exact opaque token while routing is local and disarmed.
- * STATUS reports only the authenticated connected guest's cached token. */
+ * STATUS reports only the authenticated connected guest's cached token.
+ * Minor-two retained inventory is fetched through a bounded host-loop
+ * callback and never contains BLE addresses or key material. */
 #include "transport_core.h"
 #include <string.h>
 
@@ -206,6 +208,31 @@ static void send_status(kvm_transport_core_t *core, uint32_t seq)
     core->status_challenge_id = core->pairing_challenge_id;
 }
 
+static void send_bonds(kvm_transport_core_t *core, uint32_t seq)
+{
+    uint8_t tokens[8][16] = {{0}};
+    uint8_t count = 0;
+    bool valid = core->pairing_ops.inventory &&
+                 core->pairing_ops.inventory(core->pairing_context, tokens, &count) && count <= 8;
+    for (uint8_t i = 0; valid && i < count; ++i) {
+        bool nonzero = false;
+        for (size_t b = 0; b < 16; ++b) nonzero |= tokens[i][b] != 0;
+        if (!nonzero) valid = false;
+        for (uint8_t j = 0; j < i; ++j)
+            if (memcmp(tokens[i], tokens[j], 16) == 0) valid = false;
+    }
+    if (valid) {
+        uint8_t payload[2 + 8 * 16] = {1, count};
+        memcpy(payload + 2, tokens, (size_t)count * 16);
+        emit(core, KVM_MSG_BONDS, seq, payload, 2 + (size_t)count * 16);
+        memset(payload, 0, sizeof(payload));
+    } else {
+        core->router->last_result_generation = core->router->generation;
+        send_result(core, KVM_MSG_GET_BONDS, seq, KVM_ROUTER_BUSY);
+    }
+    memset(tokens, 0, sizeof(tokens));
+}
+
 static bool cbor_pair_reply(const uint8_t *p, size_t length, uint32_t *id, bool *approved)
 {
     if (length < 7 || p[0] != 0xa3 || p[1] != 1) return false;
@@ -326,6 +353,16 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
         emit(core, KVM_MSG_ACK, seq, ack, sizeof(ack));
     } else if (kind == KVM_MSG_GET_STATUS && core->session_open && payload_length == 0) {
         send_status(core, seq);
+    } else if (kind == KVM_MSG_GET_BONDS && core->session_open && core->router) {
+        kvm_router_t *r = core->router;
+        r->last_result_generation = r->generation;
+        if (core->minor < 2)
+            send_result(core, kind, seq, (kvm_router_result_t)8); /* UNSUPPORTED */
+        else if (payload_length != 1 || payload[0] != 1)
+            send_result(core, kind, seq, KVM_ROUTER_BAD_PAYLOAD);
+        else if (generation != r->generation)
+            send_result(core, kind, seq, KVM_ROUTER_STALE_ROUTE);
+        else send_bonds(core, seq);
     } else if (core->session_open && core->router) {
         kvm_router_t *r = core->router;
         kvm_router_result_t result = KVM_ROUTER_BAD_PAYLOAD;

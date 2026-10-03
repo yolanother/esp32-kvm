@@ -4,7 +4,8 @@
  * queues a disconnect; pairing commands use the same bounded host-loop bridge
  * and no HID or pairing state is read on the USB worker. Confirmed bond
  * deletion uses the same bounded bridge and preserves opaque token bytes.
- * Current-bond lookup copies only the token into the requesting worker. */
+ * Current-bond and retained inventory lookups copy only opaque tokens into
+ * the requesting worker; timeout output is cleared. */
 #include "hid_guest.h"
 #include "hid_guest_rpc.h"
 #include <string.h>
@@ -15,7 +16,7 @@
 #define RPC_TIMEOUT_MS 20u
 typedef enum { RPC_READY, RPC_ARM, RPC_RELEASE, RPC_KEYBOARD, RPC_MOUSE, RPC_CONSUMER,
                RPC_PAIR_BEGIN, RPC_PAIR_CANCEL, RPC_PAIR_REPLY, RPC_FORGET_BOND,
-               RPC_CURRENT_TOKEN } rpc_op_t;
+               RPC_CURRENT_TOKEN, RPC_INVENTORY } rpc_op_t;
 typedef struct { uint8_t buttons; int16_t dx, dy; int8_t wheel, pan; } mouse_args_t;
 typedef struct { uint32_t challenge_id; bool approved; } pair_reply_args_t;
 typedef struct {
@@ -37,6 +38,7 @@ typedef struct {
     pair_reply_args_t pair_reply;
     uint8_t forget_token[HID_PAIRING_TOKEN_LEN];
     hid_token_t current_token;
+    uint8_t inventory[1 + HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN];
 } rpc_state_t;
 static rpc_state_t rpc;
 
@@ -57,6 +59,7 @@ static void on_host(struct ble_npl_event *event)
                    (int32_t)(rpc.deadline - ble_npl_time_get()) > 0;
     rpc.result = false;
     memset(&rpc.current_token, 0, sizeof(rpc.current_token));
+    memset(rpc.inventory, 0, sizeof(rpc.inventory));
     if (execute) {
         hid_channel_t *channel = hid_gatt_channel();
         switch (rpc.operation) {
@@ -82,6 +85,17 @@ static void on_host(struct ble_npl_event *event)
         case RPC_CURRENT_TOKEN:
             rpc.result = hid_guest_current_bond_token(&rpc.current_token);
             break;
+        case RPC_INVENTORY: {
+            hid_token_t tokens[HID_PAIRING_MAX_BONDS];
+            size_t count = 0;
+            rpc.result = hid_guest_retained_bonds(tokens, &count);
+            if (rpc.result && count <= HID_PAIRING_MAX_BONDS) {
+                rpc.inventory[0] = (uint8_t)count;
+                memcpy(rpc.inventory + 1, tokens, count * HID_PAIRING_TOKEN_LEN);
+            } else rpc.result = false;
+            memset(tokens, 0, sizeof(tokens));
+            break;
+        }
         }
         if (channel->needs_disconnect && channel->connected)
             hid_guest_disconnect_current();
@@ -101,9 +115,10 @@ esp_err_t hid_guest_rpc_init(void)
     return ESP_OK;
 }
 
-static bool request(rpc_op_t operation, const void *payload, uint8_t token_output[HID_PAIRING_TOKEN_LEN])
+static bool request(rpc_op_t operation, const void *payload, uint8_t *output)
 {
-    if (token_output) memset(token_output, 0, HID_PAIRING_TOKEN_LEN);
+    size_t output_length = operation == RPC_INVENTORY ? sizeof(rpc.inventory) : HID_PAIRING_TOKEN_LEN;
+    if (output) memset(output, 0, output_length);
     if (!rpc.initialized ||
         ble_npl_mutex_pend(&rpc.mutex, 0) != BLE_NPL_OK) return false;
     if (rpc.busy) { ble_npl_mutex_release(&rpc.mutex); return false; }
@@ -132,9 +147,12 @@ static bool request(rpc_op_t operation, const void *payload, uint8_t token_outpu
         return false;
     }
     bool result = completed && rpc.result;
-    if (result && token_output && operation == RPC_CURRENT_TOKEN)
-        memcpy(token_output, rpc.current_token.bytes, HID_PAIRING_TOKEN_LEN);
+    if (result && output && operation == RPC_CURRENT_TOKEN)
+        memcpy(output, rpc.current_token.bytes, HID_PAIRING_TOKEN_LEN);
+    if (result && output && operation == RPC_INVENTORY)
+        memcpy(output, rpc.inventory, sizeof(rpc.inventory));
     memset(&rpc.current_token, 0, sizeof(rpc.current_token));
+    memset(rpc.inventory, 0, sizeof(rpc.inventory));
     if (!completed) {
         if (rpc.finished) rpc.busy = false;
     }
@@ -167,3 +185,18 @@ bool hid_guest_request_forget_bond(const uint8_t token[HID_PAIRING_TOKEN_LEN])
 { return token && request(RPC_FORGET_BOND, token, NULL); }
 bool hid_guest_request_current_bond_token(uint8_t output[HID_PAIRING_TOKEN_LEN])
 { return output && request(RPC_CURRENT_TOKEN, NULL, output); }
+bool hid_guest_request_retained_bonds(uint8_t output[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN],
+                                      uint8_t *count)
+{
+    if (!output || !count) return false;
+    memset(output, 0, HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN);
+    *count = 0;
+    uint8_t response[1 + HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN];
+    bool result = request(RPC_INVENTORY, NULL, response);
+    if (result && response[0] <= HID_PAIRING_MAX_BONDS) {
+        *count = response[0];
+        memcpy(output, response + 1, (size_t)*count * HID_PAIRING_TOKEN_LEN);
+    } else result = false;
+    memset(response, 0, sizeof(response));
+    return result;
+}

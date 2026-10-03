@@ -3,7 +3,8 @@
  * COBS frames, validates CRC32C and sessions, and dispatches authenticated
  * routing commands to a bound serialized router. Minor-one pairing controls
  * use bounded callbacks and STATUS events. STATUS exposes only a current
- * authenticated guest's opaque token; a USB CDC adapter owns I/O. */
+ * authenticated guest's opaque token. Minor two reads the retained opaque
+ * token inventory through a bounded callback; a USB CDC adapter owns I/O. */
 #ifndef ESP32_KVM_TRANSPORT_CORE_H
 #define ESP32_KVM_TRANSPORT_CORE_H
 
@@ -34,6 +35,8 @@ typedef struct {
     bool (*reply)(void *context, uint32_t challenge_id, bool approved);
     /** Forgets only the explicitly supplied opaque token. */
     bool (*forget)(void *context, const uint8_t token[16]);
+    /** Copies up to eight retained opaque tokens; false means unavailable. */
+    bool (*inventory)(void *context, uint8_t tokens[8][16], uint8_t *count);
 } kvm_transport_pairing_ops_t;
 
 /** Private stream and handshake state for one USB connection. */

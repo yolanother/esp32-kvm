@@ -3,7 +3,8 @@
  * One worker serializes transport and router calls, rotates the session on
  * disconnect, ticks the fail-local lease, and queues NimBLE pairing events
  * for serialized minor-one STATUS. It refreshes only the authenticated
- * connected peer's opaque token through a bounded HID host-loop RPC. */
+ * connected peer's opaque token through a bounded HID host-loop RPC. A
+ * separate on-demand RPC supplies retained tokens for minor-two inventory. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "router_hid_bridge.h"
@@ -45,6 +46,8 @@ static bool pair_reply(void *context, uint32_t id, bool approved)
 { (void)context; return hid_guest_request_pair_reply(id, approved); }
 static bool pair_forget(void *context, const uint8_t token[16])
 { (void)context; return hid_guest_request_forget_bond(token); }
+static bool pair_inventory(void *context, uint8_t tokens[8][16], uint8_t *count)
+{ (void)context; return hid_guest_request_retained_bonds(tokens, count); }
 
 static void pairing_event(const hid_guest_pairing_event_t *event, void *context)
 {
@@ -177,7 +180,8 @@ static void usb_worker(void *context)
                                           new_session(), send_binary, NULL);
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
             kvm_transport_core_bind_pairing(&core,
-                (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply, pair_forget}, NULL);
+                (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply,
+                                               pair_forget, pair_inventory}, NULL);
             kvm_transport_core_set_connected_token(&core, connected_token);
             was_connected = true;
         }

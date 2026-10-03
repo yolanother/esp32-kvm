@@ -1,7 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Exercises HID guest admission, numeric consent, authenticated bonding,
  * token persistence, bounded current-token lookup, disconnect clearing,
- * and deliberate removal with mocked NimBLE and NVS. */
+ * retained inventory, and deliberate removal with mocked NimBLE and NVS. */
 #include <assert.h>
 #include <string.h>
 #include "hid_guest.h"
@@ -180,6 +180,10 @@ int main(void)
     assert(sizeof(last_event.token.bytes) == 16 &&
            memcmp(last_event.token.bytes, zero_token.bytes, HID_PAIRING_TOKEN_LEN) != 0 && saved_size);
     hid_token_t token = last_event.token;
+    uint8_t retained[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN];
+    uint8_t retained_count = 0xff;
+    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(retained_count == 1 && memcmp(retained[0], token.bytes, 16) == 0);
     uint8_t current_token[16];
     assert(hid_guest_request_current_bond_token(current_token));
     assert(memcmp(current_token, token.bytes, sizeof(current_token)) == 0);
@@ -197,6 +201,8 @@ int main(void)
     gap_callback(&disconnect, NULL);
     assert(advertisements == 2 && !channel.connected);
     assert(last_event.type == HID_GUEST_DISCONNECTED);
+    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(retained_count == 1 && memcmp(retained[0], token.bytes, 16) == 0);
     memset(current_token, 0xa5, sizeof(current_token));
     assert(!hid_guest_request_current_bond_token(current_token));
     assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
@@ -209,6 +215,9 @@ int main(void)
     memset(current_token, 0xa5, sizeof(current_token));
     assert(!hid_guest_request_current_bond_token(current_token));
     assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
+    memset(retained, 0xa5, sizeof(retained)); retained_count = 0xff;
+    assert(!hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(retained_count == 0 && memcmp(retained, (uint8_t[128]){0}, 128) == 0);
     assert(!hid_guest_request_ready());
     assert(sent_reports == sent_before_timeout && host_queue.pending && host_queue.next);
     hold_host = false;
@@ -227,5 +236,7 @@ int main(void)
     assert(hid_guest_pairing_forget(token, false) != 0);
     assert(hid_guest_pairing_forget(token, true) == 0);
     assert(terminations == 5 && !channel.armed && channel.needs_disconnect);
+    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(retained_count == 0);
     return 0;
 }

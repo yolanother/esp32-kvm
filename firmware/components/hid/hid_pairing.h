@@ -2,7 +2,8 @@
  * Defines the portable, fail-closed HID pairing policy. The policy admits
  * known bond identities or new peers during an explicit 60-second window,
  * requires numeric confirmation, and keeps eight opaque bond tokens stable.
- * Connected-peer lookup exposes only a nonzero token after authentication. */
+ * Connected-peer lookup exposes only a nonzero token after authentication;
+ * inventory copies only bounded retained tokens. */
 #ifndef ESP32_KVM_HID_PAIRING_H
 #define ESP32_KVM_HID_PAIRING_H
 #include <stdbool.h>
@@ -60,6 +61,9 @@ bool hid_pairing_token(const hid_pairing_t *state, hid_peer_t peer, hid_token_t 
 /** Copies only the current authenticated peer's nonzero token; clears output on failure. */
 bool hid_pairing_connected_token(const hid_pairing_t *state, bool connected,
                                  bool authenticated, hid_peer_t peer, hid_token_t *out);
+/** Copies up to eight nonzero distinct retained tokens, never peer addresses. */
+bool hid_pairing_inventory(const hid_pairing_t *state,
+                           hid_token_t out[HID_PAIRING_MAX_BONDS], size_t *count);
 /** Forgets a token only after explicit confirmation. */
 bool hid_pairing_forget(hid_pairing_t *state, hid_token_t token, bool confirmed);
 

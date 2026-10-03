@@ -1,7 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Checks the portable HID pairing policy for timed admission, explicit numeric
  * confirmation, stable bond tokens, connected lookup, full capacity, and
- * deliberate forgetting. */
+ * deliberate forgetting, and bounded retained-token inventory. */
 #include <assert.h>
 #include <string.h>
 #include "hid_pairing.h"
@@ -63,11 +63,19 @@ int main(void)
     assert(!hid_pairing_admit(&state, peer(2), 80000));
     for (unsigned index = 2; index <= HID_PAIRING_MAX_BONDS; ++index)
         assert(hid_pairing_add_bond(&state, peer(index), token(index)));
+    hid_token_t retained[HID_PAIRING_MAX_BONDS];
+    size_t retained_count = 0;
+    assert(hid_pairing_inventory(&state, retained, &retained_count));
+    assert(retained_count == HID_PAIRING_MAX_BONDS);
+    for (size_t index = 0; index < retained_count; ++index)
+        assert(memcmp(retained[index].bytes, state.bonds[index].token.bytes, 16) == 0);
     assert(!hid_pairing_open(&state, 90000));
     assert(!hid_pairing_add_bond(&state, peer(9), token(9)));
     assert(!hid_pairing_forget(&state, token(1), false));
     assert(hid_pairing_token(&state, peer(1), &found));
     assert(hid_pairing_forget(&state, token(1), true));
+    assert(hid_pairing_inventory(&state, retained, &retained_count));
+    assert(retained_count == HID_PAIRING_MAX_BONDS - 1);
     assert(!hid_pairing_admit(&state, peer(1), 90000));
     assert(hid_pairing_open(&state, 90000));
     assert(hid_pairing_begin_challenge(&state, peer(9), 19, 0xabcdef01, 654321, 90000));

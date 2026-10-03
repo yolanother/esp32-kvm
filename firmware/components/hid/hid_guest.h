@@ -3,7 +3,8 @@
  * main remains disarmed; callers must verify board recovery and explicitly
  * start this service before it can advertise or accept a guest. It also
  * exposes bounded NimBLE host-loop pairing requests and short status events.
- * Connected-peer STATUS lookup exposes only its stable opaque bond token. */
+ * Connected-peer STATUS lookup exposes only its stable opaque bond token;
+ * retained inventory reads use the same bounded host-loop bridge. */
 #ifndef ESP32_KVM_HID_GUEST_H
 #define ESP32_KVM_HID_GUEST_H
 
@@ -52,6 +53,8 @@ void hid_guest_pairing_snapshot(hid_pairing_t *output);
 /** Looks up the current authenticated connection's opaque token on the NimBLE host loop.
  * Clears output and returns false for unbound, disconnected, or unauthenticated peers. */
 bool hid_guest_current_bond_token(hid_token_t *output);
+/** Copies retained opaque tokens only; call on the NimBLE host thread. */
+bool hid_guest_retained_bonds(hid_token_t output[HID_PAIRING_MAX_BONDS], size_t *count);
 /** Removes one bond only after explicit confirmation on the host thread. */
 esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed);
 /** Disarms and terminates the current guest after uncertain all-up delivery.
@@ -82,6 +85,10 @@ bool hid_guest_request_pair_reply(uint32_t challenge_id, bool approved);
 /** Retrieves only a connected authenticated peer's opaque token through a bounded RPC.
  * Always clears output on failure; never returns BLE addresses or key material. */
 bool hid_guest_request_current_bond_token(uint8_t output[HID_PAIRING_TOKEN_LEN]);
+/** Copies up to eight retained tokens within a bounded NimBLE host-loop request.
+ * Clears output and count on failure; an empty successful inventory is authoritative. */
+bool hid_guest_request_retained_bonds(uint8_t output[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN],
+                                      uint8_t *count);
 /** Forgets one confirmed opaque bond token on the NimBLE host loop. */
 bool hid_guest_request_forget_bond(const uint8_t token[HID_PAIRING_TOKEN_LEN]);
 
