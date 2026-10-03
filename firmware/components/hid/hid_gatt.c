@@ -28,6 +28,7 @@ enum attribute {
     ATTR_MOUSE_REFERENCE,
     ATTR_CONSUMER_REFERENCE,
     ATTR_LED_REFERENCE,
+    ATTR_BATTERY_REFERENCE,
     ATTR_BATTERY_LEVEL,
     ATTR_PNP_ID
 };
@@ -63,12 +64,18 @@ static struct ble_gatt_dsc_def led_reference[] = {
      .access_cb = access_attribute, .arg = (void *)ATTR_LED_REFERENCE},
     {0}
 };
+static struct ble_gatt_dsc_def report_map_reference[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2907), .att_flags = BLE_ATT_F_READ,
+     .access_cb = access_attribute, .arg = (void *)ATTR_BATTERY_REFERENCE},
+    {0}
+};
 
 static const struct ble_gatt_chr_def characteristics[] = {
     {.uuid = BLE_UUID16_DECLARE(0x2a4a), .access_cb = access_attribute,
      .arg = (void *)ATTR_HID_INFO, .flags = BLE_GATT_CHR_F_READ},
     {.uuid = BLE_UUID16_DECLARE(0x2a4b), .access_cb = access_attribute,
-     .arg = (void *)ATTR_REPORT_MAP, .flags = BLE_GATT_CHR_F_READ},
+     .arg = (void *)ATTR_REPORT_MAP, .descriptors = report_map_reference,
+     .flags = BLE_GATT_CHR_F_READ},
     {.uuid = BLE_UUID16_DECLARE(0x2a4c), .access_cb = access_attribute,
      .arg = (void *)ATTR_CONTROL_POINT,
      .flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC},
@@ -121,9 +128,11 @@ static const struct ble_gatt_chr_def device_information_characteristics[] = {
     {0}
 };
 
+static const struct ble_gatt_svc_def services[];
+static const struct ble_gatt_svc_def *battery_include[] = {&services[1], NULL};
 static const struct ble_gatt_svc_def services[] = {
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x1812),
-     .characteristics = characteristics},
+     .includes = battery_include, .characteristics = characteristics},
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x180f),
      .characteristics = battery_characteristics},
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x180a),
@@ -144,6 +153,7 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     static const uint8_t mouse_ref[] = {HID_REPORT_MOUSE, 1};
     static const uint8_t consumer_ref[] = {HID_REPORT_CONSUMER, 1};
     static const uint8_t led_ref[] = {HID_REPORT_KEYBOARD, 2};
+    static const uint8_t battery_ref[] = {0x19, 0x2a};
     /* The USB-powered board has no battery to drain; report available power. */
     static const uint8_t usb_power_level = 100;
     /* Development board's USB-IF VID:PID, already reported by its native USB
@@ -179,6 +189,7 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     case ATTR_MOUSE_REFERENCE: return append(context, mouse_ref, sizeof(mouse_ref));
     case ATTR_CONSUMER_REFERENCE: return append(context, consumer_ref, sizeof(consumer_ref));
     case ATTR_LED_REFERENCE: return append(context, led_ref, sizeof(led_ref));
+    case ATTR_BATTERY_REFERENCE: return append(context, battery_ref, sizeof(battery_ref));
     case ATTR_BATTERY_LEVEL: return append(context, &usb_power_level, 1);
     case ATTR_PNP_ID: return append(context, pnp_id, sizeof(pnp_id));
     default: return BLE_ATT_ERR_UNLIKELY;
@@ -214,6 +225,7 @@ static int access_attribute(uint16_t connection_handle, uint16_t attribute_handl
     if (attribute != ATTR_HID_INFO && attribute != ATTR_REPORT_MAP &&
         attribute != ATTR_KEYBOARD_REFERENCE && attribute != ATTR_MOUSE_REFERENCE &&
         attribute != ATTR_CONSUMER_REFERENCE && attribute != ATTR_LED_REFERENCE &&
+        attribute != ATTR_BATTERY_REFERENCE &&
         attribute != ATTR_BATTERY_LEVEL && attribute != ATTR_PNP_ID &&
         (!channel || !channel->encrypted))
         return BLE_ATT_ERR_INSUFFICIENT_ENC;
