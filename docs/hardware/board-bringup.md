@@ -46,6 +46,8 @@ The first project firmware image was flashed with ESP-IDF 5.5.1 at 460800 baud. 
 
 After the user unplugged USB and reconnected without BOOT, COM7 returned with a blank display. The initial host HELLO still timed out, and esptool's hard reset and ROM `run` left the port silent or stalled. After a second ordinary power cycle, a no-reset ROM command received no serial response, while the app returned a framed CAPS response. Host `discover_system` then completed HELLO/CAPS/SESSION_OPEN three successive times: firmware `0.1.0-m1`, protocol minor 1, one advertised live guest slot, eight bond slots. A native `HostActor::connect_system` check polled STATUS for two seconds and reported `Local`, one slot, pairing closed, and no fault without arming capture. The first timeout's exact cause is not established; boot transition timing or the intervening ROM commands may have contributed. This proves USB protocol discovery and disarmed STATUS on the current firmware, not BLE routing, pairing, or touch.
 
+The integrated follow-up image (`ebebc0e`, 934,176-byte app) adds connected-peer token handling, bond removal routing, and a screen-state renderer; panel startup remains disabled. `idf.py -C firmware -p COM7 -b 460800 flash` exited 0 and verified hashes of all four written regions. The first immediate host-actor probe returned a COBS framing error during reset. A retry without a further flash returned `Local`, one slot, pairing closed, and no fault. No BLE guest was paired in this check, so the connected token and bond removal paths remain source-tested only.
+
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
