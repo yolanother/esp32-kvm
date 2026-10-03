@@ -8,6 +8,8 @@ final class BLEProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var central: CBCentralManager!
     private var target: CBPeripheral?
     private let hid = CBUUID(string: "1812")
+    private let battery = CBUUID(string: "180F")
+    private let pairViaBattery = CommandLine.arguments.contains("--pair-via-battery")
     private let deadline = DispatchTime.now() + .seconds(90)
     private var pendingServices = 0
     private var pendingReads = 0
@@ -90,7 +92,12 @@ final class BLEProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
         for characteristic in service.characteristics ?? [] {
             print("Characteristic \(service.uuid)/\(characteristic.uuid) properties=\(characteristic.properties.rawValue)")
-            if service.uuid == hid &&
+            if pairViaBattery && service.uuid == battery && characteristic.uuid == CBUUID(string: "2A19") &&
+                characteristic.properties.contains(.read) {
+                pendingReads += 1
+                print("Reading protected Battery Level to request BLE pairing")
+                peripheral.readValue(for: characteristic)
+            } else if !pairViaBattery && service.uuid == hid &&
                 ["2A4A", "2A4B", "2A4D", "2A4E"].contains(characteristic.uuid.uuidString.uppercased()) &&
                 characteristic.properties.contains(.read) {
                 pendingReads += 1

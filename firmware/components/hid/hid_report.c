@@ -18,6 +18,7 @@ const uint8_t hid_report_map[] = {
     0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
     0x75, 0x08, 0x95, 0x06, 0x81, 0x00, 0xc0,
 
+#ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
     /* Mouse: five buttons, signed 16-bit X/Y, signed 8-bit wheel/pan. */
     0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, HID_REPORT_MOUSE,
     0x09, 0x01, 0xa1, 0x00,
@@ -37,6 +38,7 @@ const uint8_t hid_report_map[] = {
     0x19, 0x00, 0x2a, 0xff, 0x03,
     0x15, 0x00, 0x27, 0xff, 0xff, 0x00, 0x00,
     0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xc0
+#endif
 };
 
 const size_t hid_report_map_len = sizeof(hid_report_map);
@@ -45,11 +47,19 @@ static bool ready(const hid_channel_t *channel)
 {
     if (!channel->connected || !channel->encrypted || channel->needs_disconnect) return false;
     if (channel->protocol_mode == 0)
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+        return channel->subscribed[HID_REPORT_BOOT_KEYBOARD];
+#else
         return channel->subscribed[HID_REPORT_BOOT_KEYBOARD] &&
                channel->subscribed[HID_REPORT_BOOT_MOUSE];
+#endif
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    return channel->subscribed[HID_REPORT_KEYBOARD];
+#else
     return channel->subscribed[HID_REPORT_KEYBOARD] &&
            channel->subscribed[HID_REPORT_MOUSE] &&
            channel->subscribed[HID_REPORT_CONSUMER];
+#endif
 }
 
 static bool send_report(hid_channel_t *channel, uint8_t id, const uint8_t *data, size_t size)
@@ -68,10 +78,15 @@ static bool all_up(hid_channel_t *channel)
     bool boot = channel->protocol_mode == 0;
     bool keyboard_ok = send_report(channel, boot ? HID_REPORT_BOOT_KEYBOARD : HID_REPORT_KEYBOARD,
                                    keyboard, sizeof(keyboard));
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    bool mouse_ok = true;
+    bool consumer_ok = true;
+#else
     bool mouse_ok = send_report(channel, boot ? HID_REPORT_BOOT_MOUSE : HID_REPORT_MOUSE,
                                 mouse, boot ? 3 : sizeof(mouse));
     bool consumer_ok = boot || send_report(channel, HID_REPORT_CONSUMER, consumer,
                                            sizeof(consumer));
+#endif
     memset(channel->keyboard, 0, sizeof(channel->keyboard));
     channel->mouse_buttons = 0;
     channel->consumer_usage = 0;

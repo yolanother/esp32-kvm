@@ -49,6 +49,7 @@ static struct ble_gatt_dsc_def keyboard_reference[] = {
      .access_cb = access_attribute, .arg = (void *)ATTR_KEYBOARD_REFERENCE},
     {0}
 };
+#ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
 static struct ble_gatt_dsc_def mouse_reference[] = {
     {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
      .access_cb = access_attribute, .arg = (void *)ATTR_MOUSE_REFERENCE},
@@ -59,6 +60,7 @@ static struct ble_gatt_dsc_def consumer_reference[] = {
      .access_cb = access_attribute, .arg = (void *)ATTR_CONSUMER_REFERENCE},
     {0}
 };
+#endif
 static struct ble_gatt_dsc_def led_reference[] = {
     {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
      .access_cb = access_attribute, .arg = (void *)ATTR_LED_REFERENCE},
@@ -87,6 +89,7 @@ static const struct ble_gatt_chr_def characteristics[] = {
      .arg = (void *)ATTR_KEYBOARD_INPUT, .descriptors = keyboard_reference,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
      .val_handle = &keyboard_handle},
+#ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
     {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
      .arg = (void *)ATTR_MOUSE_INPUT, .descriptors = mouse_reference,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
@@ -95,6 +98,7 @@ static const struct ble_gatt_chr_def characteristics[] = {
      .arg = (void *)ATTR_CONSUMER_INPUT, .descriptors = consumer_reference,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
      .val_handle = &consumer_handle},
+#endif
     {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
      .arg = (void *)ATTR_KEYBOARD_OUTPUT, .descriptors = led_reference,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
@@ -108,17 +112,23 @@ static const struct ble_gatt_chr_def characteristics[] = {
      .arg = (void *)ATTR_BOOT_KEYBOARD_OUTPUT,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
               BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC},
+#ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
     {.uuid = BLE_UUID16_DECLARE(0x2a33), .access_cb = access_attribute,
      .arg = (void *)ATTR_BOOT_MOUSE_INPUT,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
      .val_handle = &boot_mouse_handle},
+#endif
     {0}
 };
 
 static const struct ble_gatt_chr_def battery_characteristics[] = {
     {.uuid = BLE_UUID16_DECLARE(0x2a19), .access_cb = access_attribute,
      .arg = (void *)ATTR_BATTERY_LEVEL,
-     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY},
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+              | BLE_GATT_CHR_F_READ_ENC
+#endif
+    },
     {0}
 };
 

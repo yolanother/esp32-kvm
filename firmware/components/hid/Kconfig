@@ -1,0 +1,6 @@
+config KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    bool "Expose keyboard-only HID for host compatibility diagnosis"
+    default n
+    help
+        Temporarily remove mouse and consumer reports and characteristics to
+        isolate host HID registration failures. This mode is not a KVM release.
