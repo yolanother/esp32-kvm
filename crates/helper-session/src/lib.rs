@@ -5,6 +5,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod enrollment;
+pub mod wire;
+
 /// Maximum accepted age of edge telemetry in milliseconds.
 pub const MAX_TELEMETRY_AGE_MS: u64 = 250;
 /// Maximum accepted remote clock lead in milliseconds.
@@ -58,6 +61,14 @@ impl TrustedBinding {
             min_version,
             max_version,
         })
+    }
+
+    pub(crate) fn helper_identity(&self) -> [u8; 32] {
+        self.helper_identity
+    }
+
+    pub(crate) fn min_version(&self) -> u16 {
+        self.min_version
     }
 }
 
@@ -147,6 +158,7 @@ pub enum Reject {
 pub struct HelperSession {
     profile_id: u128,
     session_id: [u8; 16],
+    protocol_version: u16,
     last_sequence: Option<u64>,
     last_timestamp_ms: Option<u64>,
     open: bool,
@@ -175,6 +187,7 @@ impl HelperSession {
         Ok(Self {
             profile_id: binding.profile_id,
             session_id: channel.session_id(),
+            protocol_version: channel.protocol_version(),
             last_sequence: None,
             last_timestamp_ms: None,
             open: true,
