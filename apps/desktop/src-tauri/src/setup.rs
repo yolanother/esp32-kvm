@@ -598,9 +598,10 @@ impl SetupService {
         {
             return Err("Return locally with a verified device before forgetting this guest; the profile was kept.".into());
         }
-        if before.bond_tokens.iter().any(|bond| bond == token) {
-            self.backend.forget_bond(token)?;
+        if !before.bond_tokens.iter().any(|bond| bond == token) {
+            return Err("This guest is absent from live slots; retained firmware bonds are not inventoried, so the local profile was kept.".into());
         }
+        self.backend.forget_bond(token)?;
         let after = self.backend.snapshot()?;
         if !matches!(after.device, DeviceState::Verified { .. })
             || !matches!(after.route, RouteState::Local)
@@ -988,6 +989,30 @@ mod tests {
                 .profiles
                 .is_empty()
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn offline_bond_missing_from_live_slots_never_deletes_local_profile() {
+        let directory = std::env::temp_dir().join(format!(
+            "esp32-kvm-offline-bond-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let token = "00112233445566778899aabbccddeeff";
+        SetupService::new(directory.clone(), Box::new(OneBondBackend))
+            .save_profile(profile(token))
+            .unwrap();
+        // Live STATUS contains no slot for this guest, but firmware may still retain its bond.
+        let service = SetupService::new(
+            directory.clone(),
+            Box::new(ConfirmedForgetBackend {
+                present: std::sync::atomic::AtomicBool::new(false),
+                acknowledge: true,
+            }),
+        );
+        assert!(service.forget_profile(token).is_err());
+        assert_eq!(service.snapshot().unwrap().profiles.len(), 1);
         fs::remove_dir_all(directory).unwrap();
     }
 

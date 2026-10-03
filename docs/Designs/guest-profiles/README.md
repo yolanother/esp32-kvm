@@ -35,8 +35,10 @@ Forget is an explicitly confirmed, retry-safe two-part operation. The host
 requires a verified local device session. If firmware still reports the
 bond, the backend must send `FORGET_BOND` and wait for ACK plus a fresh STATUS
 without that token. Only then does the host remove the local profile. A
-failed request retains the profile; a retry after firmware removal finishes
-local cleanup. Repeating a completed request returns `already_absent`.
+failed request retains the profile. A guest absent from live STATUS slots
+also keeps its profile because those slots do not inventory every retained
+firmware bond. Offline deletion awaits an authoritative bond inventory.
+Repeating a completed request returns `already_absent`.
 The host actor does not yet expose `FORGET_BOND`, so live forget is gated and
 the UI reports that precise failure. No local-only deletion is offered.
 

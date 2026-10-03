@@ -3,7 +3,7 @@
 // offline profiles to live connections. Forget waits for firmware confirmation.
 import { useEffect, useRef, useState, type FormEvent, type JSX, type KeyboardEvent } from "react";
 import { forgetGuestProfile, saveGuestProfile } from "./setup-api";
-import { validDirectShortcut, validGuestName, type GuestProfile, type SetupSnapshot } from "./setup-model";
+import { canForgetLiveGuest, validDirectShortcut, validGuestName, type GuestProfile, type SetupSnapshot } from "./setup-model";
 
 /** Keyboard-accessible editor for a previously firmware-proven bond token. */
 export default function ProfileEditor({ guest, snapshot, onClose, onChanged }: {
@@ -46,7 +46,7 @@ export default function ProfileEditor({ guest, snapshot, onClose, onChanged }: {
     finally { setBusy(false); }
   }
 
-  const canForget = snapshot.device.kind === "verified" && snapshot.route.kind === "local";
+  const canForget = canForgetLiveGuest(snapshot, guest.bondToken);
   return <section className="profile-editor card" aria-labelledby="profile-title" onKeyDown={escape}>
     <div className="card-heading"><div><p className="eyebrow">SAVED GUEST</p><h2 id="profile-title" ref={heading} tabIndex={-1}>Edit {guest.name}</h2></div><button type="button" onClick={onClose}>Close</button></div>
     <p>A saved name and preference stay on this computer. Editing them does not connect or select the guest.</p>
@@ -60,7 +60,7 @@ export default function ProfileEditor({ guest, snapshot, onClose, onChanged }: {
     </form>
     <div className="profile-danger"><h3>Forget this guest</h3><p>The device bond and local name must both be removed. The name is kept if firmware cannot confirm bond removal.</p>
       {!confirmForget ? <button type="button" onClick={() => setConfirmForget(true)} disabled={busy || !canForget}>Review forget request</button> : <div className="notice notice--warning" role="alert"><span>Forget {guest.name} on the device and this computer?</span><button type="button" onClick={() => setConfirmForget(false)} disabled={busy}>Cancel</button><button type="button" onClick={() => { void forget(); }} disabled={busy}>Confirm forget</button></div>}
-      {!canForget && <p className="small muted">Connect a verified device and return locally before forgetting a bond.</p>}
+      {!canForget && <p className="small muted">Forget requires this guest in a live device slot and a verified local route. Offline retained bonds cannot be inventoried yet.</p>}
     </div>
     {error && <div className="notice notice--warning" role="alert">{error}</div>}
   </section>;

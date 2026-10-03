@@ -3,7 +3,7 @@
 // completion requirements before the pairing wizard is connected to hardware.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canBeginPairing, canFinishSetup, countdownSeconds, liveGuestState, newBondToken, profileState, validDirectShortcut, validGuestName } from "./setup-model.ts";
+import { canBeginPairing, canFinishSetup, canForgetLiveGuest, countdownSeconds, liveGuestState, newBondToken, profileState, validDirectShortcut, validGuestName } from "./setup-model.ts";
 
 const verified = { kind: "verified", boardId: "esp32-kvm-s3", firmwareVersion: "0.1.0-m1", maxBonds: 8, maxConnections: 1 };
 const token = "00112233445566778899aabbccddeeff";
@@ -62,4 +62,12 @@ test("optional direct shortcut rejects unbounded or malformed values", () => {
   assert.equal(validDirectShortcut("Ctrl+Alt+1"), true);
   assert.equal(validDirectShortcut("Ctrl Alt 1"), false);
   assert.equal(validDirectShortcut("x".repeat(65)), false);
+});
+
+test("offline bond absence from live slots cannot enable destructive forget", () => {
+  const token = "ab".repeat(16);
+  const snapshot = { device: { kind: "verified" }, route: { kind: "local" }, bondTokens: [] };
+  assert.equal(canForgetLiveGuest(snapshot, token), false);
+  assert.equal(canForgetLiveGuest({ ...snapshot, bondTokens: [token] }, token), true);
+  assert.equal(canForgetLiveGuest({ ...snapshot, route: { kind: "guest" }, bondTokens: [token] }, token), false);
 });

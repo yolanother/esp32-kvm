@@ -83,6 +83,11 @@ export function liveGuestState(token: string, snapshot: Pick<SetupSnapshot, "dev
   return "offline";
 }
 
+/** Allows bond removal only for a live slot on a verified local session. */
+export function canForgetLiveGuest(snapshot: Pick<SetupSnapshot, "device" | "route" | "bondTokens">, token: string): boolean {
+  return snapshot.device.kind === "verified" && snapshot.route.kind === "local" && snapshot.bondTokens.includes(token);
+}
+
 /** Selects only an identity first reported after the user's pairing request. */
 export function newBondToken(previous: readonly string[], current: readonly string[], attempted: boolean): string | null {
   if (!attempted) return null;
