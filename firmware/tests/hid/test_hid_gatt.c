@@ -91,6 +91,11 @@ int main(void)
     assert(hid_gatt_register() == 0);
     assert(registered[1].type == BLE_GATT_SVC_TYPE_PRIMARY);
     assert((uintptr_t)registered[1].uuid == 0x180f);
+    struct os_mbuf battery = {0};
+    const struct ble_gatt_chr_def *battery_level = &registered[1].characteristics[0];
+    struct ble_gatt_access_ctxt battery_read = {.op = BLE_GATT_ACCESS_OP_READ_CHR, .om = &battery};
+    assert(battery_level->access_cb(17, 0, &battery_read, battery_level->arg) == 0);
+    assert(battery.len == 1 && battery.data[0] == 100);
     assert(registered[2].type == BLE_GATT_SVC_TYPE_PRIMARY);
     assert((uintptr_t)registered[2].uuid == 0x180a);
     assert(registered[3].type == 0);

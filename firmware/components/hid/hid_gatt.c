@@ -144,7 +144,8 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     static const uint8_t mouse_ref[] = {HID_REPORT_MOUSE, 1};
     static const uint8_t consumer_ref[] = {HID_REPORT_CONSUMER, 1};
     static const uint8_t led_ref[] = {HID_REPORT_KEYBOARD, 2};
-    static const uint8_t no_battery = 0;
+    /* The USB-powered board has no battery to drain; report available power. */
+    static const uint8_t usb_power_level = 100;
     /* Development board's USB-IF VID:PID, already reported by its native USB
        Serial/JTAG interface. Replace with an assigned product ID for release. */
     static const uint8_t pnp_id[] = {0x02, 0x3a, 0x30, 0x01, 0x10, 0x00, 0x01};
@@ -178,7 +179,7 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     case ATTR_MOUSE_REFERENCE: return append(context, mouse_ref, sizeof(mouse_ref));
     case ATTR_CONSUMER_REFERENCE: return append(context, consumer_ref, sizeof(consumer_ref));
     case ATTR_LED_REFERENCE: return append(context, led_ref, sizeof(led_ref));
-    case ATTR_BATTERY_LEVEL: return append(context, &no_battery, 1);
+    case ATTR_BATTERY_LEVEL: return append(context, &usb_power_level, 1);
     case ATTR_PNP_ID: return append(context, pnp_id, sizeof(pnp_id));
     default: return BLE_ATT_ERR_UNLIKELY;
     }
