@@ -7,7 +7,7 @@
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/hid/IOHIDKeys.h>
-#include <IOKit/hid/IOHIDUserDevice.h>
+#include <IOKit/hidsystem/IOHIDUserDevice.h>
 #include <stdio.h>
 #include <unistd.h>
 
