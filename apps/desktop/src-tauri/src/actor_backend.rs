@@ -398,18 +398,16 @@ fn worker(
                 } else {
                     Err("No verified device session is available.".into())
                 };
-                if publish_after {
-                    if let Some(current) = actor.as_ref() {
-                        let now_ms = started.elapsed().as_millis() as u64;
-                        let wall_ms = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-                        publish(
-                            &shared,
-                            map_snapshot(current.setup_snapshot(), now_ms, wall_ms),
-                        );
-                    }
+                if publish_after && let Some(current) = actor.as_ref() {
+                    let now_ms = started.elapsed().as_millis() as u64;
+                    let wall_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    publish(
+                        &shared,
+                        map_snapshot(current.setup_snapshot(), now_ms, wall_ms),
+                    );
                 }
                 let _ = command.reply.send(outcome);
             }

@@ -48,6 +48,8 @@ After the user unplugged USB and reconnected without BOOT, COM7 returned with a 
 
 The integrated follow-up image (`ebebc0e`, 934,176-byte app) adds connected-peer token handling, bond removal routing, and a screen-state renderer; panel startup remains disabled. `idf.py -C firmware -p COM7 -b 460800 flash` exited 0 and verified hashes of all four written regions. The first immediate host-actor probe returned a COBS framing error during reset. A retry without a further flash returned `Local`, one slot, pairing closed, and no fault. No BLE guest was paired in this check, so the connected token and bond removal paths remain source-tested only.
 
+The retained-inventory image (`baaabe5`, 935,360-byte app) built with ESP-IDF 5.5.1 and flashed on COM7. Esptool verified hashes for the bootloader, app, partition table, and OTA data and issued a hard reset. An immediate host probe returned a transient COBS error; a retry without a manual power cycle opened a verified app session and reported `Local`, one slot, pairing closed, firmware `0.1.0-m1`, and no fault. Its protocol-minor-two `GET_BONDS` request returned an authoritative empty inventory (`Ok(0)`), observed at 2000 ms of host runtime. This verifies the new inventory path on an unpaired device, not pairing, forgetting a populated bond, or BLE HID output. COM7 remained present after the user's ordinary reconnect and at flash time.
+
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.

@@ -36,7 +36,7 @@ impl BondInventory {
     /// Validates a retained token snapshot before it crosses the wire.
     pub fn new(tokens: Vec<[u8; 16]>) -> Result<Self, ProtocolError> {
         if tokens.len() > MAX_BONDS
-            || tokens.iter().any(|token| *token == [0; 16])
+            || tokens.contains(&[0; 16])
             || tokens
                 .iter()
                 .enumerate()
@@ -273,12 +273,10 @@ pub fn validate_payload(kind: MessageKind, payload: &[u8]) -> Result<(), Protoco
         if payload.len() != size {
             return Err(ProtocolError::Payload);
         }
+    } else if kind == Bonds {
+        BondInventory::decode(payload)?;
     } else {
-        if kind == Bonds {
-            BondInventory::decode(payload)?;
-        } else {
-            cbor::validate(kind, payload)?;
-        }
+        cbor::validate(kind, payload)?;
     }
     match kind {
         Hello

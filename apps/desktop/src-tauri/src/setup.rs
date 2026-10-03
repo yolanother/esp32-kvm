@@ -597,10 +597,9 @@ impl SetupService {
         if matches!(backend.device, DeviceState::Verified { .. })
             && matches!(backend.route, RouteState::Local)
             && backend.retained_bond_tokens.is_none()
+            && let Ok(fresh) = self.backend.refresh_inventory()
         {
-            if let Ok(fresh) = self.backend.refresh_inventory() {
-                backend = fresh;
-            }
+            backend = fresh;
         }
         let guard = self.profiles.lock().map_err(|error| error.to_string())?;
         let profiles = guard.as_ref().map_err(Clone::clone)?.profiles.clone();
@@ -687,10 +686,10 @@ impl SetupService {
         let after = self.backend.snapshot()?;
         if !matches!(after.device, DeviceState::Verified { .. })
             || !matches!(after.route, RouteState::Local)
-            || !after
+            || after
                 .retained_bond_tokens
                 .as_ref()
-                .is_some_and(|bonds| !bonds.iter().any(|bond| bond == token))
+                .is_none_or(|bonds| bonds.iter().any(|bond| bond == token))
         {
             return Err(
                 "Firmware has not confirmed bond removal; the local profile was kept.".into(),
