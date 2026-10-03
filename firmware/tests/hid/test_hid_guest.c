@@ -150,19 +150,11 @@ int main(void)
     assert(ble_hs_cfg.store_status_cb(NULL, NULL) != 0);
     ble_hs_cfg.sync_cb();
     assert(advertisements == 1 && !channel.armed);
+    hid_guest_pairing_set_events(event_sink, NULL);
     struct ble_gap_event connect = {.type = BLE_GAP_EVENT_CONNECT};
     connect.connect.conn_handle = 17;
     gap_callback(&connect, NULL);
-    assert(terminations == 1 && !channel.connected);
-    hid_guest_pairing_set_events(event_sink, NULL);
-    assert(hid_guest_pairing_open() == 0 && last_event.type == HID_GUEST_PAIRING_OPENED);
-    time_us = 60000000;
-    host_timeout.callback(NULL);
-    assert(last_event.type == HID_GUEST_PAIRING_TIMEOUT);
-    gap_callback(&connect, NULL);
-    assert(terminations == 2 && !channel.connected);
-    assert(hid_guest_pairing_open() == 0);
-    gap_callback(&connect, NULL);
+    assert(terminations == 0);
     assert(channel.connected && !channel.armed && advertisements == 2);
     struct ble_gap_event challenge = {.type = BLE_GAP_EVENT_PASSKEY_ACTION};
     challenge.passkey.conn_handle = 17;
@@ -171,8 +163,9 @@ int main(void)
     gap_callback(&challenge, NULL);
     assert(last_event.type == HID_GUEST_PAIRING_CHALLENGE && last_event.number == 123456);
     assert(last_event.challenge_id != 0);
+    assert(confirmations == 1); /* Board side accepts automatically. */
     assert(hid_guest_pairing_confirm(last_event.challenge_id + 1, true) != 0);
-    assert(hid_guest_pairing_confirm(last_event.challenge_id, true) == 0 && confirmations == 1);
+    assert(hid_guest_pairing_confirm(last_event.challenge_id, true) != 0);
     struct ble_gap_event encryption = {.type = BLE_GAP_EVENT_ENC_CHANGE};
     encryption.enc_change.conn_handle = 17;
     gap_callback(&encryption, NULL);
@@ -228,7 +221,7 @@ int main(void)
     assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
     security_result = BLE_HS_EALREADY;
     gap_callback(&connect, NULL);
-    assert(channel.connected && terminations == 2);
+    assert(channel.connected && terminations == 0);
     security_result = 0;
     hold_host = true;
     const uint8_t stale_keys[HID_KEYBOARD_REPORT_LEN] = {0};
@@ -249,12 +242,12 @@ int main(void)
     assert(sent_reports == sent_before_timeout);
     host_queue.pending->callback(host_queue.pending);
     host_queue.pending = NULL;
-    assert(terminations == 3);
+    assert(terminations == 1);
     assert(hid_guest_request_disconnect() == ESP_OK);
-    assert(terminations == 3 && host_queue.pending);
+    assert(terminations == 1 && host_queue.pending);
     host_queue.pending->callback(host_queue.pending);
     host_queue.pending = NULL;
-    assert(terminations == 4 && channel.needs_disconnect);
+    assert(terminations == 2 && channel.needs_disconnect);
     assert(hid_guest_pairing_forget(token, false) != 0);
     fail_next_commit = true;
     assert(hid_guest_pairing_forget(token, true) != 0);

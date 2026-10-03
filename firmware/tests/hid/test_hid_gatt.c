@@ -89,7 +89,11 @@ static int access(unsigned index, uint16_t connection, uint8_t operation,
 int main(void)
 {
     assert(hid_gatt_register() == 0);
-    assert(registered[1].type == 0);
+    assert(registered[1].type == BLE_GATT_SVC_TYPE_PRIMARY);
+    assert((uintptr_t)registered[1].uuid == 0x180f);
+    assert(registered[2].type == BLE_GATT_SVC_TYPE_PRIMARY);
+    assert((uintptr_t)registered[2].uuid == 0x180a);
+    assert(registered[3].type == 0);
     for (unsigned index = 4; index <= 6; index++) {
         const struct ble_gatt_chr_def *chr = characteristic(index);
         assert(chr->flags & BLE_GATT_CHR_F_NOTIFY);

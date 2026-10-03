@@ -1,22 +1,24 @@
 # HID pairing and bond identity
 
 The optional HID service remains off until firmware calls `hid_guest_start()`. It
-advertises one HID identity and handles one connection. Routing still starts
-disarmed. This implementation targets eight stored bonds; the separate
-multi-guest workstream owns concurrent connections.
+advertises one HID identity and supports three isolated connections. Routing
+still starts disarmed. This implementation targets eight stored bonds.
 
 ## Admission and consent
 
-- `hid_guest_pairing_open()` opens a 60-second window when the bond store has
-  capacity, no guest is connected, and an event sink is registered. A NimBLE
-  host callout closes the window and cancels a pending challenge. A connection
-  from an unknown resolved identity is terminated outside the window.
+- A new guest can initiate numeric comparison without a board tap. The first
+  challenge opens a 60-second window when the bond store has capacity and an
+  event sink is registered. A NimBLE host callout closes the window and cancels
+  pending admission. At most three numeric challenges are admitted per window.
+  Manual Start Pairing can also open the window. Existing guests may remain
+  connected while another guest joins.
 - The host configuration requires Secure Connections and MITM protection with
   Display Yes/No capability. Only numeric-comparison challenges are accepted.
   The status sink receives the six-digit number and a fresh nonzero 32-bit
-  challenge ID; `hid_guest_pairing_confirm(challenge_id, approved)` injects the
-  answer for the internally bound connection. Wrong, stale, or repeated IDs
-  are refused. The NimBLE connection handle is never the protocol challenge ID. Any other
+  challenge ID. The device accepts its side automatically; the guest user must
+  compare the number on the board and confirm on the guest. Wrong, stale, or
+  repeated IDs are refused by the manual reply API. The NimBLE connection handle
+  is never the protocol challenge ID. Any other
   pairing action is rejected. The sink must copy the short event and return
   promptly; no UI work belongs on the BLE callback thread.
 - Encryption opens the report gate only after NimBLE reports encrypted,
@@ -55,9 +57,9 @@ disconnect from another task without waiting for radio teardown. Direct
 
 Run `firmware/tests/pairing/run-msvc.ps1` and
 `firmware/tests/hid/run-msvc.ps1` with PowerShell and MSVC. The host tests cover
-expiry, cancellation, consent, capacity, token reload/corruption, HID security
-admission, and the command bridge. They do not verify ESP-IDF linking, NVS
+  expiry, cancellation, guest numeric consent, capacity, token reload/corruption,
+  HID security admission, and the command bridge. They do not verify ESP-IDF linking, NVS
 power-loss behavior, radio timing, or interoperability with Windows, macOS, or
 Linux. Board validation must check numeric comparison UI and guest capability,
-rebooted bonds, a full eight-bond store, rejection of unsolicited peers, and
+  rebooted bonds, a full eight-bond store, rejection of unsupported pairing methods, and
 all-up/disconnect behavior under USB and BLE faults.
