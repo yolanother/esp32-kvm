@@ -108,6 +108,8 @@ The user then reported no character in TextEdit and no match for `ESP32 KVM` in 
 
 The new Mac's `hidutil` search by the board's numeric VID/PID also returned no row, strengthening the inference that macOS had not created a HID device for the BLE link. The corrected Battery Service app (1,007,632 bytes; SHA-256 `6AE0E62FBC32A841DB3E48D27F1ADB6B6D118938CBA6070FD052DE3CF0172F26`) passed the HID MSVC suite and ESP-IDF 5.5.1 build. Fresh COM7 reads matched the pinned partition hash and all-`0xff` OTA selector; esptool flashed only the app at `0x20000` and verified its data hash. The rebooted app reported `Local`, no fault, two retained Mac bonds, and no live slot. A 110-second COM7 watch observed no automatic Mac reconnect. The Mac's Bluetooth status, fresh registration, and input after this image remain pending.
 
+A read-only Windows BLE GATT probe connected to the updated board without adding a bond. WinRT exposed GAP (`0x1800`), GATT (`0x1801`), Battery (`0x180f`, starting at handle 46), and Device Information (`0x180a`, starting at handle 50). It omitted HID (`0x1812`) from the application's service list even when requested by UUID. The HID service's expected handle span is before Battery, so this result may reflect Windows filtering a system HID service; it does not establish whether the board omitted the service or what macOS discovered. COM7 still reported two retained bonds and no live slot after the probe.
+
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
