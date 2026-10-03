@@ -1,6 +1,6 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Defines the composite keyboard, relative mouse, and consumer HID report map
- * and one connection's fail-closed output gate. No Bluetooth stack is required
+ * Defines the composite keyboard, relative mouse, and consumer HID report map,
+ * Boot Protocol routing, and one connection's fail-closed output gate. No Bluetooth stack is required
  * by this header, so report behavior can be tested before hardware flashing. */
 #ifndef ESP32_KVM_HID_REPORT_H
 #define ESP32_KVM_HID_REPORT_H
@@ -9,11 +9,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/** Input/output report IDs in the single composite HID service. */
+/** Report IDs 1-3 and internal Boot characteristic routes 4-5. */
 enum hid_report_id {
     HID_REPORT_KEYBOARD = 1,
     HID_REPORT_MOUSE = 2,
-    HID_REPORT_CONSUMER = 3
+    HID_REPORT_CONSUMER = 3,
+    HID_REPORT_BOOT_KEYBOARD = 4,
+    HID_REPORT_BOOT_MOUSE = 5
 };
 
 /** Report value sizes exclude the report ID, which is in Report Reference. */
@@ -39,7 +41,7 @@ typedef struct {
     uint16_t connection_handle;
     bool connected;
     bool encrypted;
-    bool subscribed[4];
+    bool subscribed[6];
     bool armed;
     bool needs_disconnect;
     uint8_t protocol_mode;
@@ -70,7 +72,7 @@ bool hid_channel_mouse(hid_channel_t *channel, uint8_t buttons, int16_t dx, int1
                        int8_t wheel, int8_t pan);
 /** Enqueues a consumer usage, where zero releases the held control. */
 bool hid_channel_consumer(hid_channel_t *channel, uint16_t usage);
-/** Accepts report protocol (1); boot protocol (0) is unsupported in v1. */
+/** Switches report (1) or boot (0) protocol, releasing held input first. */
 bool hid_channel_set_protocol_mode(hid_channel_t *channel, uint8_t mode);
 /** Accepts the five defined keyboard LED bits from an encrypted guest. */
 bool hid_channel_led_output(hid_channel_t *channel, uint8_t leds);

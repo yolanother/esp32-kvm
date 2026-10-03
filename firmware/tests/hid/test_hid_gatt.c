@@ -109,6 +109,11 @@ int main(void)
     assert(characteristic(7)->descriptors[0].access_cb(17, 0, &descriptor,
            characteristic(7)->descriptors[0].arg) == 0);
     assert(led_reference.len == 2 && led_reference.data[0] == 1 && led_reference.data[1] == 2);
+    assert((uintptr_t)characteristic(8)->uuid == 0x2a22);
+    assert((uintptr_t)characteristic(9)->uuid == 0x2a32);
+    assert((uintptr_t)characteristic(10)->uuid == 0x2a33);
+    assert(characteristic(8)->flags & BLE_GATT_CHR_F_NOTIFY);
+    assert(characteristic(10)->flags & BLE_GATT_CHR_F_NOTIFY);
     assert(!hid_gatt_channel()->armed);
     assert(hid_gatt_on_connect(17));
     assert(hid_gatt_on_connect(18));
@@ -156,7 +161,17 @@ int main(void)
     assert(notified_connection == 19 && notified_bytes[2] == 6);
     assert(hid_gatt_channel_for(18)->keyboard[2] == 5 && hid_gatt_channel()->keyboard[2] == 4);
     uint8_t boot = 0;
-    assert(access(3, 17, BLE_GATT_ACCESS_OP_WRITE_CHR, &boot, 1, NULL) == BLE_ATT_ERR_VALUE_NOT_ALLOWED);
+    hid_gatt_on_subscribe(18, *characteristic(8)->val_handle, true);
+    hid_gatt_on_subscribe(18, *characteristic(10)->val_handle, true);
+    assert(access(3, 18, BLE_GATT_ACCESS_OP_WRITE_CHR, &boot, 1, NULL) == 0);
+    assert(hid_gatt_channel_for(18)->protocol_mode == 0);
+    assert(hid_channel_arm(hid_gatt_channel_for(18)));
+    assert(notified_connection == 18 && notified_handle == *characteristic(10)->val_handle);
+    assert(hid_channel_keyboard(hid_gatt_channel_for(18), keys));
+    assert(notified_handle == *characteristic(8)->val_handle && notified_length == 8);
+    assert(hid_channel_mouse(hid_gatt_channel_for(18), 1, 2, -3, 0, 0));
+    assert(notified_handle == *characteristic(10)->val_handle && notified_length == 3);
+    assert(notified_bytes[0] == 1 && notified_bytes[1] == 2 && notified_bytes[2] == 0xfd);
     uint8_t leds = 3;
     assert(access(7, 17, BLE_GATT_ACCESS_OP_WRITE_CHR, &leds, 1, NULL) == 0);
     assert(hid_gatt_channel()->keyboard_leds == 3);

@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Provides the composite BLE HID report descriptor and per-connection report
- * gate. Transitions always clear held input before arm, and failed release or
- * notification disarms until the BLE link is recreated. */
+ * gate. Report and Boot Protocol use distinct GATT input characteristics.
+ * Transitions clear held input before arm; failed release or notification
+ * disarms until the BLE link is recreated. */
 #include "hid_report.h"
 
 #include <string.h>
@@ -42,8 +43,11 @@ const size_t hid_report_map_len = sizeof(hid_report_map);
 
 static bool ready(const hid_channel_t *channel)
 {
-    return channel->connected && channel->encrypted && !channel->needs_disconnect &&
-           channel->subscribed[HID_REPORT_KEYBOARD] &&
+    if (!channel->connected || !channel->encrypted || channel->needs_disconnect) return false;
+    if (channel->protocol_mode == 0)
+        return channel->subscribed[HID_REPORT_BOOT_KEYBOARD] &&
+               channel->subscribed[HID_REPORT_BOOT_MOUSE];
+    return channel->subscribed[HID_REPORT_KEYBOARD] &&
            channel->subscribed[HID_REPORT_MOUSE] &&
            channel->subscribed[HID_REPORT_CONSUMER];
 }
@@ -61,9 +65,13 @@ static bool all_up(hid_channel_t *channel)
     static const uint8_t keyboard[HID_KEYBOARD_REPORT_LEN] = {0};
     static const uint8_t mouse[HID_MOUSE_REPORT_LEN] = {0};
     static const uint8_t consumer[HID_CONSUMER_REPORT_LEN] = {0};
-    bool keyboard_ok = send_report(channel, HID_REPORT_KEYBOARD, keyboard, sizeof(keyboard));
-    bool mouse_ok = send_report(channel, HID_REPORT_MOUSE, mouse, sizeof(mouse));
-    bool consumer_ok = send_report(channel, HID_REPORT_CONSUMER, consumer, sizeof(consumer));
+    bool boot = channel->protocol_mode == 0;
+    bool keyboard_ok = send_report(channel, boot ? HID_REPORT_BOOT_KEYBOARD : HID_REPORT_KEYBOARD,
+                                   keyboard, sizeof(keyboard));
+    bool mouse_ok = send_report(channel, boot ? HID_REPORT_BOOT_MOUSE : HID_REPORT_MOUSE,
+                                mouse, boot ? 3 : sizeof(mouse));
+    bool consumer_ok = boot || send_report(channel, HID_REPORT_CONSUMER, consumer,
+                                           sizeof(consumer));
     memset(channel->keyboard, 0, sizeof(channel->keyboard));
     channel->mouse_buttons = 0;
     channel->consumer_usage = 0;
@@ -102,7 +110,7 @@ void hid_channel_encrypted(hid_channel_t *channel, bool encrypted)
 
 void hid_channel_subscribed(hid_channel_t *channel, uint8_t report_id, bool subscribed)
 {
-    if (report_id < HID_REPORT_KEYBOARD || report_id > HID_REPORT_CONSUMER) return;
+    if (report_id < HID_REPORT_KEYBOARD || report_id > HID_REPORT_BOOT_MOUSE) return;
     channel->subscribed[report_id] = channel->connected && subscribed;
     if (!channel->subscribed[report_id]) channel->armed = false;
 }
@@ -132,7 +140,8 @@ bool hid_channel_release(hid_channel_t *channel)
 bool hid_channel_keyboard(hid_channel_t *channel, const uint8_t keys[HID_KEYBOARD_REPORT_LEN])
 {
     if (!channel->armed || !ready(channel) || keys[1] != 0) return false;
-    if (!send_report(channel, HID_REPORT_KEYBOARD, keys, HID_KEYBOARD_REPORT_LEN)) {
+    if (!send_report(channel, channel->protocol_mode == 0 ? HID_REPORT_BOOT_KEYBOARD : HID_REPORT_KEYBOARD,
+                     keys, HID_KEYBOARD_REPORT_LEN)) {
         channel->needs_disconnect = true;
         return false;
     }
@@ -148,6 +157,19 @@ bool hid_channel_mouse(hid_channel_t *channel, uint8_t buttons, int16_t dx, int1
         buttons, (uint8_t)dx, (uint8_t)((uint16_t)dx >> 8),
         (uint8_t)dy, (uint8_t)((uint16_t)dy >> 8), (uint8_t)wheel, (uint8_t)pan
     };
+    if (channel->protocol_mode == 0) {
+        uint8_t boot[3] = {
+            (uint8_t)(buttons & 0x07u),
+            (uint8_t)(int8_t)(dx < -127 ? -127 : dx > 127 ? 127 : dx),
+            (uint8_t)(int8_t)(dy < -127 ? -127 : dy > 127 ? 127 : dy)
+        };
+        if (!send_report(channel, HID_REPORT_BOOT_MOUSE, boot, sizeof(boot))) {
+            channel->needs_disconnect = true;
+            return false;
+        }
+        channel->mouse_buttons = buttons;
+        return true;
+    }
     if (!send_report(channel, HID_REPORT_MOUSE, report, sizeof(report))) {
         channel->needs_disconnect = true;
         return false;
@@ -158,7 +180,8 @@ bool hid_channel_mouse(hid_channel_t *channel, uint8_t buttons, int16_t dx, int1
 
 bool hid_channel_consumer(hid_channel_t *channel, uint16_t usage)
 {
-    if (!channel->armed || !ready(channel) || usage > 0x03ffu) return false;
+    if (!channel->armed || !ready(channel) || channel->protocol_mode == 0 ||
+        usage > 0x03ffu) return false;
     uint8_t report[HID_CONSUMER_REPORT_LEN] = {(uint8_t)usage, (uint8_t)(usage >> 8)};
     if (!send_report(channel, HID_REPORT_CONSUMER, report, sizeof(report))) {
         channel->needs_disconnect = true;
@@ -170,8 +193,10 @@ bool hid_channel_consumer(hid_channel_t *channel, uint16_t usage)
 
 bool hid_channel_set_protocol_mode(hid_channel_t *channel, uint8_t mode)
 {
-    if (!channel->connected || !channel->encrypted || mode != 1) return false;
-    channel->protocol_mode = 1;
+    if (!channel->connected || !channel->encrypted || mode > 1) return false;
+    if (mode == channel->protocol_mode) return true;
+    if (channel->armed && !hid_channel_release(channel)) return false;
+    channel->protocol_mode = mode;
     return true;
 }
 

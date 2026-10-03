@@ -12,7 +12,7 @@ typedef struct {
     uint16_t handle;
     uint8_t report_id;
     size_t length;
-    uint8_t bytes[HID_MOUSE_REPORT_LEN];
+    uint8_t bytes[HID_KEYBOARD_REPORT_LEN];
     unsigned calls;
     unsigned fail_at;
 } sink_t;
@@ -111,8 +111,20 @@ static void test_disconnect_failure_and_protocol_mode(void)
     assert(!channel.armed);
     sink.fail_at = 0;
     assert(hid_channel_arm(&channel));
-    assert(!hid_channel_set_protocol_mode(&channel, 0)); /* boot unsupported */
+    assert(hid_channel_set_protocol_mode(&channel, 0));
+    assert(channel.protocol_mode == 0 && !channel.armed);
+    assert(!hid_channel_arm(&channel));
+    hid_channel_subscribed(&channel, HID_REPORT_BOOT_KEYBOARD, true);
+    hid_channel_subscribed(&channel, HID_REPORT_BOOT_MOUSE, true);
+    assert(hid_channel_arm(&channel));
+    assert(sink.report_id == HID_REPORT_BOOT_MOUSE && sink.length == 3);
+    assert(hid_channel_keyboard(&channel, (uint8_t[8]){0,0,4}));
+    assert(sink.report_id == HID_REPORT_BOOT_KEYBOARD && sink.length == 8);
+    assert(hid_channel_mouse(&channel, 1, 300, -300, 0, 0));
+    assert(sink.report_id == HID_REPORT_BOOT_MOUSE && sink.length == 3);
+    assert(sink.bytes[0] == 1 && sink.bytes[1] == 127 && sink.bytes[2] == 0x81);
     assert(hid_channel_set_protocol_mode(&channel, 1));
+    assert(hid_channel_arm(&channel));
     assert(hid_channel_led_output(&channel, 0x1f));
     assert(channel.keyboard_leds == 0x1f);
     assert(!hid_channel_led_output(&channel, 0x80));

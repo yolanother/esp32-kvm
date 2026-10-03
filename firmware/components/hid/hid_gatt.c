@@ -1,6 +1,6 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Registers the HID, Battery and Device Information services with keyboard,
- * mouse, consumer and LED reports. Up to three connected peers have separate
+ * mouse, consumer, LED and Boot Protocol reports. Up to three peers have separate
  * encryption, CCCD, protocol, and held-report state; every notification
  * targets exactly its channel's BLE connection handle. */
 #include "hid_gatt.h"
@@ -21,6 +21,9 @@ enum attribute {
     ATTR_MOUSE_INPUT,
     ATTR_CONSUMER_INPUT,
     ATTR_KEYBOARD_OUTPUT,
+    ATTR_BOOT_KEYBOARD_INPUT,
+    ATTR_BOOT_KEYBOARD_OUTPUT,
+    ATTR_BOOT_MOUSE_INPUT,
     ATTR_KEYBOARD_REFERENCE,
     ATTR_MOUSE_REFERENCE,
     ATTR_CONSUMER_REFERENCE,
@@ -34,6 +37,8 @@ static uint16_t keyboard_handle;
 static uint16_t mouse_handle;
 static uint16_t consumer_handle;
 static uint16_t led_handle;
+static uint16_t boot_keyboard_handle;
+static uint16_t boot_mouse_handle;
 
 static int access_attribute(uint16_t connection_handle, uint16_t attribute_handle,
                             struct ble_gatt_access_ctxt *context, void *argument);
@@ -88,6 +93,18 @@ static const struct ble_gatt_chr_def characteristics[] = {
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
               BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC,
      .val_handle = &led_handle},
+    {.uuid = BLE_UUID16_DECLARE(0x2a22), .access_cb = access_attribute,
+     .arg = (void *)ATTR_BOOT_KEYBOARD_INPUT,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
+     .val_handle = &boot_keyboard_handle},
+    {.uuid = BLE_UUID16_DECLARE(0x2a32), .access_cb = access_attribute,
+     .arg = (void *)ATTR_BOOT_KEYBOARD_OUTPUT,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
+              BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC},
+    {.uuid = BLE_UUID16_DECLARE(0x2a33), .access_cb = access_attribute,
+     .arg = (void *)ATTR_BOOT_MOUSE_INPUT,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
+     .val_handle = &boot_mouse_handle},
     {0}
 };
 
@@ -139,6 +156,7 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     case ATTR_REPORT_MAP: return append(context, hid_report_map, hid_report_map_len);
     case ATTR_PROTOCOL_MODE: return append(context, &channel->protocol_mode, 1);
     case ATTR_KEYBOARD_INPUT:
+    case ATTR_BOOT_KEYBOARD_INPUT:
         return append(context, channel->armed ? channel->keyboard : zero_keyboard,
                       HID_KEYBOARD_REPORT_LEN);
     case ATTR_MOUSE_INPUT:
@@ -151,6 +169,11 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
         }
         return append(context, consumer, sizeof(consumer));
     case ATTR_KEYBOARD_OUTPUT: return append(context, &channel->keyboard_leds, 1);
+    case ATTR_BOOT_KEYBOARD_OUTPUT: return append(context, &channel->keyboard_leds, 1);
+    case ATTR_BOOT_MOUSE_INPUT: {
+        uint8_t boot_mouse[3] = {channel->armed ? (uint8_t)(channel->mouse_buttons & 0x07u) : 0, 0, 0};
+        return append(context, boot_mouse, sizeof(boot_mouse));
+    }
     case ATTR_KEYBOARD_REFERENCE: return append(context, keyboard_ref, sizeof(keyboard_ref));
     case ATTR_MOUSE_REFERENCE: return append(context, mouse_ref, sizeof(mouse_ref));
     case ATTR_CONSUMER_REFERENCE: return append(context, consumer_ref, sizeof(consumer_ref));
@@ -175,6 +198,7 @@ static int write_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *
     case ATTR_PROTOCOL_MODE:
         return hid_channel_set_protocol_mode(channel, value) ? 0 : BLE_ATT_ERR_VALUE_NOT_ALLOWED;
     case ATTR_KEYBOARD_OUTPUT:
+    case ATTR_BOOT_KEYBOARD_OUTPUT:
         return hid_channel_led_output(channel, value) ? 0 : BLE_ATT_ERR_VALUE_NOT_ALLOWED;
     default: return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     }
@@ -204,10 +228,13 @@ static int send_report(void *unused, uint16_t connection_handle, uint8_t report_
     (void)unused;
     hid_channel_t *channel = hid_gatt_channel_for(connection_handle);
     if (!channel || !channel->encrypted ||
-        report_id < HID_REPORT_KEYBOARD || report_id > HID_REPORT_CONSUMER ||
+        report_id < HID_REPORT_KEYBOARD || report_id > HID_REPORT_BOOT_MOUSE ||
         !channel->subscribed[report_id]) return -1;
     uint16_t value_handle = report_id == HID_REPORT_KEYBOARD ? keyboard_handle :
-                            report_id == HID_REPORT_MOUSE ? mouse_handle : consumer_handle;
+                            report_id == HID_REPORT_MOUSE ? mouse_handle :
+                            report_id == HID_REPORT_CONSUMER ? consumer_handle :
+                            report_id == HID_REPORT_BOOT_KEYBOARD ? boot_keyboard_handle :
+                            boot_mouse_handle;
     if (value_handle == 0) return -1;
     struct os_mbuf *packet = ble_hs_mbuf_from_flat(bytes, length);
     if (packet == NULL) return -1;
@@ -274,4 +301,8 @@ void hid_gatt_on_subscribe(uint16_t connection_handle, uint16_t value_handle, bo
     if (value_handle == keyboard_handle) hid_channel_subscribed(channel, HID_REPORT_KEYBOARD, enabled);
     if (value_handle == mouse_handle) hid_channel_subscribed(channel, HID_REPORT_MOUSE, enabled);
     if (value_handle == consumer_handle) hid_channel_subscribed(channel, HID_REPORT_CONSUMER, enabled);
+    if (value_handle == boot_keyboard_handle)
+        hid_channel_subscribed(channel, HID_REPORT_BOOT_KEYBOARD, enabled);
+    if (value_handle == boot_mouse_handle)
+        hid_channel_subscribed(channel, HID_REPORT_BOOT_MOUSE, enabled);
 }

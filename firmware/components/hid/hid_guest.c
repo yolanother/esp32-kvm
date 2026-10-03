@@ -442,7 +442,10 @@ bool hid_guest_snapshot_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONN
         hid_guest_slot_snapshot_t *item = &output[slot - 1];
         memcpy(item->token, token.bytes, sizeof(item->token));
         item->ready = true;
-        item->subscribed = channel->subscribed[HID_REPORT_KEYBOARD] &&
+        item->subscribed = channel->protocol_mode == 0 ?
+                           channel->subscribed[HID_REPORT_BOOT_KEYBOARD] &&
+                           channel->subscribed[HID_REPORT_BOOT_MOUSE] :
+                           channel->subscribed[HID_REPORT_KEYBOARD] &&
                            channel->subscribed[HID_REPORT_MOUSE] &&
                            channel->subscribed[HID_REPORT_CONSUMER];
     }

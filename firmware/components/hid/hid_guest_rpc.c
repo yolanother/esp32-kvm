@@ -47,8 +47,11 @@ static rpc_state_t rpc;
 
 static bool channel_ready(const hid_channel_t *channel)
 {
-    return channel->connected && channel->encrypted && !channel->needs_disconnect &&
-           channel->subscribed[HID_REPORT_KEYBOARD] &&
+    if (!channel->connected || !channel->encrypted || channel->needs_disconnect) return false;
+    if (channel->protocol_mode == 0)
+        return channel->subscribed[HID_REPORT_BOOT_KEYBOARD] &&
+               channel->subscribed[HID_REPORT_BOOT_MOUSE];
+    return channel->subscribed[HID_REPORT_KEYBOARD] &&
            channel->subscribed[HID_REPORT_MOUSE] &&
            channel->subscribed[HID_REPORT_CONSUMER];
 }
