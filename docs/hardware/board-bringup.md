@@ -100,6 +100,10 @@ The new Mac subsequently connected from its Bluetooth settings without a board-s
 
 A follow-up HID compatibility image adds Boot keyboard input/output and Boot mouse input characteristics plus per-connection Protocol Mode routing and subscription gates. The HID MSVC suite and ESP-IDF 5.5.1 app build passed. Its 1,007,632-byte app has SHA-256 `7BB0564D7BFEF0A9EA0EF31217BA15B8DF0CB55244B0FFDCEAD7E7D850BBCB67`. Before flashing, the board's partition table again matched `C913C1A5273319FD7432A053A457BB476018EFB9AF585162457E09BC32E4931F` and OTA selector was all `0xff`. Esptool wrote only the app at `0x20000`, verified the data hash, and reset. The rebooted app reported three available slots, `Local`, no fault, two retained Mac bonds, and no live slot. Boot report support is a compatibility hypothesis until fresh macOS HID registration and input delivery are observed.
 
+The new Mac did not automatically reconnect after the app reset. Its Bluetooth entry was forgotten on macOS; the board then removed only the corresponding disconnected bond by exact token, verifying that the other Mac bond remained. The new Mac paired again without a board acceptance tap. COM7 observed the numeric challenge, then slot 1 ready and subscribed, two retained bonds, `Local`, and no fault; the user reported macOS `Connected`. Updated macOS `hidutil` registration and end-to-end typing are pending checks.
+
+With a blank TextEdit document reportedly focused on the newly paired Mac, HostActor sent a 600 ms `A` press and release through slot 1. The actor entered `Guest(1)`, accepted and wrote both frames, and board `INPUT_PROGRESS` reported both accepted and BLE-enqueued (sequences 17 and 24). It returned to `Local` without fault; a fresh COM7 read still showed the ready/subscribed slot and two retained bonds. The user's observation of the TextEdit document and updated `hidutil` output are pending.
+
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
