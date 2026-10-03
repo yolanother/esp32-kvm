@@ -1,6 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Defines the portable, fail-closed HID pairing policy. The policy admits
- * known bond identities or new peers during a 60-second window,
+ * known bond identities or new peers during an initial 60-second window,
+ * with at least 30 seconds to complete a late numeric challenge,
  * permits bounded numeric comparison attempts, and keeps eight opaque bond tokens stable.
  * Connected-peer lookup exposes only a nonzero token after authentication;
  * inventory copies only bounded retained tokens. */
@@ -47,7 +48,7 @@ void hid_pairing_cancel(hid_pairing_t *state);
 bool hid_pairing_window_open(hid_pairing_t *state, uint64_t now_ms);
 /** Admits a known identity or a new peer within a pairing window. */
 bool hid_pairing_admit(hid_pairing_t *state, hid_peer_t peer, uint64_t now_ms);
-/** Begins a numeric comparison challenge for an admitted, unknown peer. */
+/** Begins a numeric challenge and reserves at least 30 seconds without resetting the attempt limit. */
 bool hid_pairing_begin_challenge(hid_pairing_t *state, hid_peer_t peer, uint16_t handle,
                                  uint32_t challenge_id, uint32_t number, uint64_t now_ms);
 /** Accepts one matching nonzero challenge ID before expiry; rejection closes it. */
