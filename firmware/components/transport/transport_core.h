@@ -79,6 +79,10 @@ typedef struct {
     uint8_t connected_token[16];
     kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS];
     bool slots_dirty;
+    /** Last BLE-enqueued input sequence already sent in INPUT_PROGRESS. */
+    uint32_t reported_enqueued_input_seq;
+    /** Distinguishes an unreported sequence from a valid sequence zero. */
+    bool has_reported_enqueued_input_seq;
     bool last_forget_valid;
     uint32_t last_forget_seq;
     uint32_t last_forget_generation;

@@ -2,8 +2,8 @@
  * Sends independently encoded USB frames through transport and router with a
  * fake one-guest HID sink, checking command dispatch, ACKs, report fencing,
  * malformed input rejection, lease expiry, disconnect release, and the
- * connected guest's opaque STATUS token, and a bounded retained inventory
- * response tied to a minor-two request. */
+ * connected guest's opaque STATUS token, a bounded retained inventory
+ * response tied to a minor-two request, and distinct input progress stages. */
 #include "transport_core.h"
 #include "router.h"
 #include <assert.h>
@@ -11,9 +11,12 @@
 
 static uint8_t reply[1024];
 static size_t reply_len;
-static int replies, releases, arms, sends;
+static int replies, releases, arms, sends, progress_count;
+static uint32_t progress_accepted, progress_enqueued, progress_generation;
+static uint64_t progress_session;
 static uint64_t now_ms;
 static bool ready = true;
+static bool send_enabled = true;
 static unsigned pair_opens, pair_replies;
 static unsigned forgets;
 static uint8_t forgotten_token[16];
@@ -85,13 +88,30 @@ static size_t decode(uint8_t *out)
 static void capture(void *context, const uint8_t *p, size_t n)
 {
     (void)context; assert(n <= sizeof(reply)); memcpy(reply, p, n); reply_len = n; replies++;
+    uint8_t decoded[600];
+    size_t length = decode(decoded);
+    if (length == KVM_PROTOCOL_HEADER_LEN + 8 + 4 && decoded[3] == KVM_MSG_INPUT_PROGRESS) {
+        progress_count++;
+        progress_session = (uint64_t)decoded[8] | (uint64_t)decoded[9] << 8 |
+                           (uint64_t)decoded[10] << 16 | (uint64_t)decoded[11] << 24 |
+                           (uint64_t)decoded[12] << 32 | (uint64_t)decoded[13] << 40 |
+                           (uint64_t)decoded[14] << 48 | (uint64_t)decoded[15] << 56;
+        progress_generation = (uint32_t)decoded[20] | (uint32_t)decoded[21] << 8 |
+                              (uint32_t)decoded[22] << 16 | (uint32_t)decoded[23] << 24;
+        progress_accepted = (uint32_t)decoded[24] | (uint32_t)decoded[25] << 8 |
+                            (uint32_t)decoded[26] << 16 | (uint32_t)decoded[27] << 24;
+        progress_enqueued = (uint32_t)decoded[28] | (uint32_t)decoded[29] << 8 |
+                            (uint32_t)decoded[30] << 16 | (uint32_t)decoded[31] << 24;
+    }
 }
 static uint64_t clock_ms(void *context) { (void)context; return now_ms; }
 static bool output_ready(void *context, uint8_t slot) { (void)context; return slot == 1 && ready; }
 static bool output_release(void *context, uint8_t slot) { (void)context; assert(slot == 1); releases++; return true; }
 static bool output_arm(void *context, uint8_t slot) { (void)context; assert(slot == 1); arms++; return true; }
 static bool output_send(void *context, uint8_t slot, const kvm_router_input_t *input)
-{ (void)context; assert(slot == 1 && input->kind == KVM_ROUTER_KEYBOARD); sends++; return true; }
+{ (void)context; assert(slot == 1 && input->kind == KVM_ROUTER_KEYBOARD);
+  if (!send_enabled) return false;
+  sends++; return true; }
 static void output_disconnect(void *context, uint8_t slot) { (void)context; assert(slot == 1); }
 static void send_frame(kvm_transport_core_t *core, uint8_t kind, uint64_t session,
                        uint32_t seq, uint32_t generation, const uint8_t *payload, size_t n)
@@ -163,14 +183,23 @@ int main(void)
     key[2] = 4;
     send_frame(&core, KVM_MSG_KEY_STATE, 7, 5, 0, key, 8);
     assert(router.queued == 0 && sends == 0);
+    assert(progress_count == 0);
     send_frame(&core, KVM_MSG_KEY_STATE, 7, 6, 1, key, 8);
+    assert(progress_count == 1 && progress_session == 7 && progress_generation == 1);
+    assert(progress_accepted == 6 && progress_enqueued == 0 && sends == 0);
+    send_enabled = false;
+    kvm_transport_core_tick(&core);
+    assert(progress_count == 1 && router.queued == 1 && sends == 0);
+    send_enabled = true;
     kvm_transport_core_tick(&core);
     assert(sends == 1);
+    assert(progress_count == 2 && progress_accepted == 6 && progress_enqueued == 6);
     now_ms = 500;
     kvm_transport_core_tick(&core);
     assert(!router.armed && router.slot == 0 && releases == 1);
     send_frame(&core, KVM_MSG_KEY_STATE, 7, 7, 1, key, 8);
     assert(sends == 1);
+    assert(progress_count == 2);
     kvm_transport_core_reset(&core);
     assert(!router.session_open);
     uint8_t invalid_open[] = {0xa2, 1, 0x61, 0, 2, 0};

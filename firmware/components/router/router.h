@@ -99,8 +99,12 @@ typedef struct {
     uint8_t next_control;
     uint32_t newest_control_seq;
     uint32_t newest_input_seq;
+    /** Last input sequence whose output callback accepted a BLE notification. */
+    uint32_t last_enqueued_input_seq;
     bool has_control_seq;
     bool has_input_seq;
+    /** Distinguishes no enqueue yet from a valid sequence number zero. */
+    bool has_enqueued_input_seq;
 } kvm_router_t;
 
 /** Initializes the router disarmed on local slot zero. */

@@ -106,6 +106,7 @@ void kvm_router_reset(kvm_router_t *r)
     r->next_control = 0;
     r->has_control_seq = false;
     r->has_input_seq = false;
+    r->has_enqueued_input_seq = false;
 }
 
 void kvm_router_emergency_release(kvm_router_t *r)
@@ -265,6 +266,8 @@ void kvm_router_tick(kvm_router_t *r, uint64_t now_ms)
             return;
         }
         r->congested = false;
+        r->last_enqueued_input_seq = entry.seq;
+        r->has_enqueued_input_seq = true;
         memmove(r->queue, r->queue + 1, --r->queued * sizeof(r->queue[0]));
     }
 }

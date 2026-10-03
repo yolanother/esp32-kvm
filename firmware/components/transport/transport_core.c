@@ -6,7 +6,8 @@
  * accepts only an exact opaque token while routing is local and disarmed.
  * Minor-two STATUS reports bounded, authenticated live slots from a cached
  * host-loop snapshot. Retained inventory is fetched through a bounded
- * callback and never contains BLE addresses or key material. */
+ * callback and never contains BLE addresses or key material. Accepted router
+ * input and successful BLE enqueue are reported as separate progress stages. */
 #include "transport_core.h"
 #include <string.h>
 
@@ -157,6 +158,18 @@ static void send_result(kvm_transport_core_t *core, uint8_t original,
     put_u32(payload + 6, core->router ? core->router->last_result_generation : 0);
     emit(core, result == KVM_ROUTER_OK ? KVM_MSG_ACK : KVM_MSG_NACK,
          seq, payload, sizeof(payload));
+}
+
+static void send_input_progress(kvm_transport_core_t *core)
+{
+    uint8_t payload[8] = {0};
+    kvm_router_t *router = core->router;
+    if (router->has_input_seq) put_u32(payload, router->newest_input_seq);
+    if (router->has_enqueued_input_seq)
+        put_u32(payload + 4, router->last_enqueued_input_seq);
+    emit(core, KVM_MSG_INPUT_PROGRESS, 0, payload, sizeof(payload));
+    core->has_reported_enqueued_input_seq = router->has_enqueued_input_seq;
+    core->reported_enqueued_input_seq = router->last_enqueued_input_seq;
 }
 
 static void send_status(kvm_transport_core_t *core, uint32_t seq)
@@ -360,6 +373,7 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
         core->pairing_state = KVM_PAIRING_CLOSED;
         core->pairing_challenge_id = 0;
         core->last_forget_valid = false;
+        core->has_reported_enqueued_input_seq = false;
         if (core->router) kvm_router_reset(core->router);
         send_caps(core, seq);
         return;
@@ -370,6 +384,7 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
         put_u32(ack + 1, seq);
         if (!core->session_open && core->router)
             kvm_router_session_open(core->router, core->session_id, firmware_ms(core));
+        if (!core->session_open) core->has_reported_enqueued_input_seq = false;
         core->session_open = true;
         put_u32(ack + 6, core->router ? core->router->generation : 0);
         emit(core, KVM_MSG_ACK, seq, ack, sizeof(ack));
@@ -472,7 +487,8 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
             kvm_router_input_t input = {0};
             input.kind = KVM_ROUTER_KEYBOARD;
             memcpy(input.keyboard, payload, 8);
-            (void)kvm_router_input(r, session, generation, seq, input, now_ms);
+            if (kvm_router_input(r, session, generation, seq, input, now_ms) == KVM_ROUTER_OK)
+                send_input_progress(core);
         } else if (kind == KVM_MSG_POINTER && payload_length == 7) {
             kvm_router_input_t input = {0};
             input.kind = KVM_ROUTER_POINTER;
@@ -481,12 +497,14 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
             input.dy = (int16_t)get_u16(payload + 3);
             input.wheel = (int8_t)payload[5];
             input.pan = (int8_t)payload[6];
-            (void)kvm_router_input(r, session, generation, seq, input, now_ms);
+            if (kvm_router_input(r, session, generation, seq, input, now_ms) == KVM_ROUTER_OK)
+                send_input_progress(core);
         } else if (kind == KVM_MSG_CONSUMER_STATE && payload_length == 2) {
             kvm_router_input_t input = {0};
             input.kind = KVM_ROUTER_CONSUMER;
             input.consumer = get_u16(payload);
-            (void)kvm_router_input(r, session, generation, seq, input, now_ms);
+            if (kvm_router_input(r, session, generation, seq, input, now_ms) == KVM_ROUTER_OK)
+                send_input_progress(core);
         }
     }
 }
@@ -521,6 +539,7 @@ void kvm_transport_core_reset(kvm_transport_core_t *core)
     core->pairing_state = KVM_PAIRING_CLOSED;
     core->pairing_challenge_id = 0;
     core->last_forget_valid = false;
+    core->has_reported_enqueued_input_seq = false;
     if (core->router) kvm_router_reset(core->router);
 }
 
@@ -616,6 +635,10 @@ void kvm_transport_core_tick(kvm_transport_core_t *core)
     kvm_router_tick(core->router, firmware_ms(core));
     if (!core->session_open) return;
     kvm_router_t *r = core->router;
+    if (r->session_open && r->has_enqueued_input_seq &&
+        (!core->has_reported_enqueued_input_seq ||
+         core->reported_enqueued_input_seq != r->last_enqueued_input_seq))
+        send_input_progress(core);
     uint64_t now_ms = firmware_ms(core);
     if (now_ms < core->last_status_ms || now_ms - core->last_status_ms >= 1000 ||
         r->generation != core->status_generation || r->slot != core->status_slot ||
