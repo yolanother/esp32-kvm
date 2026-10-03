@@ -53,6 +53,22 @@ pub enum PairingState {
         #[serde(rename = "deadlineMs")]
         deadline_ms: Option<u64>,
     },
+    /// A fresh numeric comparison reported by firmware.
+    Challenge {
+        #[serde(rename = "challengeId")]
+        challenge_id: u32,
+        number: u32,
+        #[serde(rename = "deadlineMs")]
+        deadline_ms: Option<u64>,
+    },
+    /// Firmware bond storage is at capacity.
+    Full,
+    /// The pairing window expired.
+    Expired,
+    /// This firmware does not support the required pairing status contract.
+    Unsupported { reason: String },
+    /// Firmware rejected pairing or sent incomplete challenge data.
+    Failed { reason: String },
 }
 
 /// Actor-confirmed route; USB or BLE readiness alone cannot select a guest.

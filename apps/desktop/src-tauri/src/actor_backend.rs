@@ -4,7 +4,7 @@
 
 use crate::setup::{BackendSnapshot, DeviceState, PairingState, RouteState, SetupBackend};
 use esp32_kvm_host_actor::{
-    ConnectError, HostActor, HostState, KeyMapper, MappedKey, PairingError,
+    ConnectError, HostActor, HostState, KeyMapper, MappedKey, PairingError, PairingStatus,
     SetupSnapshot as ActorSnapshot, connect_system,
 };
 use esp32_kvm_input_core::Action;
@@ -15,7 +15,7 @@ use std::sync::{
     mpsc::{self, Receiver, SyncSender},
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const EXPECTED_BOARD: &str = "esp32-kvm-s3";
 const HOST_VERSION: &str = "0.1.0-m1";
@@ -30,6 +30,7 @@ pub struct ActorBackend {
 enum CommandKind {
     Begin,
     Cancel,
+    Confirm { challenge_id: u32, approved: bool },
     Local,
     Quit,
 }
@@ -93,6 +94,13 @@ impl SetupBackend for ActorBackend {
         self.request(CommandKind::Cancel)
     }
 
+    fn confirm(&self, challenge_id: u32, approved: bool) -> Result<(), String> {
+        self.request(CommandKind::Confirm {
+            challenge_id,
+            approved,
+        })
+    }
+
     fn return_local(&self) -> Result<(), String> {
         self.request(CommandKind::Local)
     }
@@ -119,7 +127,7 @@ fn publish(shared: &Mutex<BackendSnapshot>, next: BackendSnapshot) {
     }
 }
 
-fn map_snapshot(value: ActorSnapshot) -> BackendSnapshot {
+fn map_snapshot(value: ActorSnapshot, monotonic_ms: u64, wall_ms: u64) -> BackendSnapshot {
     let active = value.state != HostState::Failed;
     let route = match value.state {
         HostState::AwaitStatus => RouteState::AwaitingStatus,
@@ -165,19 +173,43 @@ fn map_snapshot(value: ActorSnapshot) -> BackendSnapshot {
         .filter(|slot| active && slot.ready && slot.subscribed)
         .map(|slot| token_hex(&slot.bond_token))
         .collect();
+    let deadline_ms = value
+        .pairing_deadline_ms
+        .map(|deadline| wall_ms.saturating_add(deadline.saturating_sub(monotonic_ms).min(60_000)));
+    let pairing = if !active {
+        PairingState::Closed
+    } else {
+        match value.pairing_status {
+            PairingStatus::Unsupported => PairingState::Unsupported {
+                reason: "Firmware does not support verified pairing challenge events.".into(),
+            },
+            PairingStatus::Closed => PairingState::Closed,
+            PairingStatus::Waiting => PairingState::Waiting { deadline_ms },
+            PairingStatus::Challenge => match (value.challenge_id, value.comparison_value) {
+                (Some(challenge_id), Some(number)) => PairingState::Challenge {
+                    challenge_id,
+                    number,
+                    deadline_ms,
+                },
+                _ => PairingState::Failed {
+                    reason: "Firmware challenge data is incomplete.".into(),
+                },
+            },
+            PairingStatus::Rejected => PairingState::Failed {
+                reason: "Pairing was rejected.".into(),
+            },
+            PairingStatus::Capacity => PairingState::Full,
+            PairingStatus::Timeout => PairingState::Expired,
+        }
+    };
     BackendSnapshot {
         device,
         route,
-        pairing: if value.state == HostState::Pairing {
-            PairingState::Waiting {
-                deadline_ms: value.pairing_deadline_ms,
-            }
-        } else {
-            PairingState::Closed
-        },
+        pairing,
         bond_tokens,
         ready_tokens,
-        pairing_available: value.state == HostState::Local,
+        pairing_available: value.state == HostState::Local
+            && value.pairing_status != PairingStatus::Unsupported,
     }
 }
 
@@ -191,6 +223,7 @@ fn pair_error(error: PairingError) -> String {
         PairingError::NotLocal => "Pairing requires a verified local device session.",
         PairingError::InvalidArgument => "Pairing request is invalid.",
         PairingError::Transport => "Verified device session ended.",
+        PairingError::Unsupported => "Firmware does not support verified pairing challenge events.",
     }
     .to_owned()
 }
@@ -226,6 +259,10 @@ fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
                     match command.kind {
                         CommandKind::Begin => current.pair_begin(60, now_ms),
                         CommandKind::Cancel => current.pair_cancel(now_ms),
+                        CommandKind::Confirm {
+                            challenge_id,
+                            approved,
+                        } => current.pair_reply(challenge_id, approved, now_ms),
                         CommandKind::Local => {
                             current.request(Action::Local, now_ms);
                             Ok(())
@@ -246,7 +283,12 @@ fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
 
         if let Some(current) = actor.as_mut() {
             current.drive(&capture_events, started.elapsed().as_millis() as u64);
-            let next = map_snapshot(current.setup_snapshot());
+            let now_ms = started.elapsed().as_millis() as u64;
+            let wall_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let next = map_snapshot(current.setup_snapshot(), now_ms, wall_ms);
             let failed = matches!(next.device, DeviceState::Unavailable { .. });
             publish(&shared, next);
             if failed {
@@ -304,7 +346,9 @@ fn connect_error(error: ConnectError) -> DeviceState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use esp32_kvm_host_actor::{HostState, SetupSnapshot as ActorSnapshot, SlotSnapshot};
+    use esp32_kvm_host_actor::{
+        HostState, PairingStatus, SetupSnapshot as ActorSnapshot, SlotSnapshot,
+    };
 
     fn actor(state: HostState) -> ActorSnapshot {
         ActorSnapshot {
@@ -312,6 +356,11 @@ mod tests {
             max_connections: 1,
             max_bonds: 8,
             firmware_version: None,
+            pairing_status: if state == HostState::Pairing {
+                PairingStatus::Waiting
+            } else {
+                PairingStatus::Closed
+            },
             state,
             slots: vec![SlotSnapshot {
                 slot: 1,
@@ -328,24 +377,24 @@ mod tests {
 
     #[test]
     fn verified_status_exposes_opaque_bonds_but_only_local_allows_begin() {
-        let local = map_snapshot(actor(HostState::Local));
+        let local = map_snapshot(actor(HostState::Local), 0, 1_000);
         assert!(local.pairing_available);
         assert_eq!(local.bond_tokens, vec!["ab".repeat(16)]);
         assert_eq!(local.ready_tokens, local.bond_tokens);
         assert!(matches!(local.route, crate::setup::RouteState::Local));
-        let awaiting = map_snapshot(actor(HostState::AwaitStatus));
+        let awaiting = map_snapshot(actor(HostState::AwaitStatus), 0, 1_000);
         assert!(!awaiting.pairing_available);
         assert!(matches!(
             awaiting.pairing,
             crate::setup::PairingState::Closed
         ));
-        let pairing = map_snapshot(actor(HostState::Pairing));
+        let pairing = map_snapshot(actor(HostState::Pairing), 0, 1_000);
         assert!(!pairing.pairing_available);
         assert!(matches!(
             pairing.pairing,
             crate::setup::PairingState::Waiting { .. }
         ));
-        let guest = map_snapshot(actor(HostState::Guest(1)));
+        let guest = map_snapshot(actor(HostState::Guest(1)), 0, 1_000);
         assert!(matches!(
             guest.route,
             crate::setup::RouteState::Guest { slot: 1, .. }
@@ -354,13 +403,46 @@ mod tests {
 
     #[test]
     fn guest_route_does_not_enable_setup_controls() {
-        assert!(!map_snapshot(actor(HostState::Guest(1))).pairing_available);
-        let failed = map_snapshot(actor(HostState::Failed));
+        assert!(!map_snapshot(actor(HostState::Guest(1)), 0, 1_000).pairing_available);
+        let failed = map_snapshot(actor(HostState::Failed), 0, 1_000);
         assert!(!failed.pairing_available);
         assert!(failed.ready_tokens.is_empty());
         assert!(matches!(
             failed.route,
             crate::setup::RouteState::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn challenge_uses_wall_clock_deadline_and_unsupported_stays_closed() {
+        let mut challenge = actor(HostState::Pairing);
+        challenge.pairing_status = PairingStatus::Challenge;
+        challenge.pairing_deadline_ms = Some(10_000);
+        challenge.challenge_id = Some(7);
+        challenge.comparison_value = Some(123_456);
+        let mapped = map_snapshot(challenge, 1_000, 100_000);
+        assert!(matches!(
+            mapped.pairing,
+            PairingState::Challenge {
+                challenge_id: 7,
+                number: 123_456,
+                deadline_ms: Some(109_000)
+            }
+        ));
+
+        let mut old = actor(HostState::Local);
+        old.pairing_status = PairingStatus::Unsupported;
+        let mapped = map_snapshot(old, 0, 100_000);
+        assert!(!mapped.pairing_available);
+        assert!(matches!(mapped.pairing, PairingState::Unsupported { .. }));
+
+        let mut failed = actor(HostState::Failed);
+        failed.pairing_status = PairingStatus::Challenge;
+        failed.challenge_id = Some(7);
+        failed.comparison_value = Some(123_456);
+        assert!(matches!(
+            map_snapshot(failed, 0, 100_000).pairing,
+            PairingState::Closed
         ));
     }
 }

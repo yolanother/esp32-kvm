@@ -25,15 +25,14 @@ input through this setup surface. This keeps pairing separate from guest
 switching until the native capture and routing integration is complete.
 
 The actor provides `pair_begin(60, now_ms)`, `pair_cancel(now_ms)`,
-`pair_reply(challenge_id, approved, now_ms)`, and a setup snapshot. The current
-wire schema omits the challenge number/ID, pairing deadline and detailed
-rejection status. Firmware version is parsed by CAPS but not yet exposed by
-the actor. The wizard displays unavailable states rather than inventing a
-countdown, code, firmware version or success. Numeric confirmation stays
-disabled even though the actor has a `pair_reply` method; protocol and
-firmware must add an authenticated challenge event before that command can
-be used. A native all-up HID test action is also required before **Finish
-setup** can enable.
+`pair_reply(challenge_id, approved, now_ms)`, and a setup snapshot. Protocol
+minor 1 reports the firmware version, bounded pairing deadline, fresh
+challenge ID, six-digit numeric comparison, and terminal states. The Tauri
+worker converts the host monotonic deadline to a wall-clock deadline for the
+wizard; it forwards approval only with the firmware-reported challenge ID.
+Minor-0 firmware leaves pairing unavailable. Pairing codes never enter saved
+profiles or diagnostics. A native all-up HID test action is still required
+before **Finish setup** can enable.
 
 ## Local identities and safety
 
