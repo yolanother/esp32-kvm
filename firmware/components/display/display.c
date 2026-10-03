@@ -1,7 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Drives the Waveshare 240-by-240 ST7789 through ESP-IDF LCD and LVGL, using
- * small DMA draw buffers and a low-rate status update. A separate GPIO sampler
- * emits BOOT emergency events; PLUS is disabled until its physical pin is proven. */
+ * small DMA draw buffers and a low-rate derived screen update. The panel stays
+ * opt-in while pins remain unverified. A separate GPIO sampler emits BOOT
+ * emergency events; PLUS and touch inputs are disabled pending pin validation. */
 #include "display.h"
 #include <stdio.h>
 #include <string.h>
@@ -26,8 +27,22 @@ static kvm_display_status_t latest_status;
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool started;
 static bool panel_started;
-static lv_obj_t *target_label;
-static lv_obj_t *connection_label;
+static lv_obj_t *title_label;
+static lv_obj_t *primary_label;
+static lv_obj_t *detail_label;
+static lv_obj_t *footer_label;
+static lv_obj_t *row_labels[3];
+
+static lv_obj_t *make_label(lv_obj_t *screen, int16_t y, uint32_t color)
+{
+    lv_obj_t *label = lv_label_create(screen);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    lv_obj_set_width(label, LCD_WIDTH - 24);
+    lv_obj_set_height(label, 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, y);
+    return label;
+}
 
 static void button_worker(void *context)
 {
@@ -89,14 +104,12 @@ static esp_err_t init_panel(void)
     if (!lvgl_port_lock(100)) return ESP_ERR_TIMEOUT;
     lv_obj_t *screen = lv_display_get_screen_active(display);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x101820), 0);
-    target_label = lv_label_create(screen);
-    lv_obj_set_style_text_color(target_label, lv_color_hex(0xffffff), 0);
-    lv_label_set_text(target_label, "HOST");
-    lv_obj_align(target_label, LV_ALIGN_CENTER, 0, -18);
-    connection_label = lv_label_create(screen);
-    lv_obj_set_style_text_color(connection_label, lv_color_hex(0xb0bec5), 0);
-    lv_label_set_text(connection_label, "USB offline | BLE idle");
-    lv_obj_align(connection_label, LV_ALIGN_CENTER, 0, 20);
+    title_label = make_label(screen, 12, 0xb4c5ce);
+    primary_label = make_label(screen, 42, 0xeef5f7);
+    detail_label = make_label(screen, 94, 0xb4c5ce);
+    footer_label = make_label(screen, 210, 0x75e2c3);
+    for (unsigned i = 0; i < 3; ++i)
+        row_labels[i] = make_label(screen, 64 + 44 * i, 0xeef5f7);
     lvgl_port_unlock();
     gpio_config_t backlight_cfg = {
         .pin_bit_mask = 1ULL << GPIO_NUM_46, .mode = GPIO_MODE_OUTPUT,
@@ -110,19 +123,22 @@ static esp_err_t init_panel(void)
 static void display_worker(void *context)
 {
     (void)context;
-    kvm_display_status_t shown = {0};
+    kvm_display_view_t shown = {0};
     for (;;) {
         kvm_display_status_t next;
         portENTER_CRITICAL(&status_lock);
         next = latest_status;
         portEXIT_CRITICAL(&status_lock);
-        if (panel_started && memcmp(&shown, &next, sizeof(next)) != 0 && lvgl_port_lock(20)) {
-            char line[48];
-            lv_label_set_text(target_label, kvm_display_target_label(&next));
-            snprintf(line, sizeof(line), "USB %s | BLE %s", next.usb_connected ? "online" : "offline",
-                     next.guest_ready ? "ready" : "idle");
-            lv_label_set_text(connection_label, line);
-            shown = next;
+        kvm_display_view_t view;
+        kvm_display_make_view(&next, (uint64_t)esp_timer_get_time() / 1000, &view);
+        if (panel_started && memcmp(&shown, &view, sizeof(view)) != 0 && lvgl_port_lock(20)) {
+            lv_label_set_text(title_label, view.title);
+            lv_label_set_text(primary_label, view.primary);
+            lv_label_set_text(detail_label, view.detail);
+            lv_label_set_text(footer_label, view.footer);
+            for (unsigned i = 0; i < 3; ++i)
+                lv_label_set_text(row_labels[i], view.rows[i]);
+            shown = view;
             lvgl_port_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(100));

@@ -1,0 +1,11 @@
+# Device screen state
+
+The firmware display model derives a 240×240 view from copied, confirmed router and pairing status. Rendering cannot change the active route. The board LCD remains disabled at startup until its pins, orientation, backlight, and recovery behavior are validated on hardware. PLUS and touch inputs also remain disabled pending pin mapping; BOOT runtime hold still requests an emergency release.
+
+The view priority is recovery, update, paused, pairing, guest list, then active target. Recovery and update take precedence over stale routing. A disconnected USB link or routing fault shows **INPUT PAUSED**. The active target names a guest only when the status says it is armed; otherwise it shows **DISARMED** or **HOST**. Guest rows use reported capacity and ready bits, and offline rows are never touch-selectable. Touch hit testing returns a request slot only; host arbitration must still acknowledge selection. The screen never treats a request as an active target.
+
+A numeric comparison appears only when pairing state is challenge, the challenge ID is nonzero, the six-digit value is valid, and its monotonic deadline is in the future. The display derives the remaining seconds locally and removes the number when the deadline passes. It never logs or persists the number. Rejected, full, and expired pairing states show distinct retry guidance. Update progress is capped visually at 100 percent; recovery guidance supersedes update progress.
+
+`kvm_display_status_t` now has optional fields for guest capacity/ready mask, guest-list request, touch availability, pairing state/ID/number/deadline, update progress, and recovery. Zero initialization preserves existing callers. The USB worker currently publishes the basic router fields; integration must supply the additional confirmed status fields and set `show_guest_list` from an intentional UI request before these screens can appear on hardware. No physical touch driver or firmware update producer is claimed here.
+
+Portable verification: `firmware/tests/display/run-msvc.ps1` covers the priority rules, disarmed target, rows, touch eligibility, challenge deadline, and button sampler. Native verification uses ESP-IDF 5.5.1 `idf.py -C firmware build` from the isolated worktree. Neither command accesses the device port.

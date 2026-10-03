@@ -1,7 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Defines the portable 240-by-240 device status and button-event model.
- * The display task consumes copied status; button sampling only emits requests
- * and never arms or routes HID itself. */
+ * Defines the portable 240-by-240 device status, derived screen, and button
+ * model. Rendering consumes copied confirmed status; button and touch helpers
+ * emit requests and never arm or route HID themselves. */
 #ifndef ESP32_KVM_DISPLAY_MODEL_H
 #define ESP32_KVM_DISPLAY_MODEL_H
 
@@ -16,7 +16,49 @@ typedef struct {
     bool fault;
     uint8_t selected_slot;
     uint32_t generation;
+    uint8_t guest_slots;
+    uint8_t ready_slots;
+    bool show_guest_list;
+    bool touch_available;
+    uint8_t pairing_state;
+    uint32_t pairing_challenge_id;
+    uint32_t pairing_number;
+    uint64_t pairing_deadline_ms;
+    bool updating;
+    uint8_t update_percent;
+    bool recovery_required;
 } kvm_display_status_t;
+
+/** Pairing states mirrored from the negotiated firmware status protocol. */
+typedef enum {
+    KVM_DISPLAY_PAIRING_CLOSED = 0, KVM_DISPLAY_PAIRING_WAITING = 1,
+    KVM_DISPLAY_PAIRING_CHALLENGE = 2, KVM_DISPLAY_PAIRING_REJECTED = 3,
+    KVM_DISPLAY_PAIRING_CAPACITY = 4, KVM_DISPLAY_PAIRING_TIMEOUT = 5
+} kvm_display_pairing_state_t;
+
+/** One of the five 240-by-240 device views. */
+typedef enum {
+    KVM_DISPLAY_ACTIVE, KVM_DISPLAY_GUEST_LIST, KVM_DISPLAY_PAIRING,
+    KVM_DISPLAY_PAUSED, KVM_DISPLAY_UPDATE, KVM_DISPLAY_RECOVERY
+} kvm_display_screen_t;
+
+/** Fixed-size view copied by LVGL; no pairing secret is persisted or logged. */
+typedef struct {
+    kvm_display_screen_t screen;
+    char title[24];
+    char primary[32];
+    char detail[48];
+    char footer[48];
+    char rows[3][32];
+    uint8_t selectable_slots;
+    bool touch_available;
+} kvm_display_view_t;
+
+/** Derives visible text from confirmed status and a monotonic timestamp. */
+void kvm_display_make_view(const kvm_display_status_t *status, uint64_t now_ms,
+                           kvm_display_view_t *view);
+/** Returns the ready slot touched in a guest row, or zero if unavailable. */
+uint8_t kvm_display_touch_slot(const kvm_display_view_t *view, uint16_t y);
 
 /** Request from a runtime button, never a direct route mutation. */
 typedef enum {
