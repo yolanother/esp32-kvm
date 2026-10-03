@@ -41,6 +41,8 @@ static bool pair_begin(void *context) { (void)context; return hid_guest_request_
 static bool pair_cancel(void *context) { (void)context; return hid_guest_request_pair_cancel(); }
 static bool pair_reply(void *context, uint32_t id, bool approved)
 { (void)context; return hid_guest_request_pair_reply(id, approved); }
+static bool pair_forget(void *context, const uint8_t token[16])
+{ (void)context; return hid_guest_request_forget_bond(token); }
 
 static void pairing_event(const hid_guest_pairing_event_t *event, void *context)
 {
@@ -159,7 +161,7 @@ static void usb_worker(void *context)
                                           new_session(), send_binary, NULL);
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
             kvm_transport_core_bind_pairing(&core,
-                (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply}, NULL);
+                (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply, pair_forget}, NULL);
             was_connected = true;
         }
         int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(20));

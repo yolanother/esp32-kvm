@@ -74,7 +74,7 @@ $examples = @(
     @('consumer-state', 0x32, [byte[]](0,0), [uint64]5, [uint32]1, [uint32]2),
     @('pair-begin', 0x40, [byte[]](60,0), [uint64]5, [uint32]1, [uint32]2),
     @('pair-cancel', 0x41, [byte[]]@(), [uint64]5, [uint32]1, [uint32]2),
-    @('forget-bond', 0x42, [byte[]](0xa1,1,0x50,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0), [uint64]5, [uint32]1, [uint32]2),
+    @('forget-bond', 0x42, [byte[]](0xa1,1,0x50,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0), [uint64]5, [uint32]1, [uint32]2),
     @('pair-reply', 0x43, [byte[]](0xa3,1,1,2,0,3,0xf5), [uint64]5, [uint32]1, [uint32]2),
     @('device-select-request', 0x50, [byte[]](1,1,0,0,0), [uint64]5, [uint32]1, [uint32]2),
     @('update-prepare', 0x60, [byte[]]@(), [uint64]5, [uint32]1, [uint32]2),

@@ -2,7 +2,8 @@
  * Serializes bounded HID ready, arm, release, and report requests from the
  * USB worker onto NimBLE's host loop. A timed-out request fails closed and
  * queues a disconnect; pairing commands use the same bounded host-loop bridge
- * and no HID or pairing state is read on the USB worker. */
+ * and no HID or pairing state is read on the USB worker. Confirmed bond
+ * deletion uses the same bounded bridge and preserves opaque token bytes. */
 #include "hid_guest.h"
 #include "hid_guest_rpc.h"
 #include <string.h>
@@ -12,7 +13,7 @@
 
 #define RPC_TIMEOUT_MS 20u
 typedef enum { RPC_READY, RPC_ARM, RPC_RELEASE, RPC_KEYBOARD, RPC_MOUSE, RPC_CONSUMER,
-               RPC_PAIR_BEGIN, RPC_PAIR_CANCEL, RPC_PAIR_REPLY } rpc_op_t;
+               RPC_PAIR_BEGIN, RPC_PAIR_CANCEL, RPC_PAIR_REPLY, RPC_FORGET_BOND } rpc_op_t;
 typedef struct { uint8_t buttons; int16_t dx, dy; int8_t wheel, pan; } mouse_args_t;
 typedef struct { uint32_t challenge_id; bool approved; } pair_reply_args_t;
 typedef struct {
@@ -32,6 +33,7 @@ typedef struct {
     int8_t wheel, pan;
     uint16_t usage;
     pair_reply_args_t pair_reply;
+    uint8_t forget_token[HID_PAIRING_TOKEN_LEN];
 } rpc_state_t;
 static rpc_state_t rpc;
 
@@ -67,6 +69,12 @@ static void on_host(struct ble_npl_event *event)
             rpc.result = hid_guest_pairing_confirm(rpc.pair_reply.challenge_id,
                                                     rpc.pair_reply.approved) == ESP_OK;
             break;
+        case RPC_FORGET_BOND: {
+            hid_token_t token;
+            memcpy(token.bytes, rpc.forget_token, sizeof(token.bytes));
+            rpc.result = hid_guest_pairing_forget(token, true) == ESP_OK;
+            break;
+        }
         }
         if (channel->needs_disconnect && channel->connected)
             hid_guest_disconnect_current();
@@ -105,6 +113,7 @@ static bool request(rpc_op_t operation, const void *payload)
         rpc.wheel = mouse->wheel; rpc.pan = mouse->pan;
     } else if (operation == RPC_CONSUMER) rpc.usage = *(const uint16_t *)payload;
     else if (operation == RPC_PAIR_REPLY) rpc.pair_reply = *(const pair_reply_args_t *)payload;
+    else if (operation == RPC_FORGET_BOND) memcpy(rpc.forget_token, payload, sizeof(rpc.forget_token));
     ble_npl_mutex_release(&rpc.mutex);
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &rpc.event);
     bool completed = ble_npl_sem_pend(&rpc.completion,
@@ -143,3 +152,5 @@ bool hid_guest_request_pair_reply(uint32_t challenge_id, bool approved)
     const pair_reply_args_t args = {challenge_id, approved};
     return request(RPC_PAIR_REPLY, &args);
 }
+bool hid_guest_request_forget_bond(const uint8_t token[HID_PAIRING_TOKEN_LEN])
+{ return token && request(RPC_FORGET_BOND, token); }

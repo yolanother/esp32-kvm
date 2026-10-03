@@ -172,6 +172,28 @@ fn minor_one_pairing_status_requires_complete_numeric_challenge() {
 }
 
 #[test]
+fn forget_bond_rejects_zero_or_wrong_length_token() {
+    let mut payload = vec![0xa1, 1, 0x50];
+    payload.extend_from_slice(&[0; 16]);
+    assert_eq!(
+        Frame::new(MessageKind::ForgetBond, 5, 1, 0, payload.clone()).encode(),
+        Err(ProtocolError::Payload)
+    );
+    payload[3] = 1;
+    assert!(
+        Frame::new(MessageKind::ForgetBond, 5, 1, 0, payload.clone())
+            .encode()
+            .is_ok()
+    );
+    payload[2] = 0x4f;
+    payload.pop();
+    assert_eq!(
+        Frame::new(MessageKind::ForgetBond, 5, 1, 0, payload).encode(),
+        Err(ProtocolError::Payload)
+    );
+}
+
+#[test]
 fn bounded_decoder_drains_oversize_and_recovers_after_delimiter() {
     let mut decoder = FrameDecoder::new();
     for _ in 0..1024 {

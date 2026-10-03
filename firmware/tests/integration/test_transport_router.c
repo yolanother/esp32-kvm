@@ -13,12 +13,16 @@ static int replies, releases, arms, sends;
 static uint64_t now_ms;
 static bool ready = true;
 static unsigned pair_opens, pair_replies;
+static unsigned forgets;
+static uint8_t forgotten_token[16];
 static uint32_t last_challenge;
 static bool last_approval;
 static bool pair_begin(void *context) { (void)context; pair_opens++; return true; }
 static bool pair_cancel(void *context) { (void)context; return true; }
 static bool pair_reply(void *context, uint32_t id, bool approved)
 { (void)context; pair_replies++; last_challenge = id; last_approval = approved; return true; }
+static bool pair_forget(void *context, const uint8_t token[16])
+{ (void)context; forgets++; memcpy(forgotten_token, token, 16); return true; }
 
 static uint32_t crc(const uint8_t *p, size_t n)
 {
@@ -144,7 +148,7 @@ int main(void)
     /* Minor one carries the numeric challenge in STATUS and accepts only an
      * exact numeric-reply payload while the router remains local. */
     kvm_transport_core_bind_pairing(&core,
-        (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply}, NULL);
+        (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply, pair_forget}, NULL);
     const uint8_t hello1[] = {1, 0, 0, 0, 0, 0};
     send_frame(&core, KVM_MSG_HELLO, 0, 30, 0, hello1, sizeof(hello1));
     expect_reply(KVM_MSG_CAPS, 0, 0);
@@ -175,5 +179,35 @@ int main(void)
     send_frame(&core, KVM_MSG_PAIR_REPLY, 7, 36, router.generation, reply_payload, sizeof(reply_payload));
     expect_reply(KVM_MSG_NACK, KVM_ROUTER_BAD_PAYLOAD, router.generation);
     assert(pair_replies == 1);
+    const uint8_t forget_payload[] = {0xa1, 1, 0x50,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    send_frame(&core, KVM_MSG_FORGET_BOND, 7, 40, router.generation,
+               forget_payload, sizeof(forget_payload));
+    expect_reply(KVM_MSG_NACK, KVM_ROUTER_PAUSED, router.generation);
+    assert(forgets == 0);
+    kvm_transport_core_pairing_event(&core, KVM_PAIRING_CLOSED, 0, 0, 0);
+    send_frame(&core, KVM_MSG_FORGET_BOND, 7, 37, router.generation,
+               forget_payload, sizeof(forget_payload));
+    expect_reply(KVM_MSG_ACK, 0, router.generation);
+    assert(forgets == 1 && memcmp(forgotten_token, forget_payload + 3, 16) == 0);
+    send_frame(&core, KVM_MSG_FORGET_BOND, 7, 37, router.generation,
+               forget_payload, sizeof(forget_payload));
+    expect_reply(KVM_MSG_ACK, 0, router.generation);
+    assert(forgets == 1); /* Lost ACK retry cannot delete twice. */
+    send_frame(&core, KVM_MSG_FORGET_BOND, 7, 38, router.generation - 1,
+               forget_payload, sizeof(forget_payload));
+    expect_reply(KVM_MSG_NACK, KVM_ROUTER_PAUSED, router.generation);
+    assert(forgets == 1);
+    const uint8_t bad_forget[] = {0xa1, 1, 0x4f,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    send_frame(&core, KVM_MSG_FORGET_BOND, 7, 39, router.generation,
+               bad_forget, sizeof(bad_forget));
+    expect_reply(KVM_MSG_NACK, KVM_ROUTER_BAD_PAYLOAD, router.generation);
+    assert(forgets == 1);
+    uint8_t zero_forget[sizeof(forget_payload)] = {0xa1, 1, 0x50};
+    send_frame(&core, KVM_MSG_FORGET_BOND, 7, 41, router.generation,
+               zero_forget, sizeof(zero_forget));
+    expect_reply(KVM_MSG_NACK, KVM_ROUTER_BAD_PAYLOAD, router.generation);
+    assert(forgets == 1);
     return 0;
 }

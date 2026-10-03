@@ -31,6 +31,8 @@ typedef struct {
     bool (*begin)(void *context);
     bool (*cancel)(void *context);
     bool (*reply)(void *context, uint32_t challenge_id, bool approved);
+    /** Forgets only the explicitly supplied opaque token. */
+    bool (*forget)(void *context, const uint8_t token[16]);
 } kvm_transport_pairing_ops_t;
 
 /** Private stream and handshake state for one USB connection. */
@@ -62,6 +64,10 @@ typedef struct {
     uint64_t pairing_deadline_ms;
     kvm_transport_pairing_state_t status_pairing_state;
     uint32_t status_challenge_id;
+    bool last_forget_valid;
+    uint32_t last_forget_seq;
+    uint32_t last_forget_generation;
+    uint8_t last_forget_token[16];
 } kvm_transport_core_t;
 
 /** Initializes a disarmed loopback core with a nonzero, caller-generated session. */

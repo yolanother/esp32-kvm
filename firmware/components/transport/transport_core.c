@@ -2,7 +2,8 @@
  * Implements bounded binary USB framing, handshake and command dispatch for
  * ESP32-S3 CDC. Validated frames enter one serialized router; malformed or
  * stale frames have no HID effects and diagnostic text never enters CDC.
- * Minor-one pairing replies are matched against the active challenge. */
+ * Minor-one pairing replies match the active challenge and bond deletion
+ * accepts only an exact opaque token while routing is local and disarmed. */
 #include "transport_core.h"
 #include <string.h>
 
@@ -227,6 +228,16 @@ static bool cbor_pair_reply(const uint8_t *p, size_t length, uint32_t *id, bool 
     return true;
 }
 
+static bool cbor_forget_token(const uint8_t *p, size_t length, const uint8_t **token)
+{
+    if (length != 19 || p[0] != 0xa1 || p[1] != 1 || p[2] != 0x50) return false;
+    bool nonzero = false;
+    for (size_t i = 3; i < length; ++i) nonzero |= p[i] != 0;
+    if (!nonzero) return false;
+    *token = p + 3;
+    return true;
+}
+
 static bool utf8_valid(const uint8_t *p, size_t length)
 {
     for (size_t i = 0; i < length;) {
@@ -298,6 +309,7 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
         core->minor = get_u16(payload);
         core->pairing_state = KVM_PAIRING_CLOSED;
         core->pairing_challenge_id = 0;
+        core->last_forget_valid = false;
         if (core->router) kvm_router_reset(core->router);
         send_caps(core, seq);
         return;
@@ -345,11 +357,26 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
             else r->last_result_generation = r->generation;
             send_result(core, kind, seq, result);
         } else if (kind == KVM_MSG_PAIR_BEGIN || kind == KVM_MSG_PAIR_CANCEL ||
-                   kind == KVM_MSG_PAIR_REPLY) {
+                   kind == KVM_MSG_PAIR_REPLY || kind == KVM_MSG_FORGET_BOND) {
             uint32_t id = 0;
             bool approved = false;
+            const uint8_t *token = NULL;
+            if (kind == KVM_MSG_FORGET_BOND && core->last_forget_valid &&
+                seq == core->last_forget_seq) {
+                result = cbor_forget_token(payload, payload_length, &token) &&
+                         generation == core->last_forget_generation &&
+                         memcmp(token, core->last_forget_token, 16) == 0 ?
+                         KVM_ROUTER_OK : KVM_ROUTER_BAD_PAYLOAD;
+                r->last_result_generation = core->last_forget_generation;
+                send_result(core, kind, seq, result);
+                return;
+            }
             if (core->minor < 1) result = (kvm_router_result_t)8; /* UNSUPPORTED */
             else if (generation != r->generation || r->armed || r->slot)
+                result = KVM_ROUTER_PAUSED;
+            else if (kind == KVM_MSG_FORGET_BOND &&
+                     (core->pairing_state == KVM_PAIRING_WAITING ||
+                      core->pairing_state == KVM_PAIRING_CHALLENGE))
                 result = KVM_ROUTER_PAUSED;
             else if (kind == KVM_MSG_PAIR_BEGIN && payload_length == 2 &&
                      get_u16(payload) == 60 && core->pairing_ops.begin)
@@ -363,10 +390,21 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
                      id == core->pairing_challenge_id && firmware_ms(core) < core->pairing_deadline_ms &&
                      core->pairing_ops.reply)
                 result = core->pairing_ops.reply(core->pairing_context, id, approved) ? KVM_ROUTER_OK : KVM_ROUTER_BUSY;
+            else if (kind == KVM_MSG_FORGET_BOND &&
+                     cbor_forget_token(payload, payload_length, &token) &&
+                     core->pairing_ops.forget)
+                result = core->pairing_ops.forget(core->pairing_context, token) ?
+                         KVM_ROUTER_OK : KVM_ROUTER_NOT_READY;
             if (result == KVM_ROUTER_OK && kind == KVM_MSG_PAIR_REPLY) {
                 core->pairing_challenge_id = 0;
                 core->pairing_number = 0;
                 core->pairing_state = approved ? KVM_PAIRING_WAITING : KVM_PAIRING_REJECTED;
+            }
+            if (result == KVM_ROUTER_OK && kind == KVM_MSG_FORGET_BOND) {
+                core->last_forget_valid = true;
+                core->last_forget_seq = seq;
+                core->last_forget_generation = generation;
+                memcpy(core->last_forget_token, token, 16);
             }
             r->last_result_generation = r->generation;
             send_result(core, kind, seq, result);
@@ -419,6 +457,7 @@ void kvm_transport_core_reset(kvm_transport_core_t *core)
     core->minor = 0;
     core->pairing_state = KVM_PAIRING_CLOSED;
     core->pairing_challenge_id = 0;
+    core->last_forget_valid = false;
     if (core->router) kvm_router_reset(core->router);
 }
 

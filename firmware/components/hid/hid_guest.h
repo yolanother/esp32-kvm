@@ -73,5 +73,7 @@ bool hid_guest_request_pair_begin(void);
 bool hid_guest_request_pair_cancel(void);
 /** Answers the exact challenge on the NimBLE host loop within a bounded wait. */
 bool hid_guest_request_pair_reply(uint32_t challenge_id, bool approved);
+/** Forgets one confirmed opaque bond token on the NimBLE host loop. */
+bool hid_guest_request_forget_bond(const uint8_t token[HID_PAIRING_TOKEN_LEN]);
 
 #endif

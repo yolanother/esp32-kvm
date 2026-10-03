@@ -274,7 +274,12 @@ pub(crate) fn validate(kind: MessageKind, payload: &[u8]) -> Result<(), Protocol
             }
         }
         MessageKind::ForgetBond => {
-            bytes16(map(&value, &[1], &[1])?, 1)?;
+            let fields = map(&value, &[1], &[1])?;
+            bytes16(fields, 1)?;
+            if matches!(field(fields, 1), Some(Value::Bytes(bytes)) if bytes.iter().all(|byte| *byte == 0))
+            {
+                return Err(ProtocolError::Payload);
+            }
         }
         MessageKind::PairReply => {
             let fields = map(&value, &[1, 2, 3], &[1, 2, 3])?;
