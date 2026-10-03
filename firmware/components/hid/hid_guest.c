@@ -246,10 +246,20 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     }
     case BLE_GAP_EVENT_SUBSCRIBE:
+#ifdef CONFIG_KVM_HID_GATT_TRACE
+        ESP_LOGI(tag, "HID subscribe conn=%u handle=%u notify=%u",
+                 event->subscribe.conn_handle, event->subscribe.attr_handle,
+                 event->subscribe.cur_notify);
+#endif
         hid_gatt_on_subscribe(event->subscribe.conn_handle,
                               event->subscribe.attr_handle, event->subscribe.cur_notify);
         return 0;
     case BLE_GAP_EVENT_NOTIFY_TX: {
+#ifdef CONFIG_KVM_HID_GATT_TRACE
+        ESP_LOGI(tag, "HID notify conn=%u handle=%u status=%d",
+                 event->notify_tx.conn_handle, event->notify_tx.attr_handle,
+                 event->notify_tx.status);
+#endif
         hid_channel_t *channel = hid_gatt_channel_for(event->notify_tx.conn_handle);
         if (event->notify_tx.status != 0 && channel) {
             channel->armed = false;

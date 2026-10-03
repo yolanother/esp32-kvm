@@ -11,6 +11,9 @@
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
 #include "os/os_mbuf.h"
+#ifdef CONFIG_KVM_HID_GATT_TRACE
+#include "esp_log.h"
+#endif
 
 enum attribute {
     ATTR_HID_INFO = 1,
@@ -229,20 +232,29 @@ static int write_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *
 static int access_attribute(uint16_t connection_handle, uint16_t attribute_handle,
                             struct ble_gatt_access_ctxt *context, void *argument)
 {
-    (void)attribute_handle;
     enum attribute attribute = (enum attribute)(uintptr_t)argument;
     hid_channel_t *channel = hid_gatt_channel_for(connection_handle);
+    int result;
     if (attribute != ATTR_HID_INFO && attribute != ATTR_REPORT_MAP &&
         attribute != ATTR_KEYBOARD_REFERENCE && attribute != ATTR_MOUSE_REFERENCE &&
         attribute != ATTR_CONSUMER_REFERENCE && attribute != ATTR_LED_REFERENCE &&
         attribute != ATTR_BATTERY_REFERENCE &&
         attribute != ATTR_BATTERY_LEVEL && attribute != ATTR_PNP_ID &&
         (!channel || !channel->encrypted))
-        return BLE_ATT_ERR_INSUFFICIENT_ENC;
-    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR ||
-        context->op == BLE_GATT_ACCESS_OP_READ_DSC) return read_attribute(channel, context, attribute);
-    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR) return write_attribute(channel, context, attribute);
-    return BLE_ATT_ERR_UNLIKELY;
+        result = BLE_ATT_ERR_INSUFFICIENT_ENC;
+    else if (context->op == BLE_GATT_ACCESS_OP_READ_CHR ||
+             context->op == BLE_GATT_ACCESS_OP_READ_DSC)
+        result = read_attribute(channel, context, attribute);
+    else if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR)
+        result = write_attribute(channel, context, attribute);
+    else result = BLE_ATT_ERR_UNLIKELY;
+#ifdef CONFIG_KVM_HID_GATT_TRACE
+    ESP_LOGI("esp32-kvm-gatt", "ATT conn=%u handle=%u attr=%u op=%u rc=%d",
+             connection_handle, attribute_handle, attribute, context->op, result);
+#else
+    (void)attribute_handle;
+#endif
+    return result;
 }
 
 static int send_report(void *unused, uint16_t connection_handle, uint8_t report_id,

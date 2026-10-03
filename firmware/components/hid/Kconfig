@@ -4,3 +4,10 @@ config KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
     help
         Temporarily remove mouse and consumer reports and characteristics to
         isolate host HID registration failures. This mode is not a KVM release.
+
+config KVM_HID_GATT_TRACE
+    bool "Log HID GATT access for host registration diagnosis"
+    default n
+    help
+        Log attribute IDs, operations, subscriptions, and notification results.
+        Do not enable in a release build.
