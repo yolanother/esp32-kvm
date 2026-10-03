@@ -3,15 +3,23 @@
  * main remains disarmed; callers must verify board recovery and explicitly
  * start this service before it can advertise or accept a guest. It also
  * exposes bounded NimBLE host-loop pairing requests and short status events.
- * The current host/USB route uses slot one only. Connected-peer STATUS lookup
- * exposes only its stable opaque bond token for that routed slot;
- * retained inventory reads use the same bounded host-loop bridge. */
+ * Host/USB routes through one selected channel at a time. A bounded host-loop
+ * snapshot exposes each authenticated live peer's opaque token and readiness;
+ * retained inventory uses the same serialized bridge. */
 #ifndef ESP32_KVM_HID_GUEST_H
 #define ESP32_KVM_HID_GUEST_H
 
 #include "esp_err.h"
 #include "hid_pairing.h"
+#include "hid_gatt.h"
 #include "hid_report.h"
+
+/** Authenticated, opaque state for one one-based HID connection slot. */
+typedef struct {
+    uint8_t token[HID_PAIRING_TOKEN_LEN];
+    bool ready;
+    bool subscribed;
+} hid_guest_slot_snapshot_t;
 
 /** Pairing event types delivered to a future host status transport. */
 typedef enum {
@@ -54,6 +62,10 @@ void hid_guest_pairing_snapshot(hid_pairing_t *output);
 /** Looks up the current authenticated connection's opaque token on the NimBLE host loop.
  * Clears output and returns false for unbound, disconnected, or unauthenticated peers. */
 bool hid_guest_current_bond_token(hid_token_t *output);
+/** Copies all authenticated live slots on the NimBLE host thread. */
+bool hid_guest_snapshot_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONNECTIONS]);
+/** Copies all live slots through one bounded host-loop request; zeros on failure. */
+bool hid_guest_request_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONNECTIONS]);
 /** Copies retained opaque tokens only; call on the NimBLE host thread. */
 bool hid_guest_retained_bonds(hid_token_t output[HID_PAIRING_MAX_BONDS], size_t *count);
 /** Removes one bond only after explicit confirmation on the host thread. */

@@ -87,7 +87,7 @@ void kvm_router_init(kvm_router_t *r, kvm_router_output_t output, void *context)
 
 bool kvm_router_set_capacity(kvm_router_t *r, uint8_t capacity)
 {
-    if (!r || r->slot || r->armed || capacity < 1 || capacity > KVM_ROUTER_MAX_SLOTS)
+    if (!r || r->session_open || r->slot || r->armed || capacity < 1 || capacity > KVM_ROUTER_MAX_SLOTS)
         return false;
     r->capacity = capacity;
     return true;

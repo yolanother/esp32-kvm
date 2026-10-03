@@ -4,8 +4,9 @@
  * queues a disconnect; pairing commands use the same bounded host-loop bridge
  * and no HID or pairing state is read on the USB worker. Confirmed bond
  * deletion uses the same bounded bridge and preserves opaque token bytes.
- * Each HID request carries its one-based target slot. Current-bond and retained inventory lookups copy only opaque tokens into
- * the requesting worker; timeout output is cleared. */
+ * Each HID request carries its one-based target slot. Live-slot and retained
+ * inventory lookups copy only opaque tokens into the requesting worker;
+ * timeout output is cleared. */
 #include "hid_guest.h"
 #include "hid_guest_rpc.h"
 #include <string.h>
@@ -16,7 +17,7 @@
 #define RPC_TIMEOUT_MS 20u
 typedef enum { RPC_READY, RPC_ARM, RPC_RELEASE, RPC_KEYBOARD, RPC_MOUSE, RPC_CONSUMER,
                RPC_PAIR_BEGIN, RPC_PAIR_CANCEL, RPC_PAIR_REPLY, RPC_FORGET_BOND,
-               RPC_CURRENT_TOKEN, RPC_INVENTORY } rpc_op_t;
+               RPC_CURRENT_TOKEN, RPC_INVENTORY, RPC_SLOTS } rpc_op_t;
 typedef struct { uint8_t buttons; int16_t dx, dy; int8_t wheel, pan; } mouse_args_t;
 typedef struct { uint32_t challenge_id; bool approved; } pair_reply_args_t;
 typedef struct {
@@ -40,6 +41,7 @@ typedef struct {
     uint8_t forget_token[HID_PAIRING_TOKEN_LEN];
     hid_token_t current_token;
     uint8_t inventory[1 + HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN];
+    hid_guest_slot_snapshot_t slots[HID_GATT_MAX_CONNECTIONS];
 } rpc_state_t;
 static rpc_state_t rpc;
 
@@ -61,6 +63,7 @@ static void on_host(struct ble_npl_event *event)
     rpc.result = false;
     memset(&rpc.current_token, 0, sizeof(rpc.current_token));
     memset(rpc.inventory, 0, sizeof(rpc.inventory));
+    memset(rpc.slots, 0, sizeof(rpc.slots));
     if (execute) {
         hid_channel_t *channel = hid_gatt_channel_at(rpc.slot);
         switch (rpc.operation) {
@@ -97,6 +100,7 @@ static void on_host(struct ble_npl_event *event)
             memset(tokens, 0, sizeof(tokens));
             break;
         }
+        case RPC_SLOTS: rpc.result = hid_guest_snapshot_slots(rpc.slots); break;
         }
         if (channel && channel->needs_disconnect && channel->connected)
             hid_guest_disconnect_slot(rpc.slot);
@@ -118,7 +122,8 @@ esp_err_t hid_guest_rpc_init(void)
 
 static bool request(rpc_op_t operation, uint8_t slot, const void *payload, uint8_t *output)
 {
-    size_t output_length = operation == RPC_INVENTORY ? sizeof(rpc.inventory) : HID_PAIRING_TOKEN_LEN;
+    size_t output_length = operation == RPC_INVENTORY ? sizeof(rpc.inventory) :
+                           operation == RPC_SLOTS ? sizeof(rpc.slots) : HID_PAIRING_TOKEN_LEN;
     if (output) memset(output, 0, output_length);
     if (slot > HID_GATT_MAX_CONNECTIONS ||
         (!slot && operation <= RPC_CONSUMER) ||
@@ -155,8 +160,11 @@ static bool request(rpc_op_t operation, uint8_t slot, const void *payload, uint8
         memcpy(output, rpc.current_token.bytes, HID_PAIRING_TOKEN_LEN);
     if (result && output && operation == RPC_INVENTORY)
         memcpy(output, rpc.inventory, sizeof(rpc.inventory));
+    if (result && output && operation == RPC_SLOTS)
+        memcpy(output, rpc.slots, sizeof(rpc.slots));
     memset(&rpc.current_token, 0, sizeof(rpc.current_token));
     memset(rpc.inventory, 0, sizeof(rpc.inventory));
+    memset(rpc.slots, 0, sizeof(rpc.slots));
     if (!completed) {
         if (rpc.finished) rpc.busy = false;
     }
@@ -199,6 +207,8 @@ bool hid_guest_request_forget_bond(const uint8_t token[HID_PAIRING_TOKEN_LEN])
 { return token && request(RPC_FORGET_BOND, 0, token, NULL); }
 bool hid_guest_request_current_bond_token(uint8_t output[HID_PAIRING_TOKEN_LEN])
 { return output && request(RPC_CURRENT_TOKEN, 1, NULL, output); }
+bool hid_guest_request_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONNECTIONS])
+{ return output && request(RPC_SLOTS, 0, NULL, (uint8_t *)output); }
 bool hid_guest_request_retained_bonds(uint8_t output[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN],
                                       uint8_t *count)
 {

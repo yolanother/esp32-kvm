@@ -1,7 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Defines the single-threaded firmware routing actor. The USB transport calls
- * this API after frame validation; output callbacks bind local and BLE HID
- * sinks without allowing stale sessions or generations to emit reports. */
+ * this API after frame validation; output callbacks target one of up to three
+ * gated HID slots while stale sessions and generations cannot emit reports. */
 #ifndef ESP32_KVM_ROUTER_H
 #define ESP32_KVM_ROUTER_H
 
@@ -105,7 +105,7 @@ typedef struct {
 
 /** Initializes the router disarmed on local slot zero. */
 void kvm_router_init(kvm_router_t *router, kvm_router_output_t output, void *context);
-/** Sets an admitted slot capacity only while local and disarmed. Defaults to one. */
+/** Sets an admitted slot capacity only before opening a session. Defaults to one. */
 bool kvm_router_set_capacity(kvm_router_t *router, uint8_t capacity);
 /** Opens a fresh transport session, releasing any old output. */
 void kvm_router_session_open(kvm_router_t *router, uint64_t session, uint64_t now_ms);

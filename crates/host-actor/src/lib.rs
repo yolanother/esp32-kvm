@@ -911,6 +911,31 @@ impl<S: Read + Write> HostActor<S> {
             self.fail(HostFault::Protocol);
             return;
         }
+        if status.selected > self.device.max_connections
+            || status
+                .slots
+                .iter()
+                .any(|slot| slot.slot > self.device.max_connections)
+            || (status.state == 2
+                && !status
+                    .slots
+                    .iter()
+                    .any(|slot| slot.slot == status.selected && slot.ready && slot.subscribed))
+        {
+            self.fail(HostFault::Protocol);
+            return;
+        }
+        if let Some(State::Guest(active_slot)) = self.router.as_ref().map(RequestActor::state) {
+            let prior = self.slots.iter().find(|slot| slot.slot == active_slot);
+            let current = status.slots.iter().find(|slot| slot.slot == active_slot);
+            if prior.is_none()
+                || current.is_none()
+                || prior.map(|slot| slot.bond_token) != current.map(|slot| slot.bond_token)
+            {
+                self.fail(HostFault::Protocol);
+                return;
+            }
+        }
         self.last_peer = now_ms;
         if self.router.is_none() {
             if !matches!(status.state, 0 | 5) || status.selected != 0 {
@@ -1354,6 +1379,7 @@ impl Status {
             return Err(ProtocolError::Payload);
         }
         let mut slots: Vec<SlotSnapshot> = Vec::new();
+        let mut previous_slot = 0;
         for _ in 0..count {
             c.expect(0xa5)?;
             c.expect(1)?;
@@ -1367,8 +1393,17 @@ impl Status {
             let subscribed = c.bool()?;
             c.expect(5)?;
             let _interval = c.uint()?;
-            if slot == 0 || slot > 3 || slots.iter().any(|seen| u64::from(seen.slot) == slot) {
+            if slot == 0
+                || slot > 3
+                || slot <= previous_slot
+                || (subscribed && !is_ready)
+                || (bond_token != [0; 16] && slots.iter().any(|seen| seen.bond_token == bond_token))
+            {
                 return Err(ProtocolError::Payload);
+            }
+            previous_slot = slot;
+            if bond_token == [0; 16] {
+                continue;
             }
             slots.push(SlotSnapshot {
                 slot: slot as u8,

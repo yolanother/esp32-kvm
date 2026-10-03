@@ -4,8 +4,8 @@
  * stale frames have no HID effects and diagnostic text never enters CDC.
  * Minor-one pairing replies match the active challenge and bond deletion
  * accepts only an exact opaque token while routing is local and disarmed.
- * STATUS reports only the authenticated connected guest's cached token.
- * Minor-two retained inventory is fetched through a bounded host-loop
+ * Minor-two STATUS reports bounded, authenticated live slots from a cached
+ * host-loop snapshot. Retained inventory is fetched through a bounded
  * callback and never contains BLE addresses or key material. */
 #include "transport_core.h"
 #include <string.h>
@@ -135,7 +135,8 @@ static void send_caps(kvm_transport_core_t *core, uint32_t seq)
     payload[at++] = 2; at += cbor_text(payload + at, core->board_id);
     payload[at++] = 3; payload[at++] = 0; /* minor minimum */
     payload[at++] = 4; payload[at++] = KVM_PROTOCOL_MINOR_MAX;
-    payload[at++] = 5; payload[at++] = 1; /* One live BLE guest. */
+    payload[at++] = 5;
+    payload[at++] = core->minor >= 2 && core->router ? core->router->capacity : 1;
     payload[at++] = 6; payload[at++] = 8; /* HID pairing policy capacity. */
     payload[at++] = 7; payload[at++] = 0; /* Report feature flags not negotiated. */
     payload[at++] = 8; at += cbor_uint(payload + at, core->session_id);
@@ -160,14 +161,36 @@ static void send_result(kvm_transport_core_t *core, uint8_t original,
 
 static void send_status(kvm_transport_core_t *core, uint32_t seq)
 {
-    uint8_t p[96] = {0xa5, 1, 0, 2, 0, 3, 0x81, 0xa5, 1, 1, 2, 0x50};
+    uint8_t p[192] = {0};
     kvm_router_t *r = core->router;
-    bool is_ready = r && r->output.ready && r->output.ready(r->context, 1);
-    memcpy(p + 12, core->connected_token, sizeof(core->connected_token));
-    size_t at = 28;
-    p[at++] = 3; p[at++] = is_ready ? 0xf5 : 0xf4;
-    p[at++] = 4; p[at++] = is_ready ? 0xf5 : 0xf4;
-    p[at++] = 5; p[at++] = 0;
+    size_t at = 0;
+    p[at++] = core->minor >= 1 ? 0xa6 : 0xa5;
+    p[at++] = 1;
+    size_t state_at = at++;
+    p[at++] = 2;
+    p[at++] = r ? r->slot : 0;
+    p[at++] = 3;
+    uint8_t capacity = core->minor >= 2 && r ? r->capacity : 1;
+    uint8_t count = 0;
+    if (core->minor < 2) count = 1;
+    else for (uint8_t slot = 0; slot < capacity; ++slot)
+        if (memcmp(core->slots[slot].token, (uint8_t[16]){0}, 16) != 0) ++count;
+    p[at++] = (uint8_t)(0x80u + count);
+    for (uint8_t slot = 0; slot < capacity; ++slot) {
+        if (core->minor >= 2 &&
+            memcmp(core->slots[slot].token, (uint8_t[16]){0}, 16) == 0) continue;
+        bool is_ready = core->minor >= 2 ? core->slots[slot].ready :
+                        r && r->output.ready && r->output.ready(r->context, 1);
+        bool subscribed = core->minor >= 2 ? core->slots[slot].subscribed : is_ready;
+        p[at++] = 0xa5;
+        p[at++] = 1; p[at++] = (uint8_t)(slot + 1);
+        p[at++] = 2; p[at++] = 0x50;
+        memcpy(p + at, core->minor >= 2 ? core->slots[slot].token : core->connected_token, 16);
+        at += 16;
+        p[at++] = 3; p[at++] = is_ready ? 0xf5 : 0xf4;
+        p[at++] = 4; p[at++] = subscribed ? 0xf5 : 0xf4;
+        p[at++] = 5; p[at++] = 0;
+    }
     p[at++] = 4; p[at++] = r && r->fault ? 1 : 0;
     p[at++] = 5; at += cbor_uint(p + at, r ? r->generation : 0);
     if (core->minor >= 1) {
@@ -179,7 +202,6 @@ static void send_status(kvm_transport_core_t *core, uint32_t seq)
             core->pairing_challenge_id = 0;
             core->pairing_number = 0;
         }
-        p[0] = 0xa6;
         p[at++] = 6;
         bool waiting = core->pairing_state == KVM_PAIRING_WAITING;
         bool challenge = core->pairing_state == KVM_PAIRING_CHALLENGE;
@@ -194,11 +216,11 @@ static void send_status(kvm_transport_core_t *core, uint32_t seq)
             p[at++] = 4; at += cbor_uint(p + at, core->pairing_number);
         }
     }
-    p[2] = r && r->armed ? 2 : r && r->slot ? 1 :
+    p[state_at] = r && r->armed ? 2 : r && r->slot ? 1 :
            core->minor >= 1 && (core->pairing_state == KVM_PAIRING_WAITING ||
                                  core->pairing_state == KVM_PAIRING_CHALLENGE) ? 5 : 0;
-    p[4] = r ? r->slot : 0;
     emit(core, KVM_MSG_STATUS, seq, p, at);
+    core->slots_dirty = false;
     core->last_status_ms = firmware_ms(core);
     core->status_generation = r ? r->generation : 0;
     core->status_slot = r ? r->slot : 0;
@@ -494,6 +516,8 @@ void kvm_transport_core_reset(kvm_transport_core_t *core)
     core->session_open = false;
     core->minor = 0;
     memset(core->connected_token, 0, sizeof(core->connected_token));
+    memset(core->slots, 0, sizeof(core->slots));
+    core->slots_dirty = false;
     core->pairing_state = KVM_PAIRING_CLOSED;
     core->pairing_challenge_id = 0;
     core->last_forget_valid = false;
@@ -569,6 +593,23 @@ void kvm_transport_core_set_connected_token(kvm_transport_core_t *core,
     if (nonzero) memcpy(core->connected_token, token, sizeof(core->connected_token));
 }
 
+bool kvm_transport_core_set_slots(kvm_transport_core_t *core,
+                                  const kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS])
+{
+    if (!core || !slots) return false;
+    for (size_t i = 0; i < KVM_ROUTER_MAX_SLOTS; ++i) {
+        bool occupied = memcmp(slots[i].token, (uint8_t[16]){0}, 16) != 0;
+        if (!occupied && (slots[i].ready || slots[i].subscribed)) return false;
+        if (slots[i].subscribed && !slots[i].ready) return false;
+        for (size_t j = 0; occupied && j < i; ++j)
+            if (memcmp(slots[i].token, slots[j].token, 16) == 0) return false;
+    }
+    if (memcmp(core->slots, slots, sizeof(core->slots)) != 0) core->slots_dirty = true;
+    memcpy(core->slots, slots, sizeof(core->slots));
+    memcpy(core->connected_token, slots[0].token, sizeof(core->connected_token));
+    return true;
+}
+
 void kvm_transport_core_tick(kvm_transport_core_t *core)
 {
     if (!core || !core->router || !core->now) return;
@@ -580,13 +621,14 @@ void kvm_transport_core_tick(kvm_transport_core_t *core)
         r->generation != core->status_generation || r->slot != core->status_slot ||
         r->armed != core->status_armed || r->fault != core->status_fault ||
         core->pairing_state != core->status_pairing_state ||
-        core->pairing_challenge_id != core->status_challenge_id)
+        core->pairing_challenge_id != core->status_challenge_id || core->slots_dirty)
         send_status(core, 0);
 }
 
 bool kvm_transport_core_device_select_request(kvm_transport_core_t *core, uint8_t slot)
 {
-    if (!core || !core->session_open || slot > 1) return false;
+    if (!core || !core->session_open ||
+        slot > (core->minor >= 2 && core->router ? core->router->capacity : 1)) return false;
     uint8_t payload[5] = {slot};
     uint32_t request_id = ++core->next_select_request_id;
     put_u32(payload + 1, request_id);

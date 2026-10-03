@@ -109,6 +109,12 @@ static void expect_reply(uint8_t kind, uint8_t error, uint32_t generation)
                 ((uint32_t)decoded[32] << 16) | ((uint32_t)decoded[33] << 24)) == generation);
     }
 }
+static bool has_sequence(const uint8_t *bytes, size_t length, const uint8_t *pattern, size_t pattern_length)
+{
+    for (size_t at = 0; at + pattern_length <= length; ++at)
+        if (memcmp(bytes + at, pattern, pattern_length) == 0) return true;
+    return false;
+}
 int main(void)
 {
     kvm_router_t router;
@@ -257,5 +263,27 @@ int main(void)
                zero_forget, sizeof(zero_forget));
     expect_reply(KVM_MSG_NACK, KVM_ROUTER_BAD_PAYLOAD, router.generation);
     assert(forgets == 1);
+    kvm_router_t three_router;
+    kvm_transport_core_t three_core;
+    kvm_router_init(&three_router, output, NULL);
+    assert(kvm_router_set_capacity(&three_router, 3));
+    assert(kvm_transport_core_init(&three_core, "b", "1", 9, capture, NULL));
+    kvm_transport_core_bind_router(&three_core, &three_router, clock_ms, NULL);
+    kvm_transport_slot_t slots[3] = {0};
+    slots[0].token[0] = 11; slots[0].ready = true; slots[0].subscribed = true;
+    slots[1].token[0] = 22; slots[1].ready = true;
+    slots[2].token[0] = 33; slots[2].ready = true; slots[2].subscribed = true;
+    assert(kvm_transport_core_set_slots(&three_core, slots));
+    send_frame(&three_core, KVM_MSG_HELLO, 0, 60, 0, hello2, sizeof(hello2));
+    size_t caps_len = decode(decoded);
+    assert(decoded[3] == KVM_MSG_CAPS &&
+           has_sequence(decoded + 24, caps_len - 28, (uint8_t[]){5, 3}, 2));
+    send_frame(&three_core, KVM_MSG_SESSION_OPEN, 9, 61, 0, open, sizeof(open));
+    send_frame(&three_core, KVM_MSG_GET_STATUS, 9, 62, 0, NULL, 0);
+    size_t status_len = decode(decoded);
+    assert(decoded[3] == KVM_MSG_STATUS &&
+           has_sequence(decoded + 24, status_len - 28, (uint8_t[]){3, 0x83, 0xa5, 1, 1, 2, 0x50, 11}, 8) &&
+           has_sequence(decoded + 24, status_len - 28, (uint8_t[]){0xa5, 1, 2, 2, 0x50, 22}, 6) &&
+           has_sequence(decoded + 24, status_len - 28, (uint8_t[]){0xa5, 1, 3, 2, 0x50, 33}, 6));
     return 0;
 }

@@ -19,6 +19,8 @@ pub const MAGIC: u16 = 0x4b56;
 pub const MAJOR: u8 = 1;
 /// Highest compatible minor supported by this implementation.
 pub const MINOR: u16 = 2;
+/// Highest live HID slot number that minor two can describe.
+pub const MAX_LIVE_SLOTS: usize = 3;
 
 /// Retained bond inventory format version for negotiated minor two.
 pub const BOND_INVENTORY_VERSION: u8 = 1;

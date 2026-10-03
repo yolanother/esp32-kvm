@@ -180,6 +180,10 @@ int main(void)
     assert(sizeof(last_event.token.bytes) == 16 &&
            memcmp(last_event.token.bytes, zero_token.bytes, HID_PAIRING_TOKEN_LEN) != 0 && saved_size);
     hid_token_t token = last_event.token;
+    hid_guest_slot_snapshot_t slots[3];
+    assert(hid_guest_request_slots(slots));
+    assert(memcmp(slots[0].token, token.bytes, 16) == 0 && slots[0].ready);
+    assert(memcmp(slots[1].token, zero_token.bytes, 16) == 0 && !slots[1].ready);
     assert(hid_guest_pairing_open() == 0);
     assert(last_event.type == HID_GUEST_PAIRING_OPENED);
     hid_guest_pairing_cancel();
@@ -272,6 +276,9 @@ int main(void)
     assert(hid_guest_request_keyboard_slot(2, keys) && last_report_handle == 18);
     assert(!channel.armed && !channel.keyboard[2]);
     assert(hid_guest_request_release_slot(2) && !second->armed);
+    memset(slots, 0xa5, sizeof(slots));
+    assert(hid_guest_request_slots(slots));
+    assert(memcmp(slots[1].token, zero_token.bytes, 16) == 0 && !slots[1].ready);
     hold_host = true;
     unsigned prior_terminations = terminations;
     assert(!hid_guest_request_keyboard_slot(2, keys));

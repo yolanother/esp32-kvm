@@ -1,0 +1,13 @@
+# Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
+# Independent canonical minor-two STATUS payload with three distinct authenticated live slots.
+a6 01 00 02 00 03 83
+a5 01 01 02 50
+01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+03 f5 04 f5 05 00
+a5 01 02 02 50
+02 02 02 02 02 02 02 02 02 02 02 02 02 02 02 02
+03 f5 04 f4 05 00
+a5 01 03 02 50
+03 03 03 03 03 03 03 03 03 03 03 03 03 03 03 03
+03 f5 04 f5 05 00
+04 00 05 00 06 a1 01 00

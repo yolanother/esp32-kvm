@@ -45,6 +45,23 @@ fn crc32c_standard_check_value() {
 }
 
 #[test]
+fn independent_three_slot_status_payload_is_canonical() {
+    let fixture = include_str!("../../../tests/vectors/status-three-m2.hex");
+    let payload: Vec<u8> = fixture
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .flat_map(str::split_whitespace)
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect();
+    assert_eq!(payload.len(), 96);
+    let frame = Frame::new(MessageKind::Status, 5, 1, 0, payload);
+    let encoded = frame.encode().unwrap();
+    let decoded =
+        Frame::decode_decoded(&cobs_decode(&encoded[..encoded.len() - 1]).unwrap()).unwrap();
+    assert_eq!(decoded, frame);
+}
+
+#[test]
 fn independent_fixtures_cover_every_message_kind() {
     let fixtures: &[(&str, u8)] = &[
         ("hello-v1", 0x01),

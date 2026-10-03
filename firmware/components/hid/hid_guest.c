@@ -175,10 +175,17 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     }
     case BLE_GAP_EVENT_DISCONNECT: {
-        bool was_routed = hid_gatt_channel()->connected &&
-                          hid_gatt_channel()->connection_handle == event->disconnect.conn.conn_handle;
+        uint8_t disconnected_slot = 0;
+        for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+            hid_channel_t *channel = hid_gatt_channel_at(slot);
+            if (channel->connected &&
+                channel->connection_handle == event->disconnect.conn.conn_handle)
+                disconnected_slot = slot;
+        }
         hid_gatt_on_disconnect(event->disconnect.conn.conn_handle);
-        if (was_routed) publish(HID_GUEST_DISCONNECTED, event->disconnect.conn.conn_handle, 0, NULL);
+        if (disconnected_slot)
+            publish(HID_GUEST_DISCONNECTED, event->disconnect.conn.conn_handle,
+                    disconnected_slot, NULL);
         if (pairing.challenge_active && pairing.challenge_handle == event->disconnect.conn.conn_handle)
             publish(HID_GUEST_PAIRING_REJECTED, event->disconnect.conn.conn_handle, 0, NULL);
         if (pairing.challenge_handle == event->disconnect.conn.conn_handle) {
@@ -372,11 +379,12 @@ void hid_guest_pairing_snapshot(hid_pairing_t *output)
     *output = pairing;
 }
 
-bool hid_guest_current_bond_token(hid_token_t *output)
+static bool bond_token_at(uint8_t slot, hid_token_t *output)
 {
     if (!output) return false;
     memset(output, 0, sizeof(*output));
-    hid_channel_t *channel = hid_gatt_channel();
+    hid_channel_t *channel = hid_gatt_channel_at(slot);
+    if (!channel) return false;
     if (!started || !channel->connected || !channel->encrypted || channel->needs_disconnect)
         return false;
     struct ble_gap_conn_desc description;
@@ -388,6 +396,31 @@ bool hid_guest_current_bond_token(hid_token_t *output)
                          description.sec_state.authenticated;
     return hid_pairing_connected_token(&pairing, true, authenticated,
                                        peer_identity(&description.peer_id_addr), output);
+}
+
+bool hid_guest_current_bond_token(hid_token_t *output)
+{ return bond_token_at(1, output); }
+
+bool hid_guest_snapshot_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONNECTIONS])
+{
+    if (!output) return false;
+    memset(output, 0, HID_GATT_MAX_CONNECTIONS * sizeof(*output));
+    if (!started) return false;
+    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+        hid_channel_t *channel = hid_gatt_channel_at(slot);
+        hid_token_t token;
+        if (!bond_token_at(slot, &token)) {
+            if (channel->armed) (void)hid_guest_disconnect_slot(slot);
+            continue;
+        }
+        hid_guest_slot_snapshot_t *item = &output[slot - 1];
+        memcpy(item->token, token.bytes, sizeof(item->token));
+        item->ready = true;
+        item->subscribed = channel->subscribed[HID_REPORT_KEYBOARD] &&
+                           channel->subscribed[HID_REPORT_MOUSE] &&
+                           channel->subscribed[HID_REPORT_CONSUMER];
+    }
+    return true;
 }
 
 bool hid_guest_retained_bonds(hid_token_t output[HID_PAIRING_MAX_BONDS], size_t *count)

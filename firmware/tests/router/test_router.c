@@ -171,7 +171,10 @@ static void gated_three_slot_switching(void)
 {
     kvm_router_t r; fake_t f; setup(&r, &f);
     assert(kvm_router_switch(&r, 7, 1, 2, 0, 1, 1) == KVM_ROUTER_NOT_READY);
+    assert(!kvm_router_set_capacity(&r, 3));
+    kvm_router_reset(&r);
     assert(kvm_router_set_capacity(&r, 3));
+    kvm_router_session_open(&r, 7, 0);
     assert(kvm_router_switch(&r, 7, 2, 2, 0, 1, 2) == KVM_ROUTER_OK);
     assert(kvm_router_arm(&r, 7, 3, 2, 1, 3) == KVM_ROUTER_OK);
     kvm_router_input_t key = {0}; key.kind = KVM_ROUTER_KEYBOARD; key.keyboard[2] = 5;

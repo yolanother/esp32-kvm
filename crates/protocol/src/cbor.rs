@@ -236,7 +236,7 @@ pub(crate) fn validate(kind: MessageKind, payload: &[u8]) -> Result<(), Protocol
             let Some(Value::Array(slots)) = field(fields, 3) else {
                 return Err(ProtocolError::Payload);
             };
-            if slots.len() > 3 {
+            if slots.len() > crate::MAX_LIVE_SLOTS {
                 return Err(ProtocolError::Payload);
             }
             let mut previous_slot = 0;

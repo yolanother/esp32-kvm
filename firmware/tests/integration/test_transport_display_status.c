@@ -77,5 +77,19 @@ int main(void)
     kvm_transport_core_reset(&core);
     kvm_transport_display_status(&core, &router, true, false, now, &status);
     assert(!status.armed && status.selected_slot == 0 && status.guest_slots == 0);
+    assert(kvm_transport_core_init(&core, "esp32-kvm-s3", "test", 8, discard, NULL));
+    core.session_open = true; core.minor = 2;
+    router.session_open = true; router.slot = 3; router.armed = true; router.fault = false;
+    assert(kvm_router_set_capacity(&router, 3) == false); /* Active route cannot change capacity. */
+    router.capacity = 3;
+    kvm_transport_slot_t slots[3] = {0};
+    for (uint8_t i = 0; i < 3; ++i) {
+        slots[i].token[0] = (uint8_t)(i + 1);
+        slots[i].ready = slots[i].subscribed = true;
+    }
+    assert(kvm_transport_core_set_slots(&core, slots));
+    kvm_transport_display_status(&core, &router, true, false, now, &status);
+    assert(status.guest_slots == 3 && status.ready_slots == 3);
+    assert(status.selected_slot == 3 && status.guest_ready && status.armed && !status.fault);
     return 0;
 }

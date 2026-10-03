@@ -237,6 +237,85 @@ fn status_ready_m2() -> Frame {
     frame
 }
 
+fn status_three_m2(tokens: [u8; 3]) -> Frame {
+    let mut payload = vec![0xa6, 1, 0, 2, 0, 3, 0x83];
+    for (index, token) in tokens.into_iter().enumerate() {
+        payload.extend_from_slice(&[0xa5, 1, index as u8 + 1, 2, 0x50]);
+        payload.extend_from_slice(&[token; 16]);
+        payload.extend_from_slice(&[3, 0xf5, 4, 0xf5, 5, 0]);
+    }
+    payload.extend_from_slice(&[4, 0, 5, 0, 6, 0xa1, 1, 0]);
+    Frame::new(MessageKind::Status, 5, 1, 0, payload)
+}
+
+#[test]
+fn three_slot_status_routes_only_with_negotiated_capacity() {
+    let wire = FakePort::default();
+    let (gate, _) = CaptureGate::new(32);
+    let mut confirmed = device();
+    confirmed.negotiated_minor = 2;
+    confirmed.max_connections = 3;
+    let mut actor = HostActor::from_confirmed(
+        wire.clone(),
+        Box::new(gate),
+        confirmed,
+        vec![3],
+        Box::new(TestMapper),
+        0,
+    )
+    .unwrap();
+    wire.feed(status_three_m2([1, 2, 3]));
+    actor.poll(1);
+    assert_eq!(actor.setup_snapshot().slots.len(), 3);
+    assert_eq!(actor.setup_snapshot().slots[2].bond_token, [3; 16]);
+    actor.request(Action::Direct(3), 2);
+    let release = wire.sent().last().unwrap().clone();
+    wire.feed(ack(&release, 1));
+    actor.poll(3);
+    let select = wire.sent().last().unwrap().clone();
+    assert_eq!(select.kind, MessageKind::Switch);
+    assert_eq!(select.payload[0], 3);
+
+    let (mut limited, limited_wire, _) = setup_inventory();
+    limited_wire.feed(status_three_m2([1, 2, 3]));
+    limited.poll(1);
+    assert_eq!(limited.state(), HostState::Failed);
+}
+
+#[test]
+fn duplicate_live_tokens_fail_closed() {
+    let wire = FakePort::default();
+    let (gate, _) = CaptureGate::new(32);
+    let mut confirmed = device();
+    confirmed.negotiated_minor = 2;
+    confirmed.max_connections = 3;
+    let mut actor = HostActor::from_confirmed(
+        wire.clone(),
+        Box::new(gate),
+        confirmed,
+        vec![3],
+        Box::new(TestMapper),
+        0,
+    )
+    .unwrap();
+    wire.feed(status_three_m2([1, 1, 3]));
+    actor.poll(1);
+    assert_eq!(actor.state(), HostState::Failed);
+}
+
+#[test]
+fn active_slot_identity_change_disarms_capture() {
+    let (mut actor, wire, gate) = active();
+    let mut replaced = status(2, true);
+    replaced.payload[2] = 2;
+    replaced.payload[4] = 1;
+    replaced.payload[12..28].copy_from_slice(&[2; 16]);
+    wire.feed(replaced);
+    actor.poll(6);
+    assert_eq!(actor.state(), HostState::Failed);
+    assert_eq!(gate.generation(), 0);
+}
+
 fn setup_inventory() -> (HostActor<FakePort>, FakePort, Arc<CaptureGate>) {
     let wire = FakePort::default();
     let (gate, _receiver) = CaptureGate::new(32);

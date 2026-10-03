@@ -2,9 +2,10 @@
  * Defines the disarmed firmware USB loopback protocol core. It accepts bounded
  * COBS frames, validates CRC32C and sessions, and dispatches authenticated
  * routing commands to a bound serialized router. Minor-one pairing controls
- * use bounded callbacks and STATUS events. STATUS exposes only a current
- * authenticated guest's opaque token. Minor two reads the retained opaque
- * token inventory through a bounded callback; a USB CDC adapter owns I/O. */
+ * use bounded callbacks and STATUS events. Minor-two STATUS exposes up to
+ * three cached authenticated guest tokens, while the admitted routing
+ * capacity defaults to one. Retained inventory uses a bounded callback;
+ * a USB CDC adapter owns I/O. */
 #ifndef ESP32_KVM_TRANSPORT_CORE_H
 #define ESP32_KVM_TRANSPORT_CORE_H
 
@@ -21,6 +22,13 @@
 typedef void (*kvm_transport_send_fn)(void *context, const uint8_t *bytes, size_t length);
 /** Supplies monotonic firmware milliseconds for lease and input age checks. */
 typedef uint64_t (*kvm_transport_now_fn)(void *context);
+
+/** One authenticated live HID slot sampled on the NimBLE host loop. */
+typedef struct {
+    uint8_t token[16];
+    bool ready;
+    bool subscribed;
+} kvm_transport_slot_t;
 
 /** Minor-one pairing states carried in STATUS key 6. */
 typedef enum {
@@ -69,6 +77,8 @@ typedef struct {
     kvm_transport_pairing_state_t status_pairing_state;
     uint32_t status_challenge_id;
     uint8_t connected_token[16];
+    kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS];
+    bool slots_dirty;
     bool last_forget_valid;
     uint32_t last_forget_seq;
     uint32_t last_forget_generation;
@@ -103,6 +113,9 @@ void kvm_transport_core_pairing_event(kvm_transport_core_t *core,
  * Only the USB worker calls this after a bounded HID host-loop lookup. */
 void kvm_transport_core_set_connected_token(kvm_transport_core_t *core,
                                             const uint8_t token[16]);
+/** Replaces all live slots atomically; rejects duplicate or inconsistent tokens. */
+bool kvm_transport_core_set_slots(kvm_transport_core_t *core,
+                                  const kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS]);
 /** Drains router input and enforces the lease while USB is idle. */
 void kvm_transport_core_tick(kvm_transport_core_t *core);
 /** Sends an arbitration request for a physical PLUS press in an open USB session. */

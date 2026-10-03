@@ -25,11 +25,22 @@ void kvm_transport_display_status(const kvm_transport_core_t *core,
     status->usb_connected = true;
     status->selected_slot = router->slot;
     status->generation = router->generation;
-    bool bonded_peer = has_token(core->connected_token);
-    status->guest_slots = bonded_peer ? 1 : 0;
-    status->guest_ready = bonded_peer && hid_ready;
-    status->ready_slots = status->guest_ready ? 1 : 0;
-    status->armed = router->armed && router->slot == 1 && status->guest_ready;
+    bool selected_ready = false;
+    for (uint8_t slot = 1; slot <= KVM_ROUTER_MAX_SLOTS; ++slot) {
+        const kvm_transport_slot_t *item = &core->slots[slot - 1];
+        if (!has_token(item->token)) continue;
+        status->guest_slots++;
+        bool ready = item->ready && item->subscribed;
+        if (ready) status->ready_slots++;
+        if (router->slot == slot) selected_ready = ready;
+    }
+    if (!status->guest_slots && has_token(core->connected_token)) {
+        status->guest_slots = 1;
+        status->ready_slots = hid_ready ? 1 : 0;
+        selected_ready = router->slot == 1 && hid_ready;
+    }
+    status->guest_ready = router->slot ? selected_ready : status->ready_slots > 0;
+    status->armed = router->armed && selected_ready;
     status->fault = router->fault || (router->armed && !status->armed);
 
     if (core->minor < 1) return;
