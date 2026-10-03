@@ -13,6 +13,3 @@ esp32-kvm-protocol = { path = "../protocol" }
 esp32-kvm-update-core = { path = "../update-core" }
 esp32-kvm-usb-transport = { path = "../usb-transport" }
 serialport = "4.10.1"
-
-# Coordinator adds this crate to the root workspace after source gates pass.
-[workspace]

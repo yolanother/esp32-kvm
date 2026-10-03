@@ -803,6 +803,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp32-kvm-update-runner"
+version = "0.1.0"
+dependencies = [
+ "esp32-kvm-host-actor",
+ "esp32-kvm-platform-windows",
+ "esp32-kvm-protocol",
+ "esp32-kvm-update-core",
+ "esp32-kvm-usb-transport",
+ "serialport",
+]
+
+[[package]]
 name = "esp32-kvm-usb-transport"
 version = "0.1.0"
 dependencies = [
