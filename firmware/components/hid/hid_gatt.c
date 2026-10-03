@@ -69,7 +69,7 @@ static const struct ble_gatt_chr_def characteristics[] = {
      .flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC},
     {.uuid = BLE_UUID16_DECLARE(0x2a4e), .access_cb = access_attribute,
      .arg = (void *)ATTR_PROTOCOL_MODE,
-     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP |
               BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC},
     {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
      .arg = (void *)ATTR_KEYBOARD_INPUT, .descriptors = keyboard_reference,
@@ -85,7 +85,7 @@ static const struct ble_gatt_chr_def characteristics[] = {
      .val_handle = &consumer_handle},
     {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
      .arg = (void *)ATTR_KEYBOARD_OUTPUT, .descriptors = led_reference,
-     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
               BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC,
      .val_handle = &led_handle},
     {0}

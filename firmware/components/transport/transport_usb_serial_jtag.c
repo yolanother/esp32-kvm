@@ -170,9 +170,9 @@ static void publish_status(bool connected, bool guest_ready,
     kvm_display_status_t status;
     kvm_transport_display_status(&core, &router, connected, guest_ready,
                                  (uint64_t)(esp_timer_get_time() / 1000), &status);
-    /* The USB session core is cleared on host disconnect, but the authenticated
-       BLE slot snapshot remains current. Keep its connection visible locally. */
-    if (!connected) {
+    /* USB can remain electrically connected after the verified host session
+       closes. Keep the authenticated BLE slot visible in either case. */
+    if (!connected || !core.session_open || !router.session_open) {
         for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot) {
             bool has_token = false;
             for (size_t i = 0; i < sizeof(slots[slot].token); ++i)

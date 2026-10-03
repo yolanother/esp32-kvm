@@ -116,7 +116,7 @@ static void advertise(void)
     fields.uuids16 = service;
     fields.num_uuids16 = 1;
     fields.uuids16_is_complete = 1;
-    fields.appearance = 0x03c0; /* Generic HID appearance. */
+    fields.appearance = 0x03c1; /* Keyboard is the primary HID function. */
     fields.appearance_is_present = 1;
     if (ble_gap_adv_set_fields(&fields) != 0) {
         ESP_LOGE(tag, "HID advertising fields rejected");
@@ -317,7 +317,7 @@ esp_err_t hid_guest_start(void)
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
     result = ble_svc_gap_device_name_set("ESP32 KVM");
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
-    result = ble_svc_gap_device_appearance_set(0x03c0);
+    result = ble_svc_gap_device_appearance_set(0x03c1);
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
     ble_store_config_init();
     result = hid_guest_rpc_init();
