@@ -104,6 +104,8 @@ The new Mac did not automatically reconnect after the app reset. Its Bluetooth e
 
 With a blank TextEdit document reportedly focused on the newly paired Mac, HostActor sent a 600 ms `A` press and release through slot 1. The actor entered `Guest(1)`, accepted and wrote both frames, and board `INPUT_PROGRESS` reported both accepted and BLE-enqueued (sequences 17 and 24). It returned to `Local` without fault; a fresh COM7 read still showed the ready/subscribed slot and two retained bonds. The user's observation of the TextEdit document and updated `hidutil` output are pending.
 
+The user then reported no character in TextEdit and no match for `ESP32 KVM` in `hidutil list`. A name-only HID search may miss a device registered under a PnP-derived name, so a numeric VID/PID search remains pending. The battery characteristic was separately found to return 0%; the local source now reports 100% for the USB-powered board and passed the HID suite, but this correction has not been flashed and has no demonstrated causal link to macOS HID registration. Static review of NimBLE event ordering showed bonded CCCD restore occurs after application connection/encryption callbacks; no subscription-reset change was warranted. Fresh Mac input delivery remains unverified.
+
 ## Next hardware checks
 
 1. Inspect the PCB itself for its revision and touch assembly; the supplied enclosure photo confirms the printed touch model but does not expose the PCB.
