@@ -1,6 +1,6 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Creates the Windows tray's current target choices and window lifecycle.
-// Guest selection and pause stay disabled until native capture is integrated.
+// Guest choices and route status come from the actor; local return stays available.
 
 use crate::setup::{RouteState, SetupService, SetupSnapshot};
 use std::time::Duration;
@@ -96,7 +96,7 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
     let shortcuts = MenuItem::with_id(
         app,
         "shortcuts",
-        "Switch shortcuts — not registered",
+        "Return: Ctrl+Alt+F10 or hold both Ctrl keys",
         false,
         None::<&str>,
     )?;

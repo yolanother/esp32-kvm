@@ -19,7 +19,7 @@ function StatusPill({ children, tone = "neutral" }: { children: string; tone?: "
   return <span className={`status-pill status-pill--${tone}`}>{children}</span>;
 }
 
-/** Display a proposed physical shortcut without activating global capture. */
+/** Display a physical shortcut recognized by the native capture worker. */
 function KeyChord({ keys }: { keys: readonly string[] }): JSX.Element {
   return <span className="key-chord" aria-label={keys.join(" plus ")}>{keys.map((key, index) => <kbd key={`${key}-${index}`}>{key}</kbd>)}</span>;
 }
@@ -51,19 +51,12 @@ function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEd
   </>;
 }
 
-const proposedShortcuts = [
-  { action: "Next connected system", keys: ["Ctrl", "Alt", "F12"] },
-  { action: "Previous connected system", keys: ["Ctrl", "Alt", "F11"] },
-  { action: "Return to host", keys: ["Ctrl", "Alt", "F10"] },
-] as const;
-
-/** Shortcuts destination displays proposed defaults without registering hotkeys. */
+/** Shortcuts destination describes the installed physical return controls. */
 function ShortcutsPage({ headingRef }: { headingRef: React.RefObject<HTMLHeadingElement | null> }): JSX.Element {
   return <>
-    <PageIntro title="Shortcuts" description="Review the proposed physical-key controls for switching systems." headingRef={headingRef} />
-    <div className="notice notice--warning"><strong>Shortcuts are inactive</strong><span>The native hotkey recognizer and recording flow are not connected in this build. These combinations are design defaults only.</span></div>
-    <div className="card table-card"><h2>Proposed defaults</h2><div className="table-scroll"><table><thead><tr><th scope="col">Action</th><th scope="col">Physical key combination</th><th scope="col">State</th></tr></thead><tbody>{proposedShortcuts.map(({ action, keys }) => <tr key={action}><td>{action}</td><td><KeyChord keys={keys} /></td><td className="muted">Not registered</td></tr>)}</tbody></table></div></div>
-    <div className="card emergency-card"><h2>Planned emergency return</h2><p>Hold both Ctrl keys for one second. This safety path is not active until native routing is integrated and tested.</p></div>
+    <PageIntro title="Shortcuts" description="Use a physical keyboard shortcut to return input to this computer." headingRef={headingRef} />
+    <div className="card table-card"><h2>Return to this computer</h2><div className="table-scroll"><table><thead><tr><th scope="col">Action</th><th scope="col">Physical key combination</th></tr></thead><tbody><tr><td>Return to Windows</td><td><KeyChord keys={["Ctrl", "Alt", "F10"]} /></td></tr></tbody></table></div></div>
+    <div className="card emergency-card"><h2>Emergency return</h2><p>Hold both physical Ctrl keys for one second. The capture worker releases Windows input immediately, then asks the device to return to local control.</p></div>
   </>;
 }
 
@@ -172,7 +165,7 @@ export default function App(): JSX.Element {
         <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "No verified device"}</StatusPill></div></header>
         <div className="connection-status" role="status" aria-live="polite">{route.title}. {route.detail}</div>
         <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} onSelect={requestGuest} />}{page === "layout" && <LayoutEditor profiles={snapshot.profiles} profilesReady={snapshotLoaded} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
-        <footer className="footer"><span>{snapshot.route.kind === "guest" ? "Guest route confirmed" : "Local control"} · Proposed return shortcut <KeyChord keys={["Ctrl", "Alt", "F10"]} /> is inactive</span><span>Emergency shortcut is not active yet</span></footer>
+        <footer className="footer"><span>{snapshot.route.kind === "guest" ? "Guest route confirmed" : "Local control"} · Return with <KeyChord keys={["Ctrl", "Alt", "F10"]} /></span><span>Emergency: hold both Ctrl keys for one second</span></footer>
       </div>
     </div>
     {announcement && <div className={`switch-overlay${announcement.persistent ? " switch-overlay--persistent" : ""}`} role={announcement.persistent ? "alert" : "status"} aria-live={announcement.persistent ? "assertive" : "polite"}><strong>{announcement.title ?? (announcement.persistent ? "Connection lost" : "Input destination changed")}</strong><span>{announcement.message}</span>{announcement.persistent && <button type="button" onClick={() => setAnnouncement(null)} aria-label="Dismiss connection alert">Dismiss</button>}</div>}

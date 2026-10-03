@@ -31,7 +31,7 @@ export function describeRoute(snapshot: SetupSnapshot): RouteDescription {
     case "guest": {
       const { bondToken, slot } = snapshot.route;
       const name = snapshot.profiles.find((guest) => guest.bondToken === bondToken)?.name ?? `Guest slot ${slot}`;
-      return { title: name, detail: "Controlling this guest. Return to this computer with Ctrl+Alt+F10 when the native shortcut is available.", tone: "accent" };
+      return { title: name, detail: "Controlling this guest. Press Ctrl+Alt+F10 or hold both Ctrl keys for one second to return to this computer.", tone: "accent" };
     }
     case "switching": return { title: "Switch pending", detail: "Waiting for an exact device acknowledgement. Input is not yet assigned to the requested guest.", tone: "warning" };
     case "pairing": return { title: "This computer", detail: "Pairing is open. Input remains local.", tone: "neutral" };
@@ -60,7 +60,7 @@ function routeKey(route: RouteState): string {
 export function overlayForTransition(previous: SetupSnapshot | null, next: SetupSnapshot): SwitchAnnouncement | null {
   if (!previous || routeKey(previous.route) === routeKey(next.route)) return null;
   if (next.route.kind === "failed") return { message: describeRoute(next).detail, persistent: true };
-  if (next.route.kind === "guest") return { message: `Now controlling ${describeRoute(next).title}. Return with Ctrl+Alt+F10 when available.`, persistent: false };
+  if (next.route.kind === "guest") return { message: `Now controlling ${describeRoute(next).title}. Press Ctrl+Alt+F10 or hold both Ctrl keys for one second to return.`, persistent: false };
   if (next.route.kind === "local" && previous.route.kind === "guest") {
     if (!next.readyTokens.includes(previous.route.bondToken)) return { message: "Guest offline. Input returned to this computer; local control is retained.", persistent: true };
     return { message: "Returned to this computer. Input is local.", persistent: false };
