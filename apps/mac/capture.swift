@@ -29,7 +29,13 @@ private final class CaptureState {
         } else if line == "BEAT" {
             lastBeat = ProcessInfo.processInfo.systemUptime
         } else if line.hasPrefix("ARM ") {
-            if heldKeys.isEmpty && heldButtons.isEmpty {
+            let osKeysUp = (0..<128).allSatisfy {
+                !CGEventSource.keyState(.combinedSessionState, key: CGKeyCode($0))
+            }
+            let osButtonsUp = !CGEventSource.buttonState(.combinedSessionState, button: .left)
+                && !CGEventSource.buttonState(.combinedSessionState, button: .right)
+                && !CGEventSource.buttonState(.combinedSessionState, button: .center)
+            if heldKeys.isEmpty && heldButtons.isEmpty && osKeysUp && osButtonsUp {
                 armed = true
                 lastBeat = ProcessInfo.processInfo.systemUptime
                 if !emit("ARMED") { armed = false }
@@ -126,7 +132,7 @@ let types: [CGEventType] = [
 ]
 let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
 guard let tap = CGEvent.tapCreate(
-    tap: .cghidEventTap,
+    tap: .cgSessionEventTap,
     place: .headInsertEventTap,
     options: .defaultTap,
     eventsOfInterest: mask,
