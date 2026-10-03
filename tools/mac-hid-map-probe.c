@@ -13,6 +13,10 @@
 
 #include "hid_report.h"
 
+/* The macOS 26 SDK exports this symbol but omits its declaration. */
+extern IOHIDUserDeviceRef IOHIDUserDeviceCreate(CFAllocatorRef allocator,
+                                                CFDictionaryRef properties);
+
 static void set_number(CFMutableDictionaryRef properties, CFStringRef key, int value)
 {
     CFNumberRef number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &value);
