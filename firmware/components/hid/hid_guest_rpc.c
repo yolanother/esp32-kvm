@@ -134,6 +134,7 @@ static bool request(rpc_op_t operation, const void *payload, uint8_t token_outpu
     bool result = completed && rpc.result;
     if (result && token_output && operation == RPC_CURRENT_TOKEN)
         memcpy(token_output, rpc.current_token.bytes, HID_PAIRING_TOKEN_LEN);
+    memset(&rpc.current_token, 0, sizeof(rpc.current_token));
     if (!completed) {
         if (rpc.finished) rpc.busy = false;
     }

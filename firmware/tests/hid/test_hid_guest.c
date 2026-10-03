@@ -206,6 +206,9 @@ int main(void)
     const uint8_t stale_keys[HID_KEYBOARD_REPORT_LEN] = {0};
     unsigned sent_before_timeout = sent_reports;
     assert(!hid_guest_request_keyboard(stale_keys));
+    memset(current_token, 0xa5, sizeof(current_token));
+    assert(!hid_guest_request_current_bond_token(current_token));
+    assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
     assert(!hid_guest_request_ready());
     assert(sent_reports == sent_before_timeout && host_queue.pending && host_queue.next);
     hold_host = false;
