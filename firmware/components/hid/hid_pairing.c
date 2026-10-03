@@ -82,6 +82,8 @@ bool hid_pairing_begin_challenge(hid_pairing_t *state, hid_peer_t peer, uint16_t
     state->challenge_number = number;
     state->challenge_active = true;
     state->challenge_approved = false;
+    if (state->deadline_ms - now_ms < HID_PAIRING_CHALLENGE_MIN_MS)
+        state->deadline_ms = now_ms + HID_PAIRING_CHALLENGE_MIN_MS;
     ++state->attempt_count;
     return true;
 }

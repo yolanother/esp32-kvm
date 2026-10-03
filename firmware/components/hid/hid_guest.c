@@ -283,6 +283,14 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
+        uint64_t remaining_ms = pairing.deadline_ms - now_ms();
+        if (ble_npl_callout_reset(&pairing_timeout,
+                ble_npl_time_ms_to_ticks32((uint32_t)remaining_ms)) != BLE_NPL_OK) {
+            hid_pairing_cancel(&pairing);
+            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, NULL);
+            ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+            return 0;
+        }
         publish(HID_GUEST_PAIRING_CHALLENGE, handle, pairing.challenge_number, NULL);
         /* The guest confirms the displayed code on its own screen. NimBLE may
            complete only after that peer's confirmation and authenticated bonding. */

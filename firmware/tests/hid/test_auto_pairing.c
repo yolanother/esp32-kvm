@@ -70,5 +70,11 @@ int main(void)
     assert(!hid_pairing_begin_challenge(&limited, another, 18, 99, 123456, 2000));
     assert(hid_pairing_open(&limited, 61001));
     assert(hid_pairing_begin_challenge(&limited, another, 18, 100, 123456, 61002));
+    hid_pairing_t late;
+    hid_pairing_init(&late);
+    assert(hid_pairing_open(&late, 1000));
+    assert(hid_pairing_begin_challenge(&late, another, 18, 7, 654321, 60900));
+    assert(late.deadline_ms == 60900 + HID_PAIRING_CHALLENGE_MIN_MS);
+    assert(hid_pairing_confirm(&late, 7, true, 80000));
     return 0;
 }
