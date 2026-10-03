@@ -1,6 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Defines setup status and fail-closed wizard gates. Device facts must come
-// from the native serial owner; retained bond inventory is separate from live slots.
+// from the native serial owner; retained bonds and per-guest physical key rules
+// remain separate from live slots and observed input.
 
 /** Device discovery and firmware-verification state supplied by native code. */
 export type DeviceState =
@@ -33,6 +34,12 @@ export type RouteState =
 /** A local label keyed by an opaque 16-byte firmware bond identity. */
 export interface ModifierBinding { sourceUsage: number; targetUsage: number }
 
+/** One physical HID keyboard key and its side when it is a modifier. */
+export interface KeySource { usage: number; side: "unspecified" | "left" | "right" }
+
+/** One exact source chord and emitted guest chord, evaluated once. */
+export interface KeyRule { source: KeySource[]; target: KeySource[]; priority: number; enabled: boolean }
+
 /** A local label keyed by an opaque 16-byte firmware bond identity. */
 export interface GuestProfile {
   bondToken: string;
@@ -41,6 +48,7 @@ export interface GuestProfile {
   profile: "unchanged" | "cmd-to-ctrl" | "windows-to-mac" | "custom";
   customBasePreset?: "unchanged" | "cmd-to-ctrl" | "windows-to-mac" | null;
   modifierBindings?: ModifierBinding[];
+  keyRules?: KeyRule[];
   directShortcut?: string | null;
   mappingProfileId?: string | null;
   layoutLinkId?: string | null;

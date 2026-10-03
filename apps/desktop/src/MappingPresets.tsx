@@ -1,9 +1,10 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
-// Lets users preview, clone, edit, reset, and save physical modifier mappings
-// per opaque guest identity. It never records keys or sends a test to hardware.
+// Lets users preview, clone, edit, validate, simulate, and save physical HID
+// modifier and chord mappings per guest. Draft tests never send input to hardware.
 import { useEffect, useState, type JSX, type RefObject } from "react";
 import { saveGuestProfile } from "./setup-api";
 import { clonePreset, editBinding, modifierLabel, previewBindings, resetCustom, type PresetId } from "./mapping-presets";
+import KeyRuleEditor, { keymapConflicts } from "./KeyRuleEditor";
 import type { GuestProfile, SetupSnapshot } from "./setup-model";
 
 const presets: { id: PresetId; label: string; detail: string }[] = [
@@ -31,9 +32,10 @@ export default function MappingPresets({ snapshot, headingRef, onChanged }: {
   const changes = draft ? previewBindings(draft) : [];
   const dirty = !!stored && !!draft && JSON.stringify(stored) !== JSON.stringify(draft);
   const pending = snapshot.mappingPendingTokens.includes(selected);
+  const conflicts = draft ? keymapConflicts(draft.keyRules ?? []) : [];
 
   async function apply(): Promise<void> {
-    if (!draft || !dirty) return;
+    if (!draft || !dirty || conflicts.length) return;
     setBusy(true); setError("");
     try { await saveGuestProfile(draft); onChanged(); }
     catch (failure) { setError(String(failure)); }
@@ -47,8 +49,9 @@ export default function MappingPresets({ snapshot, headingRef, onChanged }: {
       {pending && <div className="notice notice--warning" role="status">Mapping saved locally; native actor installation is pending. Input remains disarmed while this is unresolved.</div>}
       <fieldset><legend>Preset direction</legend>{presets.map((preset) => <label className="mapping-choice" key={preset.id}><input type="radio" name="mapping-preset" checked={draft.profile === preset.id} onChange={() => setDraft({ ...draft, profile: preset.id, customBasePreset: undefined, modifierBindings: undefined })} /><span><strong>{preset.label}</strong><small>{preset.detail}</small></span></label>)}<label className="mapping-choice"><input type="radio" name="mapping-preset" checked={draft.profile === "custom"} onChange={() => setDraft(clonePreset(draft))} /><span><strong>Custom copy</strong><small>Clone the selected preset, then edit each physical modifier.</small></span></label></fieldset>
       {draft.profile === "custom" && <div className="mapping-custom"><div className="card-heading"><h2>Custom modifier bindings</h2><button type="button" onClick={() => setDraft(resetCustom(draft))}>Reset copy</button></div>{modifierUsages.map((usage) => <label key={usage}>{modifierLabel(usage)}<select value={changes.find((row) => row.sourceUsage === usage)?.targetUsage ?? usage} onChange={(event) => setDraft(editBinding(draft, usage, Number(event.target.value)))}>{modifierUsages.map((target) => <option value={target} key={target}>{modifierLabel(target)}</option>)}</select></label>)}</div>}
+      <KeyRuleEditor guest={draft} recordingAllowed={snapshot.route.kind === "local"} onChange={setDraft} />
       <div className="mapping-preview"><h2>Preview before apply</h2>{changes.length ? <div className="table-scroll"><table><thead><tr><th scope="col">Physical host input</th><th scope="col">Guest output</th></tr></thead><tbody>{changes.map((row) => <tr key={row.sourceUsage}><td>{modifierLabel(row.sourceUsage)}</td><td>{modifierLabel(row.targetUsage)}</td></tr>)}</tbody></table></div> : <p>No changed bindings. Physical keys pass through unchanged.</p>}<p className="small muted">Alt remains Option/Alt. Right Alt with Windows-synthesized Left Ctrl is preserved for AltGr; guest layout determines the character. This preview is local and sends no keys.</p></div>
-      <div className="card-tail"><button type="button" onClick={() => { setDraft(stored ?? null); setError(""); }} disabled={!dirty || busy}>Discard draft</button><button type="button" onClick={() => { void apply(); }} disabled={!dirty || busy}>Apply to {draft.name}</button></div>
+      <div className="card-tail"><span className="small muted">{dirty ? "Unsaved changes" : "Saved draft"} · host input stays local</span><button type="button" onClick={() => { setDraft(stored ?? null); setError(""); }} disabled={!dirty || busy}>Discard draft</button><button type="button" onClick={() => { void apply(); }} disabled={!dirty || busy || conflicts.length > 0}>Apply to {draft.name}</button></div>
       {error && <div className="notice notice--warning" role="alert">{error}</div>}
     </div>}
   </section>;

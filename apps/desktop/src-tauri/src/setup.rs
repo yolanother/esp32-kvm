@@ -1,7 +1,8 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Provides the Tauri setup boundary and versioned, crash-tolerant local guest profiles.
 // The serial-owning host actor supplies live status, authoritative retained
-// inventory, and pairing controls; removal preserves profiles until verified.
+// inventory, pairing controls, and physical key rule storage. Removal preserves
+// profiles until verified, while mapping drafts are validated before install.
 use esp32_kvm_input_core::{
     Destination, MappingPreset, MappingProfile, MappingRule, Side, SourceKey, preset_profile,
 };
@@ -139,6 +140,9 @@ pub struct GuestProfile {
     /// Host-local custom sided modifier replacements; only changed bindings are saved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modifier_bindings: Vec<ModifierBinding>,
+    /// Bounded per-guest physical key and exact-chord overrides.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_rules: Vec<StoredKeyRule>,
 }
 
 /// One physical modifier replacement in a guest's custom preset.
@@ -151,15 +155,56 @@ pub struct ModifierBinding {
     pub target_usage: u8,
 }
 
-/// Converts a persisted guest choice to the exact native modifier mapping.
+/// Physical side stored alongside a USB HID usage for an exact trigger.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredSide {
+    Unspecified,
+    Left,
+    Right,
+}
+
+/// One physical HID keyboard usage and its modifier side.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredKey {
+    /// USB HID keyboard usage, not a translated text character.
+    pub usage: u8,
+    /// Physical side for modifier usages; ordinary keys are unspecified.
+    pub side: StoredSide,
+}
+
+/// One bounded user override, applied once above the chosen preset.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredKeyRule {
+    /// Exact physical trigger, in any order.
+    pub source: Vec<StoredKey>,
+    /// Emitted guest usages and modifiers.
+    pub target: Vec<StoredKey>,
+    /// Higher priority wins among otherwise equal triggers.
+    pub priority: i16,
+    /// Disabled rules remain saved but cannot emit input.
+    pub enabled: bool,
+}
+
+fn native_side(side: StoredSide) -> Side {
+    match side {
+        StoredSide::Unspecified => Side::Unspecified,
+        StoredSide::Left => Side::Left,
+        StoredSide::Right => Side::Right,
+    }
+}
+
+/// Converts a persisted guest preset and physical key overrides to native rules.
 pub fn mapping_profile(guest: &GuestProfile) -> Result<MappingProfile, String> {
     if !valid_profile(guest) {
         return Err("Invalid guest mapping profile.".into());
     }
-    let preset = match guest.profile.as_str() {
-        "unchanged" => MappingPreset::Unchanged,
-        "cmd-to-ctrl" => MappingPreset::CmdToCtrl,
-        "windows-to-mac" => MappingPreset::WindowsToMac,
+    let mut result = match guest.profile.as_str() {
+        "unchanged" => preset_profile(MappingPreset::Unchanged),
+        "cmd-to-ctrl" => preset_profile(MappingPreset::CmdToCtrl),
+        "windows-to-mac" => preset_profile(MappingPreset::WindowsToMac),
         "custom" => {
             let rules = guest
                 .modifier_bindings
@@ -178,14 +223,41 @@ pub fn mapping_profile(guest: &GuestProfile) -> Result<MappingProfile, String> {
                     enabled: true,
                 })
                 .collect();
-            return Ok(MappingProfile {
+            MappingProfile {
                 preset: rules,
                 rules: Vec::new(),
-            });
+            }
         }
         _ => return Err("Unknown mapping preset.".into()),
     };
-    Ok(preset_profile(preset))
+    result.rules = guest
+        .key_rules
+        .iter()
+        .map(|rule| MappingRule {
+            source: rule
+                .source
+                .iter()
+                .map(|key| SourceKey {
+                    usage: key.usage,
+                    side: native_side(key.side),
+                })
+                .collect(),
+            target: rule
+                .target
+                .iter()
+                .map(|key| {
+                    if key.usage >= 0xe0 {
+                        Destination::Modifier(1 << (key.usage - 0xe0))
+                    } else {
+                        Destination::Usage(key.usage)
+                    }
+                })
+                .collect(),
+            priority: rule.priority,
+            enabled: rule.enabled,
+        })
+        .collect();
+    Ok(result)
 }
 
 pub(crate) fn token_bytes(token: &str) -> Result<[u8; 16], String> {
@@ -469,6 +541,45 @@ fn valid_profiles(profiles: &[GuestProfile]) -> bool {
     })
 }
 
+fn valid_stored_key(key: &StoredKey) -> bool {
+    (0x04..=0xe7).contains(&key.usage)
+        && match key.usage {
+            0xe0..=0xe3 => key.side == StoredSide::Left,
+            0xe4..=0xe7 => key.side == StoredSide::Right,
+            _ => key.side == StoredSide::Unspecified,
+        }
+}
+
+fn valid_key_rules(rules: &[StoredKeyRule]) -> bool {
+    rules.len() <= 32
+        && rules.iter().enumerate().all(|(index, rule)| {
+            (-100..=100).contains(&rule.priority)
+                && (1..=4).contains(&rule.source.len())
+                && (1..=4).contains(&rule.target.len())
+                && rule.source.iter().all(valid_stored_key)
+                && rule.target.iter().all(valid_stored_key)
+                && rule
+                    .source
+                    .iter()
+                    .enumerate()
+                    .all(|(i, key)| !rule.source[..i].contains(key))
+                && rule
+                    .target
+                    .iter()
+                    .enumerate()
+                    .all(|(i, key)| !rule.target[..i].contains(key))
+                && !(rule.source.iter().any(|key| key.usage == 0xe0)
+                    && rule.source.iter().any(|key| key.usage == 0xe4))
+                && (!rule.enabled
+                    || rules[..index].iter().all(|earlier| {
+                        !earlier.enabled
+                            || earlier.priority != rule.priority
+                            || earlier.source.len() != rule.source.len()
+                            || !earlier.source.iter().all(|key| rule.source.contains(key))
+                    }))
+        })
+}
+
 fn valid_profile(profile: &GuestProfile) -> bool {
     profile.bond_token.len() == 32
         && profile
@@ -490,6 +601,7 @@ fn valid_profile(profile: &GuestProfile) -> bool {
         && (profile.profile == "custom"
             || (profile.custom_base_preset.is_none() && profile.modifier_bindings.is_empty()))
         && profile.modifier_bindings.len() <= 8
+        && valid_key_rules(&profile.key_rules)
         && profile
             .modifier_bindings
             .iter()
@@ -850,6 +962,7 @@ mod tests {
             layout_link_id: None,
             custom_base_preset: None,
             modifier_bindings: Vec::new(),
+            key_rules: Vec::new(),
         }
     }
 
@@ -862,6 +975,74 @@ mod tests {
         let mut invalid = profile("00112233445566778899aabbccddeeff");
         invalid.name = " ".into();
         assert!(!valid_profile(&invalid));
+    }
+
+    #[test]
+    fn physical_chord_rule_persists_and_rejects_duplicate_or_emergency_trigger() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-key-rule-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let mut guest = profile("00112233445566778899aabbccddeeff");
+        let ctrl = StoredKey {
+            usage: 0xe0,
+            side: StoredSide::Left,
+        };
+        let c = StoredKey {
+            usage: 0x06,
+            side: StoredSide::Unspecified,
+        };
+        let rule = StoredKeyRule {
+            source: vec![ctrl.clone(), c.clone()],
+            target: vec![
+                StoredKey {
+                    usage: 0xe3,
+                    side: StoredSide::Left,
+                },
+                c.clone(),
+            ],
+            priority: 2,
+            enabled: true,
+        };
+        guest.key_rules.push(rule.clone());
+        let mut store = ProfileStore::load(directory.clone()).unwrap();
+        store.save(guest.clone()).unwrap();
+        assert_eq!(
+            ProfileStore::load(directory.clone()).unwrap().profiles[0].key_rules,
+            vec![rule.clone()]
+        );
+        let native = mapping_profile(&guest).unwrap();
+        assert_eq!(native.rules[0].priority, 2);
+        assert_eq!(native.rules[0].target[0], Destination::Modifier(0x08));
+        let mut engine = esp32_kvm_input_core::MappingEngine::new(native).unwrap();
+        engine.press(SourceKey {
+            usage: 0xe0,
+            side: Side::Left,
+        });
+        let report = engine.press(SourceKey {
+            usage: 0x06,
+            side: Side::Unspecified,
+        });
+        assert_eq!(report.modifiers, 0x08);
+        assert_eq!(report.keys[0], 0x06);
+        let report = engine.release(SourceKey {
+            usage: 0x06,
+            side: Side::Unspecified,
+        });
+        assert_eq!(report.modifiers, 0x01);
+        guest.key_rules.push(rule.clone());
+        assert!(!valid_profile(&guest));
+        guest.key_rules = vec![StoredKeyRule {
+            source: vec![
+                ctrl,
+                StoredKey {
+                    usage: 0xe4,
+                    side: StoredSide::Right,
+                },
+            ],
+            ..rule
+        }];
+        assert!(!valid_profile(&guest));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
