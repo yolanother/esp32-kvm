@@ -175,9 +175,20 @@ pub fn probe_stream<S: Read + Write + ?Sized>(
         return Err(ProbeError::UnexpectedResponse);
     }
     let hello = Frame::new(MessageKind::Hello, 0, 0, 0, vec![0, 0, 0, 0, 0, 0]);
-    send(stream, &hello)?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
-    let caps_frame = receive(stream, deadline)?;
+    let mut caps_frame = None;
+    for attempt in 0..2 {
+        send(stream, &hello)?;
+        match receive(stream, deadline) {
+            Ok(frame) => {
+                caps_frame = Some(frame);
+                break;
+            }
+            Err(ProbeError::Protocol(_)) if attempt == 0 => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let caps_frame = caps_frame.ok_or(ProbeError::Timeout)?;
     if caps_frame.kind != MessageKind::Caps {
         return Err(ProbeError::UnexpectedResponse);
     }

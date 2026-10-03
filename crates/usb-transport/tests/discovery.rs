@@ -97,6 +97,25 @@ fn handshake_requires_board_id_protocol_range_and_ack() {
 }
 
 #[test]
+fn initial_boot_bytes_allow_one_bounded_hello_retry() {
+    let session = 0x1_0000_0000;
+    let mut input = b"boot output ".to_vec();
+    input.extend_from_slice(&caps("esp32-kvm", session, 0, 0));
+    input.extend_from_slice(&caps("esp32-kvm", session, 0, 0));
+    input.extend_from_slice(&ack(session));
+    let mut stream = ScriptedPort::new(input);
+    let device = probe_stream(&mut stream, "esp32-kvm", "host-test").unwrap();
+    assert_eq!(device.session_id, session);
+    let sent = decoded_frames(&stream.written);
+    assert_eq!(
+        sent.iter()
+            .filter(|frame| frame.kind == MessageKind::Hello)
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn handshake_upgrades_to_minor_one_for_pairing_status() {
     let mut input = caps("esp32-kvm", 0x1_0000_0000, 0, 1);
     input.extend_from_slice(&caps("esp32-kvm", 0x1_0000_0000, 0, 1));
