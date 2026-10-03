@@ -180,6 +180,7 @@ pub fn probe_stream<S: Read + Write + ?Sized>(
     for attempt in 0..2 {
         send(stream, &hello)?;
         match receive(stream, deadline) {
+            Ok(frame) if frame.kind != MessageKind::Caps && attempt == 0 => continue,
             Ok(frame) => {
                 caps_frame = Some(frame);
                 break;
