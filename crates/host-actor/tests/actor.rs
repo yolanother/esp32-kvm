@@ -259,7 +259,7 @@ fn three_slot_status_routes_only_with_negotiated_capacity() {
         wire.clone(),
         Box::new(gate),
         confirmed,
-        vec![3],
+        Vec::new(),
         Box::new(TestMapper),
         0,
     )

@@ -350,7 +350,8 @@ pub struct HostActor<S: Read + Write> {
 
 impl<S: Read + Write> HostActor<S> {
     /// Starts a disarmed actor after HELLO/CAPS/SESSION_OPEN was verified.
-    /// It requests STATUS before allowing any routing command.
+    /// An empty order selects all advertised slots in numeric order. It
+    /// requests STATUS before allowing any routing command.
     pub fn from_confirmed(
         stream: S,
         capture: Box<dyn CaptureControl>,
@@ -362,6 +363,11 @@ impl<S: Read + Write> HostActor<S> {
         if device.session_id == 0 {
             return Err(HostFault::Session);
         }
+        let order = if order.is_empty() {
+            (1..=device.max_connections.min(3)).collect()
+        } else {
+            order
+        };
         let pairing_supported = device.negotiated_minor >= 1;
         capture.disarm();
         let mut actor = Self {
