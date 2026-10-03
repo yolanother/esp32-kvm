@@ -234,7 +234,7 @@ static void display_worker(void *context)
                 case KVM_DISPLAY_PAIRING_CLOSED:
                 case KVM_DISPLAY_PAIRING_REJECTED:
                 case KVM_DISPLAY_PAIRING_TIMEOUT:
-                    set_action(left_action, "START PAIRING");
+                    set_action(left_action, next.ready_slots ? "ADD GUEST" : "START PAIRING");
                     set_action(right_action, NULL);
                     lv_obj_set_width(left_action, 216);
                     break;

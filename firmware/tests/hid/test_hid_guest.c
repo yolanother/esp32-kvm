@@ -28,6 +28,7 @@ static struct ble_npl_eventq host_queue;
 static struct ble_npl_callout host_timeout;
 static bool hold_host;
 static bool fail_next_commit;
+static int security_result;
 
 static void event_sink(const hid_guest_pairing_event_t *event, void *context)
 { (void)context; last_event = *event; }
@@ -117,7 +118,7 @@ int ble_gap_adv_start(uint8_t type, const void *address, uint32_t duration,
   gap_callback = callback; advertisements++; return 0; }
 int ble_gap_terminate(uint16_t handle, uint8_t reason)
 { (void)handle; (void)reason; terminations++; return 0; }
-int ble_gap_security_initiate(uint16_t handle) { return handle == 17 ? 0 : -1; }
+int ble_gap_security_initiate(uint16_t handle) { return handle == 17 ? security_result : -1; }
 int ble_gap_conn_find(uint16_t handle, struct ble_gap_conn_desc *description)
 { description->conn_handle = handle; description->peer_id_addr = active_peer;
   description->sec_state.encrypted = 1; description->sec_state.bonded = 1;
@@ -225,8 +226,10 @@ int main(void)
     memset(current_token, 0xa5, sizeof(current_token));
     assert(!hid_guest_request_current_bond_token(current_token));
     assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
+    security_result = BLE_HS_EALREADY;
     gap_callback(&connect, NULL);
     assert(channel.connected && terminations == 2);
+    security_result = 0;
     hold_host = true;
     const uint8_t stale_keys[HID_KEYBOARD_REPORT_LEN] = {0};
     unsigned sent_before_timeout = sent_reports;

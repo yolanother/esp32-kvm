@@ -169,7 +169,11 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
-        if (ble_gap_security_initiate(event->connect.conn_handle) != 0)
+        int security_result = ble_gap_security_initiate(event->connect.conn_handle);
+        /* The central may have begun SMP first.  An existing procedure is
+           still allowed to finish through ENC_CHANGE; only a real failure
+           invalidates the link. */
+        if (security_result != 0 && security_result != BLE_HS_EALREADY)
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         else advertise();
         return 0;

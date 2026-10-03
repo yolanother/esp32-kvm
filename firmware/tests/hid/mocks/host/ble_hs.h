@@ -10,6 +10,7 @@ struct os_mbuf *ble_hs_mbuf_from_flat(const void *data, size_t length);
 #define BLE_SM_IO_CAP_DISP_YES_NO 1
 #define BLE_SM_PAIR_KEY_DIST_ENC 1
 #define BLE_SM_PAIR_KEY_DIST_ID 2
+#define BLE_HS_EALREADY 22
 struct ble_hs_cfg {
     void (*reset_cb)(int);
     void (*sync_cb)(void);

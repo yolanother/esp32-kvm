@@ -98,9 +98,11 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         v->screen = KVM_DISPLAY_ACTIVE;
         COPY_TEXT(v->title, "CURRENT TARGET");
         COPY_TEXT(v->primary, kvm_display_target_label(s));
-        snprintf(v->detail, sizeof(v->detail), "USB online | %u guest%s",
-                 s->guest_slots, s->guest_slots == 1 ? "" : "s");
-        COPY_TEXT(v->footer, "Control changes via host");
+        if (s->ready_slots)
+            snprintf(v->detail, sizeof(v->detail), "%u guest%s connected",
+                     s->ready_slots, s->ready_slots == 1 ? "" : "s");
+        else COPY_TEXT(v->detail, "No guest connected");
+        COPY_TEXT(v->footer, "USB online | control via host");
     }
 }
 

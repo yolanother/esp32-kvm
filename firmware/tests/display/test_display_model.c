@@ -27,6 +27,7 @@ int main(void)
     kvm_display_make_view(&status, 1000, &view);
     assert(view.screen == KVM_DISPLAY_ACTIVE);
     assert(strcmp(view.primary, "GUEST 1") == 0);
+    assert(strcmp(view.detail, "1 guest connected") == 0);
     status.guest_ready = false;
     kvm_display_make_view(&status, 1000, &view);
     assert(view.screen == KVM_DISPLAY_PAUSED);
