@@ -2,7 +2,8 @@
 // Owns the serialized native host USB session and routes capture events through
 // a verified protocol session, input policy, fail-local capture gate, and
 // numeric pairing state reported by negotiated firmware STATUS. Terminal
-// suspend and shutdown end the session without input replay.
+// suspend and shutdown end the session without input replay. Bond deletion
+// requires an exact device ACK and a fresh STATUS before profile removal.
 
 #![forbid(unsafe_code)]
 
@@ -28,6 +29,8 @@ use std::sync::{
     Arc,
     mpsc::{Receiver, TryRecvError},
 };
+use std::thread;
+use std::time::{Duration, Instant};
 
 const HEARTBEAT_MS: u64 = 100;
 const STATUS_REQUEST_MS: u64 = 250;
@@ -241,6 +244,21 @@ pub enum PairingError {
     Transport,
 }
 
+/// Why a requested bond removal could not be verified on the device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForgetError {
+    /// Another control transaction is still awaiting an ACK.
+    Busy,
+    /// Removal is allowed only while routing and pairing are local and idle.
+    NotLocal,
+    /// The latest verified STATUS does not contain this token.
+    UnknownBond,
+    /// A fresh post-ACK STATUS still reported the token.
+    StillBonded,
+    /// The verified session failed before removal could be confirmed.
+    Host(HostFault),
+}
+
 #[derive(Clone)]
 struct Pending {
     frame: Frame,
@@ -273,6 +291,7 @@ pub struct HostActor<S: Read + Write> {
     challenge_id: Option<u32>,
     comparison_value: Option<u32>,
     slots: Vec<SlotSnapshot>,
+    status_revision: u64,
     keys: BTreeMap<(u32, bool), SourceKey>,
     mapping: MappingEngine,
     profiles: BTreeMap<[u8; 16], MappingProfile>,
@@ -324,6 +343,7 @@ impl<S: Read + Write> HostActor<S> {
             challenge_id: None,
             comparison_value: None,
             slots: Vec::new(),
+            status_revision: 0,
             keys: BTreeMap::new(),
             mapping: MappingEngine::new(MappingProfile::default()).expect("empty profile is valid"),
             profiles: BTreeMap::new(),
@@ -460,6 +480,54 @@ impl<S: Read + Write> HostActor<S> {
         self.issue_aux(MessageKind::PairCancel, vec![], now_ms)
     }
 
+    /// Removes a known bond on this actor's verified stream. The caller must
+    /// run this bounded operation on the native actor worker, not the UI thread.
+    /// Success means an exact ACK and a later STATUS no longer naming the token.
+    pub fn forget_bond(&mut self, token: [u8; 16], now_ms: u64) -> Result<(), ForgetError> {
+        if self.state() != HostState::Local {
+            return Err(ForgetError::NotLocal);
+        }
+        if self.pending.is_some() {
+            return Err(ForgetError::Busy);
+        }
+        if !self.slots.iter().any(|slot| slot.bond_token == token) {
+            return Err(ForgetError::UnknownBond);
+        }
+        let mut payload = vec![0xa1, 1, 0x50];
+        payload.extend_from_slice(&token);
+        self.issue_aux(MessageKind::ForgetBond, payload, now_ms)
+            .map_err(|_| ForgetError::Host(HostFault::Transport))?;
+        let started = Instant::now();
+        while self.pending.is_some() {
+            self.poll(now_ms.saturating_add(started.elapsed().as_millis() as u64));
+            if let Some(fault) = self.fault {
+                return Err(ForgetError::Host(fault));
+            }
+            if self.pending.is_some() {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let previous_status = self.status_revision;
+        if let Err(fault) = self.send(MessageKind::GetStatus, self.confirmed_generation, vec![]) {
+            self.fail(fault);
+            return Err(ForgetError::Host(fault));
+        }
+        while self.status_revision == previous_status {
+            self.poll(now_ms.saturating_add(started.elapsed().as_millis() as u64));
+            if let Some(fault) = self.fault {
+                return Err(ForgetError::Host(fault));
+            }
+            if self.status_revision == previous_status {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if self.slots.iter().any(|slot| slot.bond_token == token) {
+            return Err(ForgetError::StillBonded);
+        }
+        self.profiles.remove(&token);
+        Ok(())
+    }
+
     /// Drains a bounded batch from the capture hook and advances serial I/O.
     pub fn drive(&mut self, receiver: &Receiver<CaptureEvent>, now_ms: u64) {
         for _ in 0..64 {
@@ -483,7 +551,10 @@ impl<S: Read + Write> HostActor<S> {
         if self.pending.as_ref().is_some_and(|p| {
             matches!(
                 p.frame.kind,
-                MessageKind::PairBegin | MessageKind::PairReply | MessageKind::PairCancel
+                MessageKind::PairBegin
+                    | MessageKind::PairReply
+                    | MessageKind::PairCancel
+                    | MessageKind::ForgetBond
             )
         }) {
             return;
@@ -762,6 +833,7 @@ impl<S: Read + Write> HostActor<S> {
         self.challenge_id = status.challenge_id;
         self.comparison_value = status.comparison_value;
         self.slots = status.slots.clone();
+        self.status_revision = self.status_revision.wrapping_add(1);
         let mut next = None;
         if let Some(router) = self.router.as_mut() {
             for slot in self.order.iter().copied() {
@@ -820,7 +892,13 @@ impl<S: Read + Write> HostActor<S> {
             (Some(router), MessageKind::ReleaseAll) => router.release_ack(result_generation),
             (Some(router), MessageKind::Switch) => router.switch_ack(result_generation),
             (Some(router), MessageKind::Arm) => router.arm_ack(result_generation, now_ms),
-            (_, MessageKind::PairBegin | MessageKind::PairReply | MessageKind::PairCancel) => None,
+            (
+                _,
+                MessageKind::PairBegin
+                | MessageKind::PairReply
+                | MessageKind::PairCancel
+                | MessageKind::ForgetBond,
+            ) => None,
             _ => {
                 self.fail(HostFault::Protocol);
                 return;

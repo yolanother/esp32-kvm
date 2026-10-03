@@ -2,7 +2,7 @@
 // Drives the native host actor with a fake monotonic clock and byte stream to
 // verify exact control acknowledgments, retry bounds, local failover, and input safety.
 
-use esp32_kvm_host_actor::{HostActor, HostFault, HostState, KeyMapper, MappedKey};
+use esp32_kvm_host_actor::{ForgetError, HostActor, HostFault, HostState, KeyMapper, MappedKey};
 use esp32_kvm_input_core::{Action, Destination, MappingProfile, MappingRule, Side, SourceKey};
 use esp32_kvm_platform_windows::{CaptureEvent, CaptureGate, PhysicalEvent};
 use esp32_kvm_protocol::{Frame, FrameDecoder, MessageKind};
@@ -16,6 +16,18 @@ struct WireState {
     incoming: VecDeque<u8>,
     outgoing: Vec<u8>,
     eof: bool,
+    forget_script: Option<ForgetScript>,
+    forget_seen: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ForgetScript {
+    Success,
+    StaleThenSuccess,
+    WrongAck,
+    StillBonded,
+    NoAck,
+    Unplug,
 }
 
 #[derive(Clone, Default)]
@@ -44,6 +56,9 @@ impl FakePort {
     fn unplug(&self) {
         self.0.lock().unwrap().eof = true;
     }
+    fn script_forget(&self, script: ForgetScript) {
+        self.0.lock().unwrap().forget_script = Some(script);
+    }
 }
 
 impl Read for FakePort {
@@ -70,7 +85,43 @@ impl Read for FakePort {
 
 impl Write for FakePort {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().outgoing.extend_from_slice(buf);
+        let mut state = self.0.lock().unwrap();
+        state.outgoing.extend_from_slice(buf);
+        let mut decoder = FrameDecoder::new();
+        for frame in buf.iter().filter_map(|byte| decoder.push(*byte)).flatten() {
+            match (state.forget_script, frame.kind) {
+                (Some(script), MessageKind::ForgetBond) if !state.forget_seen => {
+                    state.forget_seen = true;
+                    if matches!(script, ForgetScript::Unplug) {
+                        state.eof = true;
+                    } else if !matches!(script, ForgetScript::NoAck) {
+                        let mut answer = ack(&frame, frame.route_generation);
+                        if matches!(script, ForgetScript::WrongAck) {
+                            answer.payload[0] = MessageKind::Arm as u8;
+                        }
+                        if matches!(script, ForgetScript::StaleThenSuccess) {
+                            let mut stale = answer.clone();
+                            stale.seq = 0;
+                            stale.payload[1..5].copy_from_slice(&0_u32.to_le_bytes());
+                            state.incoming.extend(stale.encode().unwrap());
+                        }
+                        state.incoming.extend(answer.encode().unwrap());
+                    }
+                }
+                (Some(script), MessageKind::GetStatus)
+                    if state.forget_seen
+                        && !matches!(script, ForgetScript::NoAck | ForgetScript::Unplug) =>
+                {
+                    let answer = if matches!(script, ForgetScript::StillBonded) {
+                        status(0, true)
+                    } else {
+                        status_empty()
+                    };
+                    state.incoming.extend(answer.encode().unwrap());
+                }
+                _ => {}
+            }
+        }
         Ok(buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -122,6 +173,16 @@ fn status(generation: u32, ready: bool) -> Frame {
     Frame::new(MessageKind::Status, 5, 1, generation, payload)
 }
 
+fn status_empty() -> Frame {
+    Frame::new(
+        MessageKind::Status,
+        5,
+        1,
+        0,
+        vec![0xa5, 1, 0, 2, 0, 3, 0x80, 4, 0, 5, 0],
+    )
+}
+
 fn ack(original: &Frame, result_generation: u32) -> Frame {
     let mut payload = vec![original.kind as u8];
     payload.extend_from_slice(&original.seq.to_le_bytes());
@@ -149,6 +210,98 @@ fn setup() -> (HostActor<FakePort>, FakePort, Arc<CaptureGate>) {
     )
     .unwrap();
     (actor, wire, gate)
+}
+
+#[test]
+fn forget_bond_requires_exact_ack_and_fresh_absent_status() {
+    let (mut actor, wire, _) = setup();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    wire.script_forget(ForgetScript::Success);
+    assert_eq!(actor.forget_bond([1; 16], 2), Ok(()));
+    let frames = wire.sent();
+    let forget = frames
+        .iter()
+        .find(|f| f.kind == MessageKind::ForgetBond)
+        .unwrap();
+    assert_eq!(
+        forget.payload,
+        [0xa1, 1, 0x50]
+            .into_iter()
+            .chain([1; 16])
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| f.kind == MessageKind::GetStatus && f.seq > forget.seq)
+    );
+    assert!(actor.setup_snapshot().slots.is_empty());
+}
+
+#[test]
+fn forget_bond_rejects_unknown_or_nonlocal_without_writing() {
+    let (mut actor, wire, _) = setup();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    let before = wire.sent().len();
+    assert_eq!(actor.forget_bond([2; 16], 2), Err(ForgetError::UnknownBond));
+    assert_eq!(wire.sent().len(), before);
+    actor.request(Action::Direct(1), 3);
+    let before = wire.sent().len();
+    assert_eq!(actor.forget_bond([1; 16], 4), Err(ForgetError::NotLocal));
+    assert_eq!(wire.sent().len(), before);
+}
+
+#[test]
+fn forget_bond_wrong_ack_fails_local_and_unchanged_status_never_succeeds() {
+    for (script, expected) in [
+        (
+            ForgetScript::WrongAck,
+            Err(ForgetError::Host(HostFault::Acknowledgment)),
+        ),
+        (ForgetScript::StillBonded, Err(ForgetError::StillBonded)),
+    ] {
+        let (mut actor, wire, _) = setup();
+        wire.feed(status(0, true));
+        actor.poll(1);
+        wire.script_forget(script);
+        assert_eq!(actor.forget_bond([1; 16], 2), expected);
+        assert!(!actor.setup_snapshot().slots.is_empty());
+    }
+}
+
+#[test]
+fn forget_bond_without_ack_times_out_and_keeps_bond() {
+    let (mut actor, wire, _) = setup();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    wire.script_forget(ForgetScript::NoAck);
+    assert_eq!(
+        actor.forget_bond([1; 16], 2),
+        Err(ForgetError::Host(HostFault::Timeout))
+    );
+    assert!(!actor.setup_snapshot().slots.is_empty());
+}
+
+#[test]
+fn forget_bond_ignores_stale_ack_but_transport_loss_is_terminal() {
+    let (mut actor, wire, _) = setup();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    wire.script_forget(ForgetScript::StaleThenSuccess);
+    assert_eq!(actor.forget_bond([1; 16], 2), Ok(()));
+
+    let (mut actor, wire, _) = setup();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    wire.script_forget(ForgetScript::Unplug);
+    assert_eq!(
+        actor.forget_bond([1; 16], 2),
+        Err(ForgetError::Host(HostFault::Transport))
+    );
+    assert_eq!(actor.state(), HostState::Failed);
+    assert!(!actor.setup_snapshot().slots.is_empty());
 }
 
 fn active() -> (HostActor<FakePort>, FakePort, Arc<CaptureGate>) {
