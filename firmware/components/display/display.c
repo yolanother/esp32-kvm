@@ -137,9 +137,11 @@ static void display_worker(void *context)
         kvm_display_make_view(&next, (uint64_t)esp_timer_get_time() / 1000, &view);
         if (panel_started && memcmp(&shown, &view, sizeof(view)) != 0 && lvgl_port_lock(20)) {
             lv_label_set_text(title_label, view.title);
+#if CONFIG_LV_FONT_MONTSERRAT_28
             lv_obj_set_style_text_font(primary_label,
                 view.screen == KVM_DISPLAY_PAIRING && strlen(view.primary) == 6u
                     ? &lv_font_montserrat_28 : LV_FONT_DEFAULT, 0);
+#endif
             lv_label_set_text(primary_label, view.primary);
             lv_label_set_text(detail_label, view.detail);
             lv_label_set_text(footer_label, view.footer);
