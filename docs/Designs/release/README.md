@@ -57,6 +57,11 @@ artifacts. The script never erases or packages NVS, bond storage, or desktop
 profiles. A separate signing and provenance process is required before a
 release can be called trusted.
 
+The desktop pins Rust `tauri` and JavaScript `@tauri-apps/api` and
+`@tauri-apps/cli` to 2.12.0. Keep the JavaScript package lock aligned with
+those declarations before building an installer; the bundled CLI should come
+from the desktop dependencies, not an older global installation.
+
 ## Installation and recovery gate
 
 On a clean Windows 11 machine, install the built desktop bundle, start the app,
