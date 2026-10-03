@@ -12,8 +12,8 @@ pub use hotkeys::{
     Action, HotkeyConfig, HotkeyMatcher, Key, KeyOutcome, Modifiers, Shortcut, ShortcutError,
 };
 pub use mapping::{
-    Destination, KeyboardReport, MappingEngine, MappingError, MappingProfile, MappingRule, Side,
-    SourceKey,
+    Destination, KeyboardReport, MappingEngine, MappingError, MappingPreset, MappingProfile,
+    MappingRule, Side, SourceKey, preset_profile,
 };
 pub use requests::RequestActor;
 pub use routing::{Command, Router, SWITCH_TIMEOUT_MS, State};

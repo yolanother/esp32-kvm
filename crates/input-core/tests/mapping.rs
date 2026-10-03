@@ -2,8 +2,43 @@
 // Exercises physical guest mapping precedence, held-key release, and HID report safety.
 
 use esp32_kvm_input_core::{
-    Destination, MappingEngine, MappingProfile, MappingRule, Side, SourceKey,
+    Destination, MappingEngine, MappingPreset, MappingProfile, MappingRule, Side, SourceKey,
+    preset_profile,
 };
+
+#[test]
+fn explicit_modifier_presets_never_reverse_the_requested_direction() {
+    let gui = key(0xe3, Side::Left);
+    let ctrl = key(0xe0, Side::Left);
+    let c = key(6, Side::Unspecified);
+    let mut cmd_to_ctrl = MappingEngine::new(preset_profile(MappingPreset::CmdToCtrl)).unwrap();
+    assert_eq!(cmd_to_ctrl.press(gui).modifiers, 0x01);
+    assert_eq!(cmd_to_ctrl.press(c).keys[0], 6);
+    cmd_to_ctrl.release(c);
+    cmd_to_ctrl.release(gui);
+    assert_eq!(cmd_to_ctrl.press(ctrl).modifiers, 0x01);
+
+    let mut windows_to_mac =
+        MappingEngine::new(preset_profile(MappingPreset::WindowsToMac)).unwrap();
+    assert_eq!(windows_to_mac.press(ctrl).modifiers, 0x08);
+    windows_to_mac.release(ctrl);
+    assert_eq!(windows_to_mac.press(gui).modifiers, 0x08);
+}
+
+#[test]
+fn windows_to_mac_preserves_altgr_chord_on_non_us_layouts() {
+    let ctrl = key(0xe0, Side::Left);
+    let altgr = key(0xe6, Side::Right);
+    let q = key(20, Side::Unspecified);
+    let mut engine = MappingEngine::new(preset_profile(MappingPreset::WindowsToMac)).unwrap();
+    engine.press(ctrl);
+    let report = engine.press(altgr);
+    assert_eq!(report.modifiers, 0x41);
+    assert_eq!(engine.press(q).modifiers, 0x41);
+    engine.release(q);
+    assert_eq!(engine.release(altgr).modifiers, 0x08);
+    assert_eq!(engine.release(ctrl).modifiers, 0);
+}
 
 fn key(usage: u8, side: Side) -> SourceKey {
     SourceKey { usage, side }

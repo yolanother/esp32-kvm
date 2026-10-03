@@ -56,6 +56,38 @@ pub struct MappingProfile {
     pub rules: Vec<MappingRule>,
 }
 
+/// Direction chosen by the user for the built-in physical modifier preset.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MappingPreset {
+    /// Emit the physical modifiers unchanged.
+    Unchanged,
+    /// Apple Command or Windows GUI sends Control to the guest.
+    CmdToCtrl,
+    /// Windows Control sends Command or GUI to a Mac guest.
+    WindowsToMac,
+}
+
+/// Builds a validated built-in mapping without reversing the selected direction.
+pub fn preset_profile(preset: MappingPreset) -> MappingProfile {
+    let sources: &[(u8, Side, u8)] = match preset {
+        MappingPreset::Unchanged => &[],
+        MappingPreset::CmdToCtrl => &[(0xe3, Side::Left, 0x01), (0xe7, Side::Right, 0x10)],
+        MappingPreset::WindowsToMac => &[(0xe0, Side::Left, 0x08), (0xe4, Side::Right, 0x80)],
+    };
+    MappingProfile {
+        preset: sources
+            .iter()
+            .map(|&(usage, side, bit)| MappingRule {
+                source: vec![SourceKey { usage, side }],
+                target: vec![Destination::Modifier(bit)],
+                priority: 0,
+                enabled: true,
+            })
+            .collect(),
+        rules: Vec::new(),
+    }
+}
+
 /// Invalid mapping data that must not replace the active profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MappingError {
@@ -182,6 +214,12 @@ impl MappingEngine {
             }
         } else {
             for key in &self.held {
+                // Windows reports many AltGr presses as left Control followed by right Alt.
+                // Preserve that physical pair, including while a printable key is held.
+                if key.usage == 0xe0 && self.held.iter().any(|held| held.usage == 0xe6) {
+                    *counts.entry(Destination::Modifier(0x01)).or_default() += 1;
+                    continue;
+                }
                 let selected = self
                     .profile
                     .rules

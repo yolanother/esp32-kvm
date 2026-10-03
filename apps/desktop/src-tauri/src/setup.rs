@@ -2,6 +2,9 @@
 // Provides the Tauri setup boundary and versioned, crash-tolerant local guest profiles.
 // The serial-owning host actor supplies verified bonds and pairing controls;
 // absent challenge events and all-up proof keep confirmation and testing closed.
+use esp32_kvm_input_core::{
+    Destination, MappingPreset, MappingProfile, MappingRule, Side, SourceKey, preset_profile,
+};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -129,6 +132,71 @@ pub struct GuestProfile {
     /// Optional identifier of a host-local monitor-layout link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_link_id: Option<String>,
+    /// Base preset retained when a custom copy is reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_base_preset: Option<String>,
+    /// Host-local custom sided modifier replacements; only changed bindings are saved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifier_bindings: Vec<ModifierBinding>,
+}
+
+/// One physical modifier replacement in a guest's custom preset.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModifierBinding {
+    /// Physical HID modifier usage from E0 through E7.
+    pub source_usage: u8,
+    /// Guest HID modifier usage from E0 through E7.
+    pub target_usage: u8,
+}
+
+/// Converts a persisted guest choice to the exact native modifier mapping.
+pub fn mapping_profile(guest: &GuestProfile) -> Result<MappingProfile, String> {
+    if !valid_profile(guest) {
+        return Err("Invalid guest mapping profile.".into());
+    }
+    let preset = match guest.profile.as_str() {
+        "unchanged" => MappingPreset::Unchanged,
+        "cmd-to-ctrl" => MappingPreset::CmdToCtrl,
+        "windows-to-mac" => MappingPreset::WindowsToMac,
+        "custom" => {
+            let rules = guest
+                .modifier_bindings
+                .iter()
+                .map(|binding| MappingRule {
+                    source: vec![SourceKey {
+                        usage: binding.source_usage,
+                        side: if binding.source_usage <= 0xe3 {
+                            Side::Left
+                        } else {
+                            Side::Right
+                        },
+                    }],
+                    target: vec![Destination::Modifier(1 << (binding.target_usage - 0xe0))],
+                    priority: 0,
+                    enabled: true,
+                })
+                .collect();
+            return Ok(MappingProfile {
+                preset: rules,
+                rules: Vec::new(),
+            });
+        }
+        _ => return Err("Unknown mapping preset.".into()),
+    };
+    Ok(preset_profile(preset))
+}
+
+fn token_bytes(token: &str) -> Result<[u8; 16], String> {
+    if token.len() != 32 {
+        return Err("Invalid bond identity token.".into());
+    }
+    let mut bytes = [0; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&token[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "Invalid bond identity token.")?;
+    }
+    Ok(bytes)
 }
 
 /// Combined native status and locally stored labels for the webview.
@@ -191,6 +259,14 @@ impl BackendSnapshot {
 pub trait SetupBackend: Send + Sync {
     /// Returns a current snapshot without opening a second serial stream.
     fn snapshot(&self) -> Result<BackendSnapshot, String>;
+    /// Caches a validated per-bond mapping in the single serial-owning worker.
+    fn install_mapping(
+        &self,
+        _bond_token: [u8; 16],
+        _profile: MappingProfile,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Forgets one firmware bond and returns only after ACK and fresh STATUS.
     fn forget_bond(&self, _bond_token: &str) -> Result<(), String> {
         Err("Firmware bond forgetting is not wired to the host actor.".into())
@@ -389,7 +465,29 @@ fn valid_profile(profile: &GuestProfile) -> bool {
         && !profile.name.trim().is_empty()
         && profile.name.trim().chars().count() <= 64
         && matches!(profile.os.as_str(), "windows" | "macos" | "linux" | "other")
-        && matches!(profile.profile.as_str(), "unchanged" | "windows-to-mac")
+        && matches!(
+            profile.profile.as_str(),
+            "unchanged" | "cmd-to-ctrl" | "windows-to-mac" | "custom"
+        )
+        && profile
+            .custom_base_preset
+            .as_deref()
+            .is_none_or(|base| matches!(base, "unchanged" | "cmd-to-ctrl" | "windows-to-mac"))
+        && (profile.profile == "custom"
+            || (profile.custom_base_preset.is_none() && profile.modifier_bindings.is_empty()))
+        && profile.modifier_bindings.len() <= 8
+        && profile
+            .modifier_bindings
+            .iter()
+            .enumerate()
+            .all(|(index, binding)| {
+                (0xe0..=0xe7).contains(&binding.source_usage)
+                    && (0xe0..=0xe7).contains(&binding.target_usage)
+                    && binding.source_usage != binding.target_usage
+                    && profile.modifier_bindings[..index]
+                        .iter()
+                        .all(|other| other.source_usage != binding.source_usage)
+            })
         && profile.direct_shortcut.as_deref().is_none_or(|value| {
             !value.is_empty()
                 && value.len() <= 64
@@ -422,9 +520,16 @@ pub struct SetupService {
 impl SetupService {
     /// Loads local labels and uses the supplied sole serial-session owner.
     pub fn new(directory: PathBuf, backend: Box<dyn SetupBackend>) -> Self {
+        let profiles = ProfileStore::load(directory).and_then(|store| {
+            for guest in &store.profiles {
+                backend
+                    .install_mapping(token_bytes(&guest.bond_token)?, mapping_profile(guest)?)?;
+            }
+            Ok(store)
+        });
         Self {
             backend,
-            profiles: Mutex::new(ProfileStore::load(directory)),
+            profiles: Mutex::new(profiles),
         }
     }
 
@@ -446,6 +551,8 @@ impl SetupService {
     }
 
     fn save_profile(&self, profile: GuestProfile) -> Result<(), String> {
+        let mapping = mapping_profile(&profile)?;
+        let token = token_bytes(&profile.bond_token)?;
         let known = self
             .profiles
             .lock()
@@ -465,7 +572,11 @@ impl SetupService {
             return Err("Firmware has not reported this bond identity.".into());
         }
         let mut guard = self.profiles.lock().map_err(|error| error.to_string())?;
-        guard.as_mut().map_err(|error| error.clone())?.save(profile)
+        guard
+            .as_mut()
+            .map_err(|error| error.clone())?
+            .save(profile)?;
+        self.backend.install_mapping(token, mapping)
     }
 
     fn forget_profile(&self, token: &str) -> Result<ForgetOutcome, String> {
@@ -643,6 +754,8 @@ mod tests {
             direct_shortcut: None,
             mapping_profile_id: None,
             layout_link_id: None,
+            custom_base_preset: None,
+            modifier_bindings: Vec::new(),
         }
     }
 
@@ -875,6 +988,97 @@ mod tests {
                 .profiles
                 .is_empty()
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn custom_modifier_clone_round_trips_and_rejects_duplicate_sources() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-custom-map-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let mut custom = profile("00112233445566778899aabbccddeeff");
+        custom.profile = "custom".into();
+        custom.custom_base_preset = Some("windows-to-mac".into());
+        custom.modifier_bindings = vec![ModifierBinding {
+            source_usage: 0xe0,
+            target_usage: 0xe3,
+        }];
+        let mut store = ProfileStore::load(directory.clone()).unwrap();
+        store.save(custom.clone()).unwrap();
+        assert_eq!(
+            ProfileStore::load(directory.clone()).unwrap().profiles,
+            vec![custom.clone()]
+        );
+        let native = mapping_profile(&custom).unwrap();
+        assert_eq!(native.preset.len(), 1);
+        custom
+            .modifier_bindings
+            .push(custom.modifier_bindings[0].clone());
+        assert!(store.save(custom).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn preset_choice_is_explicit_and_does_not_reverse_cmd_to_ctrl() {
+        let mut guest = profile("00112233445566778899aabbccddeeff");
+        guest.profile = "cmd-to-ctrl".into();
+        let profile = mapping_profile(&guest).unwrap();
+        assert_eq!(profile.preset[0].source[0].usage, 0xe3);
+        assert_eq!(
+            profile.preset[0].target[0],
+            esp32_kvm_input_core::Destination::Modifier(1)
+        );
+        guest.profile = "windows-to-mac".into();
+        let profile = mapping_profile(&guest).unwrap();
+        assert_eq!(profile.preset[0].source[0].usage, 0xe0);
+        assert_eq!(
+            profile.preset[0].target[0],
+            esp32_kvm_input_core::Destination::Modifier(8)
+        );
+    }
+
+    type RecordedMappings = std::sync::Arc<Mutex<Vec<([u8; 16], MappingProfile)>>>;
+    struct MappingRecorder(RecordedMappings);
+
+    impl SetupBackend for MappingRecorder {
+        fn snapshot(&self) -> Result<BackendSnapshot, String> {
+            OneBondBackend.snapshot()
+        }
+
+        fn install_mapping(&self, token: [u8; 16], profile: MappingProfile) -> Result<(), String> {
+            self.0.lock().unwrap().push((token, profile));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn saved_guest_mapping_is_reinstalled_by_token_after_restart() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-map-restore-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let installed = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut guest = profile("00112233445566778899aabbccddeeff");
+        guest.profile = "cmd-to-ctrl".into();
+        SetupService::new(
+            directory.clone(),
+            Box::new(MappingRecorder(installed.clone())),
+        )
+        .save_profile(guest)
+        .unwrap();
+        assert_eq!(installed.lock().unwrap().len(), 1);
+        installed.lock().unwrap().clear();
+        let _restored = SetupService::new(
+            directory.clone(),
+            Box::new(MappingRecorder(installed.clone())),
+        );
+        let records = installed.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].0,
+            token_bytes("00112233445566778899aabbccddeeff").unwrap()
+        );
+        assert_eq!(records[0].1.preset[0].source[0].usage, 0xe3);
+        drop(records);
         fs::remove_dir_all(directory).unwrap();
     }
 }

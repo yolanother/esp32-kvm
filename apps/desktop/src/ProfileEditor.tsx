@@ -31,7 +31,9 @@ export default function ProfileEditor({ guest, snapshot, onClose, onChanged }: {
     if (!validGuestName(name) || !validDirectShortcut(directShortcut)) return;
     setBusy(true); setError("");
     try {
-      await saveGuestProfile({ ...guest, name: name.trim(), os, profile, directShortcut: directShortcut || null });
+      await saveGuestProfile({ ...guest, name: name.trim(), os, profile, directShortcut: directShortcut || null,
+        customBasePreset: profile === "custom" ? guest.customBasePreset : undefined,
+        modifierBindings: profile === "custom" ? guest.modifierBindings : undefined });
       onChanged();
     } catch (failure) { setError(String(failure)); }
     finally { setBusy(false); }
@@ -51,7 +53,7 @@ export default function ProfileEditor({ guest, snapshot, onClose, onChanged }: {
     <form className="profile-form" onSubmit={(event) => { void save(event); }}>
       <label>Guest name<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} autoComplete="off" required /></label>
       <label>Guest OS<select value={os} onChange={(event) => setOs(event.target.value as GuestProfile["os"])}><option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option><option value="other">Other</option></select></label>
-      <label>Key profile preference<select value={profile} onChange={(event) => setProfile(event.target.value as GuestProfile["profile"])}><option value="unchanged">Unchanged keys</option><option value="windows-to-mac">Windows shortcuts to Mac</option></select></label>
+      <label>Key profile preference<select value={profile} onChange={(event) => setProfile(event.target.value as GuestProfile["profile"])}><option value="unchanged">Unchanged keys</option><option value="cmd-to-ctrl">Cmd / Win to Ctrl</option><option value="windows-to-mac">Windows Ctrl to Mac Cmd</option>{guest.profile === "custom" && <option value="custom">Custom modifier mapping</option>}</select></label>
       <label>Direct shortcut preference<input value={directShortcut} maxLength={64} onChange={(event) => setDirectShortcut(event.target.value)} placeholder="Ctrl+Alt+1" aria-describedby="shortcut-help" /></label>
       <p className="small muted" id="shortcut-help">Saved for future shortcut setup. No shortcut is registered in this build.</p>
       <button type="submit" disabled={busy || !validGuestName(name) || !validDirectShortcut(directShortcut)}>Save profile</button>

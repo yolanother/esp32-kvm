@@ -187,6 +187,8 @@ mod tests {
                 direct_shortcut: None,
                 mapping_profile_id: None,
                 layout_link_id: None,
+                custom_base_preset: None,
+                modifier_bindings: Vec::new(),
             }],
             pairing_available: true,
         }

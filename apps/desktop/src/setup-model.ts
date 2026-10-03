@@ -31,11 +31,16 @@ export type RouteState =
   | { kind: "failed"; reason: string };
 
 /** A local label keyed by an opaque 16-byte firmware bond identity. */
+export interface ModifierBinding { sourceUsage: number; targetUsage: number }
+
+/** A local label keyed by an opaque 16-byte firmware bond identity. */
 export interface GuestProfile {
   bondToken: string;
   name: string;
   os: "windows" | "macos" | "linux" | "other";
-  profile: "unchanged" | "windows-to-mac";
+  profile: "unchanged" | "cmd-to-ctrl" | "windows-to-mac" | "custom";
+  customBasePreset?: "unchanged" | "cmd-to-ctrl" | "windows-to-mac" | null;
+  modifierBindings?: ModifierBinding[];
   directShortcut?: string | null;
   mappingProfileId?: string | null;
   layoutLinkId?: string | null;

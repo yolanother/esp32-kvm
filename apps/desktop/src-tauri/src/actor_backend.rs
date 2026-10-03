@@ -8,8 +8,10 @@ use esp32_kvm_host_actor::{
     SetupSnapshot as ActorSnapshot, connect_system,
 };
 use esp32_kvm_input_core::Action;
+use esp32_kvm_input_core::MappingProfile;
 use esp32_kvm_platform_windows::CaptureGate;
 use esp32_kvm_usb_transport::{ProbeError, available_usb_ports, candidate_ports};
+use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, SyncSender},
@@ -30,8 +32,15 @@ pub struct ActorBackend {
 enum CommandKind {
     Begin,
     Cancel,
-    Confirm { challenge_id: u32, approved: bool },
+    Confirm {
+        challenge_id: u32,
+        approved: bool,
+    },
     Local,
+    SetMapping {
+        bond_token: [u8; 16],
+        profile: MappingProfile,
+    },
     Quit,
 }
 
@@ -84,6 +93,13 @@ impl SetupBackend for ActorBackend {
             .lock()
             .map(|value| value.clone())
             .map_err(|error| error.to_string())
+    }
+
+    fn install_mapping(&self, bond_token: [u8; 16], profile: MappingProfile) -> Result<(), String> {
+        self.request(CommandKind::SetMapping {
+            bond_token,
+            profile,
+        })
     }
 
     fn begin(&self) -> Result<(), String> {
@@ -240,6 +256,7 @@ fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
     let (gate, capture_events) = CaptureGate::new(64);
     let started = Instant::now();
     let mut actor: Option<HostActor<Box<dyn serialport::SerialPort>>> = None;
+    let mut mappings = BTreeMap::<[u8; 16], MappingProfile>::new();
     let mut next_scan = Instant::now();
     loop {
         match receiver.recv_timeout(Duration::from_millis(20)) {
@@ -262,6 +279,21 @@ fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
                 }
                 let outcome = if Instant::now() >= command.deadline {
                     Err("Pairing request expired before the actor could process it.".into())
+                } else if let CommandKind::SetMapping {
+                    bond_token,
+                    profile,
+                } = command.kind
+                {
+                    let applied = if let Some(current) = actor.as_mut() {
+                        current
+                            .set_guest_profile(bond_token, profile.clone())
+                            .map_err(|error| format!("Invalid native mapping: {error:?}"))
+                    } else {
+                        Ok(())
+                    };
+                    applied.map(|()| {
+                        mappings.insert(bond_token, profile);
+                    })
                 } else if let Some(current) = actor.as_mut() {
                     let now_ms = started.elapsed().as_millis() as u64;
                     match command.kind {
@@ -275,6 +307,7 @@ fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
                             current.request(Action::Local, now_ms);
                             Ok(())
                         }
+                        CommandKind::SetMapping { .. } => unreachable!(),
                         CommandKind::Quit => unreachable!(),
                     }
                     .map_err(pair_error)
@@ -330,7 +363,20 @@ fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
                             Box::new(NoGuestMapper),
                             started.elapsed().as_millis() as u64,
                         ) {
-                            Ok(connected) => actor = Some(connected),
+                            Ok(mut connected) => {
+                                if mappings.iter().all(|(token, profile)| {
+                                    connected.set_guest_profile(*token, profile.clone()).is_ok()
+                                }) {
+                                    actor = Some(connected);
+                                } else {
+                                    publish(
+                                        &shared,
+                                        empty_snapshot(DeviceState::Unavailable {
+                                            reason: "Saved mapping could not be restored.".into(),
+                                        }),
+                                    );
+                                }
+                            }
                             Err(error) => publish(&shared, empty_snapshot(connect_error(error))),
                         }
                     }

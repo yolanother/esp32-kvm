@@ -1,6 +1,6 @@
 /* Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
  * Defines semantic design tokens and responsive, keyboard-visible styling for the five-page
- * desktop shell, setup wizard, profile editor, dashboard and route overlay. Preview content and unavailable device
+ * desktop shell, setup wizard, profile and mapping editors, dashboard and route overlay. Preview content and unavailable device
  * states remain readable without color. */
 :root {
   font-family: "Segoe UI", system-ui, sans-serif;
@@ -126,6 +126,18 @@ tr:last-child td { border-bottom: 0; }
 .profile-form input, .profile-form select { min-height: 2.5rem; padding: .5rem .6rem; border: 1px solid #78938f; border-radius: .4rem; background: #0d1820; color: var(--text); }
 .profile-form button { justify-self: start; }
 .profile-form .small { margin: -.55rem 0 0; }
+.mapping-editor { display: grid; gap: 1.15rem; }
+.mapping-editor > label, .mapping-custom > label { display: grid; gap: .35rem; font-weight: 600; }
+.mapping-editor select { min-height: 2.5rem; padding: .5rem .6rem; border: 1px solid #78938f; border-radius: .4rem; background: #0d1820; color: var(--text); }
+.mapping-editor fieldset { border: 1px solid #78938f; border-radius: .5rem; display: grid; gap: .5rem; padding: .8rem; }
+.mapping-choice { display: flex; align-items: flex-start; gap: .7rem; padding: .5rem; }
+.mapping-choice input { margin-top: .25rem; accent-color: var(--accent); }
+.mapping-choice span, .mapping-custom { display: grid; gap: .3rem; }
+.mapping-choice small { color: var(--muted); }
+.mapping-custom { grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .8rem; }
+.mapping-custom .card-heading { grid-column: 1 / -1; }
+.mapping-preview { border-top: 1px solid #78938f; padding-top: .8rem; }
+.mapping-editor button { min-height: 2.5rem; padding: .45rem .8rem; border: 1px solid #78938f; border-radius: .4rem; background: #24443c; color: var(--text); }
 .profile-danger { margin-top: 1.5rem; padding-top: 1.2rem; border-top: 1px solid var(--border); }
 .profile-danger .notice { align-items: center; flex-wrap: wrap; }
 .device-grid { margin-top: 1rem; }
