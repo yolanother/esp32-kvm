@@ -55,6 +55,33 @@ pub enum PairingState {
     },
 }
 
+/// Actor-confirmed route; USB or BLE readiness alone cannot select a guest.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RouteState {
+    /// Capture is disarmed and Windows owns input.
+    Local,
+    /// Firmware STATUS is still pending after a verified handshake.
+    AwaitingStatus,
+    /// A control request awaits the exact firmware ACK.
+    Switching,
+    /// Pairing keeps input on the local host.
+    Pairing,
+    /// An acknowledged guest route with a firmware-reported bond identity.
+    Guest {
+        /// Firmware slot index.
+        slot: u8,
+        /// Lowercase hex of the opaque sixteen-byte bond identity.
+        #[serde(rename = "bondToken")]
+        bond_token: String,
+    },
+    /// The serial or capture session failed and local input was restored.
+    Failed {
+        /// Machine-readable fault category, without typed input.
+        reason: String,
+    },
+}
+
 /// A user-editable label tied to a 16-byte opaque firmware identity.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +102,8 @@ pub struct GuestProfile {
 pub struct SetupSnapshot {
     /// Native USB and firmware status.
     pub device: DeviceState,
+    /// Confirmed local, transitional, guest, or failed route.
+    pub route: RouteState,
     /// Firmware pairing progress, if the wire contract exposes it.
     pub pairing: PairingState,
     /// Opaque identities currently reported by firmware.
@@ -92,6 +121,8 @@ pub struct SetupSnapshot {
 pub struct BackendSnapshot {
     /// Verified or candidate device state.
     pub device: DeviceState,
+    /// Routing truth from the host actor or disarmed local gate.
+    pub route: RouteState,
     /// Pairing window state supported by the current firmware contract.
     pub pairing: PairingState,
     /// Identities reported in firmware STATUS.
@@ -106,6 +137,7 @@ impl BackendSnapshot {
     fn into_setup_snapshot(self, profiles: Vec<GuestProfile>) -> SetupSnapshot {
         SetupSnapshot {
             device: self.device,
+            route: self.route,
             pairing: self.pairing,
             bond_tokens: self.bond_tokens,
             ready_tokens: self.ready_tokens,
@@ -119,6 +151,14 @@ impl BackendSnapshot {
 pub trait SetupBackend: Send + Sync {
     /// Returns a current snapshot without opening a second serial stream.
     fn snapshot(&self) -> Result<BackendSnapshot, String>;
+    /// Requests an acknowledged return to the local host when an actor exists.
+    fn return_local(&self) -> Result<(), String> {
+        Err("Native local-return transport is unavailable.".into())
+    }
+    /// Disarms capture and closes the verified stream before app exit.
+    fn release_for_exit(&self) -> Result<(), String> {
+        Err("Native release transport is unavailable.".into())
+    }
     /// Requests a 60-second pairing window.
     fn begin(&self) -> Result<(), String> {
         Err("Verified pairing transport is unavailable.".into())
@@ -264,7 +304,17 @@ impl SetupService {
         }
     }
 
-    fn snapshot(&self) -> Result<SetupSnapshot, String> {
+    /// Requests local host control through the sole serial owner.
+    pub(crate) fn return_local(&self) -> Result<(), String> {
+        self.backend.return_local()
+    }
+
+    /// Disarms and stops the actor for an explicit tray quit.
+    pub(crate) fn release_for_exit(&self) -> Result<(), String> {
+        self.backend.release_for_exit()
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<SetupSnapshot, String> {
         let backend = self.backend.snapshot()?;
         let guard = self.profiles.lock().map_err(|error| error.to_string())?;
         let profiles = guard.as_ref().map_err(Clone::clone)?.profiles.clone();
@@ -337,6 +387,12 @@ pub fn setup_test_controls(
     service.backend.test_controls(&bond_token)
 }
 
+/// Requests local input through the verified actor; the UI waits for STATUS.
+#[tauri::command]
+pub fn dashboard_return_local(service: State<'_, SetupService>) -> Result<(), String> {
+    service.return_local()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +407,10 @@ mod tests {
                 max_connections: 1,
             },
             pairing: PairingState::Closed,
+            route: RouteState::Guest {
+                slot: 1,
+                bond_token: "00112233445566778899aabbccddeeff".into(),
+            },
             bond_tokens: vec!["00112233445566778899aabbccddeeff".into()],
             ready_tokens: Vec::new(),
             pairing_available: true,
@@ -359,6 +419,11 @@ mod tests {
         assert_eq!(json["device"]["kind"], "verified");
         assert_eq!(json["device"]["boardId"], "esp32-kvm-s3");
         assert_eq!(json["pairing"]["kind"], "closed");
+        assert_eq!(json["route"]["kind"], "guest");
+        assert_eq!(
+            json["route"]["bondToken"],
+            "00112233445566778899aabbccddeeff"
+        );
         assert_eq!(json["readyTokens"], serde_json::json!([]));
     }
 
@@ -372,6 +437,7 @@ mod tests {
                     max_bonds: 8,
                     max_connections: 1,
                 },
+                route: RouteState::Local,
                 pairing: PairingState::Closed,
                 bond_tokens: vec!["00112233445566778899aabbccddeeff".into()],
                 ready_tokens: Vec::new(),

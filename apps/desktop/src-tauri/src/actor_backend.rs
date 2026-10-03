@@ -2,11 +2,12 @@
 // Owns the desktop setup worker's one verified host actor and maps its STATUS
 // into fail-closed Tauri setup facts. No UI thread directly opens a serial port.
 
-use crate::setup::{BackendSnapshot, DeviceState, PairingState, SetupBackend};
+use crate::setup::{BackendSnapshot, DeviceState, PairingState, RouteState, SetupBackend};
 use esp32_kvm_host_actor::{
     ConnectError, HostActor, HostState, KeyMapper, MappedKey, PairingError,
     SetupSnapshot as ActorSnapshot, connect_system,
 };
+use esp32_kvm_input_core::Action;
 use esp32_kvm_platform_windows::CaptureGate;
 use esp32_kvm_usb_transport::{ProbeError, available_usb_ports, candidate_ports};
 use std::sync::{
@@ -29,6 +30,8 @@ pub struct ActorBackend {
 enum CommandKind {
     Begin,
     Cancel,
+    Local,
+    Quit,
 }
 
 struct Command {
@@ -89,11 +92,20 @@ impl SetupBackend for ActorBackend {
     fn cancel(&self) -> Result<(), String> {
         self.request(CommandKind::Cancel)
     }
+
+    fn return_local(&self) -> Result<(), String> {
+        self.request(CommandKind::Local)
+    }
+
+    fn release_for_exit(&self) -> Result<(), String> {
+        self.request(CommandKind::Quit)
+    }
 }
 
 fn empty_snapshot(device: DeviceState) -> BackendSnapshot {
     BackendSnapshot {
         device,
+        route: RouteState::Local,
         pairing: PairingState::Closed,
         bond_tokens: Vec::new(),
         ready_tokens: Vec::new(),
@@ -109,6 +121,27 @@ fn publish(shared: &Mutex<BackendSnapshot>, next: BackendSnapshot) {
 
 fn map_snapshot(value: ActorSnapshot) -> BackendSnapshot {
     let active = value.state != HostState::Failed;
+    let route = match value.state {
+        HostState::AwaitStatus => RouteState::AwaitingStatus,
+        HostState::Local => RouteState::Local,
+        HostState::Pairing => RouteState::Pairing,
+        HostState::Switching => RouteState::Switching,
+        HostState::Guest(slot) => value
+            .slots
+            .iter()
+            .find(|entry| entry.slot == slot)
+            .map(|entry| RouteState::Guest {
+                slot,
+                bond_token: token_hex(&entry.bond_token),
+            })
+            .unwrap_or(RouteState::AwaitingStatus),
+        HostState::Failed => RouteState::Failed {
+            reason: value
+                .fault
+                .map(|fault| format!("{fault:?}").to_lowercase())
+                .unwrap_or_else(|| "unknown".into()),
+        },
+    };
     let device = if active {
         DeviceState::Verified {
             board_id: value.board_id,
@@ -134,6 +167,7 @@ fn map_snapshot(value: ActorSnapshot) -> BackendSnapshot {
         .collect();
     BackendSnapshot {
         device,
+        route,
         pairing: if value.state == HostState::Pairing {
             PairingState::Waiting {
                 deadline_ms: value.pairing_deadline_ms,
@@ -169,6 +203,22 @@ fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
     loop {
         match receiver.recv_timeout(Duration::from_millis(20)) {
             Ok(command) => {
+                if matches!(command.kind, CommandKind::Quit) {
+                    gate.disarm();
+                    if let Some(current) = actor.as_mut() {
+                        current.request(Action::Local, started.elapsed().as_millis() as u64);
+                        let deadline = Instant::now() + Duration::from_millis(400);
+                        while Instant::now() < deadline
+                            && !matches!(current.state(), HostState::Local | HostState::Failed)
+                        {
+                            current.drive(&capture_events, started.elapsed().as_millis() as u64);
+                        }
+                    }
+                    drop(actor.take());
+                    publish(&shared, empty_snapshot(DeviceState::Missing));
+                    let _ = command.reply.send(Ok(()));
+                    break;
+                }
                 let outcome = if Instant::now() >= command.deadline {
                     Err("Pairing request expired before the actor could process it.".into())
                 } else if let Some(current) = actor.as_mut() {
@@ -176,8 +226,15 @@ fn worker(receiver: Receiver<Command>, shared: Arc<Mutex<BackendSnapshot>>) {
                     match command.kind {
                         CommandKind::Begin => current.pair_begin(60, now_ms),
                         CommandKind::Cancel => current.pair_cancel(now_ms),
+                        CommandKind::Local => {
+                            current.request(Action::Local, now_ms);
+                            Ok(())
+                        }
+                        CommandKind::Quit => unreachable!(),
                     }
                     .map_err(pair_error)
+                } else if matches!(command.kind, CommandKind::Local) {
+                    Ok(())
                 } else {
                     Err("No verified device session is available.".into())
                 };
@@ -275,6 +332,7 @@ mod tests {
         assert!(local.pairing_available);
         assert_eq!(local.bond_tokens, vec!["ab".repeat(16)]);
         assert_eq!(local.ready_tokens, local.bond_tokens);
+        assert!(matches!(local.route, crate::setup::RouteState::Local));
         let awaiting = map_snapshot(actor(HostState::AwaitStatus));
         assert!(!awaiting.pairing_available);
         assert!(matches!(
@@ -287,6 +345,11 @@ mod tests {
             pairing.pairing,
             crate::setup::PairingState::Waiting { .. }
         ));
+        let guest = map_snapshot(actor(HostState::Guest(1)));
+        assert!(matches!(
+            guest.route,
+            crate::setup::RouteState::Guest { slot: 1, .. }
+        ));
     }
 
     #[test]
@@ -295,5 +358,9 @@ mod tests {
         let failed = map_snapshot(actor(HostState::Failed));
         assert!(!failed.pairing_available);
         assert!(failed.ready_tokens.is_empty());
+        assert!(matches!(
+            failed.route,
+            crate::setup::RouteState::Failed { .. }
+        ));
     }
 }

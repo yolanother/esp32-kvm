@@ -1,12 +1,14 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
-// Renders five desktop destinations and an explicit setup wizard with accessible
-// navigation. Native status owns device truth; the webview never routes input.
+// Renders five desktop destinations, actor-confirmed route status, a switch
+// overlay, and setup. Native status owns device truth; the webview never routes input.
 import { useEffect, useRef, useState, type KeyboardEvent, type JSX } from "react";
 import { destinations, moveSelection, type Destination } from "./navigation";
+import { listen } from "@tauri-apps/api/event";
 import { exampleGuests, exampleMappings } from "./preview-fixtures";
 import SetupWizard from "./SetupWizard";
-import { setupSnapshot, unavailableSnapshot } from "./setup-api";
-import { profileState, type SetupSnapshot } from "./setup-model";
+import { returnToHost, setupSnapshot, unavailableSnapshot } from "./setup-api";
+import { type SetupSnapshot } from "./setup-model";
+import { describeRoute, overlayForTransition, systemChoices, type SwitchAnnouncement } from "./dashboard-model";
 
 /** A readable text badge whose label also carries its meaning. */
 function StatusPill({ children, tone = "neutral" }: { children: string; tone?: "neutral" | "warning" | "accent" }): JSX.Element {
@@ -29,16 +31,19 @@ function PageIntro({ title, description, headingRef }: { title: string; descript
 }
 
 /** Systems destination with truthful local state and optional sample guest cards. */
-function SystemsPage({ preview, headingRef, snapshot, onAddGuest }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: () => void }): JSX.Element {
+function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: () => void; onReturn: () => void }): JSX.Element {
+  const route = describeRoute(snapshot);
+  const choices = systemChoices(snapshot);
   return <>
     <PageIntro title="Systems" description="Choose where your keyboard and mouse go after setup." headingRef={headingRef} />
-    <div className="toolbar"><StatusPill>Local control only</StatusPill><span className="muted">Setup starts disarmed.</span><button type="button" onClick={onAddGuest}>Add guest</button></div>
+    <div className="toolbar"><StatusPill tone={route.tone}>{snapshot.route.kind === "guest" ? "Guest controlling" : snapshot.route.kind === "switching" ? "Switch pending" : "Local control"}</StatusPill><span className="muted">{snapshot.device.kind === "verified" ? `${snapshot.readyTokens.length} guest${snapshot.readyTokens.length === 1 ? "" : "s"} ready of ${snapshot.device.maxConnections} live slot${snapshot.device.maxConnections === 1 ? "" : "s"}` : "Device not verified"}</span><button type="button" onClick={onAddGuest}>Add guest</button></div>
+    <section className="card route-card" aria-label="Active input destination"><span className="eyebrow">ACTIVE TARGET</span><h2>{route.title}</h2><p>{route.detail}</p><div className="setup-actions"><button type="button" onClick={onReturn} disabled={snapshot.route.kind === "local" || snapshot.route.kind === "failed"}>Return to this computer</button><button type="button" disabled title="Native capture and physical input ledger are not connected">Pause capture unavailable</button><button type="button" disabled title="Native capture and physical input ledger are not connected">Select a system unavailable</button></div></section>
     <div className="card-grid">
-      <article className="card card--local"><div className="card-heading"><h2>This computer</h2><StatusPill tone="accent">Local host</StatusPill></div><p>Keyboard and mouse remain with Windows.</p><div className="card-tail"><span className="small muted">No active guest route</span><span className="small">Current state</span></div></article>
-      {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : snapshot.profiles.length ? snapshot.profiles.map((guest) => <article className="card" key={guest.bondToken}><div className="card-heading"><h2>{guest.name}</h2><StatusPill tone={profileState(snapshot.profiles, guest.bondToken, snapshot.readyTokens) === "ready" ? "accent" : "warning"}>{profileState(snapshot.profiles, guest.bondToken, snapshot.readyTokens) === "ready" ? "Ready" : "Offline"}</StatusPill></div><p>{guest.os} · {guest.profile === "unchanged" ? "Unchanged keys" : "Windows shortcuts to Mac"}</p><div className="card-tail"><span className="small muted">Saved identity</span><span className="small muted">Input selection unavailable</span></div></article>) : <article className="card card--empty"><h2>No guest profiles yet</h2><p>Connect the device and pair a guest to add a saved profile.</p><StatusPill tone="warning">Device unverified</StatusPill></article>}
+      <article className={`card${snapshot.route.kind === "local" ? " card--local" : ""}`}><div className="card-heading"><h2>This computer</h2><StatusPill tone={snapshot.route.kind === "local" ? "accent" : "neutral"}>{snapshot.route.kind === "local" ? "Controlling" : "Local host"}</StatusPill></div><p>Windows host keyboard and mouse.</p><div className="card-tail"><span className="small muted">Return target</span><span className="small muted">Actor handles local return</span></div></article>
+      {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : choices.length ? choices.map((choice) => { const guest = snapshot.profiles.find((item) => item.bondToken === choice.bondToken)!; return <article className={`card${choice.state === "Controlling" ? " card--local" : ""}`} key={choice.bondToken}><div className="card-heading"><h2>{choice.name}</h2><StatusPill tone={choice.state === "Offline" ? "warning" : "accent"}>{choice.state}</StatusPill></div><p>{guest.os} · {guest.profile === "unchanged" ? "Unchanged keys" : "Windows shortcuts to Mac"}</p><div className="card-tail"><span className="small muted">Saved identity</span><button type="button" disabled={!choice.selectEnabled} title="Native capture and physical input ledger are not connected">Select unavailable</button></div></article>; }) : <article className="card card--empty"><h2>No guest profiles yet</h2><p>Connect the device and pair a guest to add a saved profile.</p><StatusPill tone="warning">No saved guest</StatusPill></article>}
     </div>
     {preview && <PreviewNotice />}
-    <div className="notice"><strong>Stay in control</strong><span>Routing starts only after the firmware and guest report ready. This shell cannot arm input capture.</span></div>
+    <div className="notice"><strong>Stay in control</strong><span>Guest selection and pause will enable after native capture and physical all-up validation are connected. A ready bond alone is not an active route.</span></div>
   </>;
 }
 
@@ -80,12 +85,12 @@ function ShortcutsPage({ headingRef }: { headingRef: React.RefObject<HTMLHeading
   </>;
 }
 
-/** Device destination reports only facts available without a native handshake. */
+/** Device destination reports verified session and actor route facts. */
 function DevicePage({ headingRef, snapshot, onSetup }: { headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onSetup: () => void }): JSX.Element {
   return <>
     <PageIntro title="Device" description="Connection health, firmware and diagnostics will appear here." headingRef={headingRef} />
     <div className="card card-heading"><div><h2>ESP32-S3 input bridge</h2><p>{snapshot.device.kind === "verified" ? `Firmware reports ${snapshot.device.boardId}.` : "Attached variant and revision are unverified."}</p></div><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Verified" : "Not verified"}</StatusPill></div>
-    <div className="card-grid device-grid"><section className="card"><h2>Connection</h2><dl className="detail-list"><div><dt>USB session</dt><dd>{snapshot.device.kind === "verified" ? "Verified" : snapshot.device.kind === "candidate" ? "Candidate only" : "Unavailable"}</dd></div><div><dt>BLE guests ready</dt><dd>{snapshot.device.kind === "verified" ? snapshot.readyTokens.length : "Unavailable"}</dd></div><div><dt>Input destination</dt><dd>Not reported</dd></div><div><dt>Guest latency</dt><dd>Not measured</dd></div></dl></section><section className="card"><h2>Firmware</h2><p>Board identity and capabilities require a device handshake.</p><dl className="detail-list"><div><dt>Installed version</dt><dd>{snapshot.device.kind === "verified" ? snapshot.device.firmwareVersion ?? "Unavailable" : "Unknown"}</dd></div><div><dt>Protocol</dt><dd>{snapshot.device.kind === "verified" ? "Verified" : "Unverified"}</dd></div></dl><button type="button" onClick={onSetup}>Open setup</button></section></div>
+    <div className="card-grid device-grid"><section className="card"><h2>Connection</h2><dl className="detail-list"><div><dt>USB session</dt><dd>{snapshot.device.kind === "verified" ? "Verified" : snapshot.device.kind === "candidate" ? "Candidate only" : "Unavailable"}</dd></div><div><dt>BLE guests ready</dt><dd>{snapshot.device.kind === "verified" ? snapshot.readyTokens.length : "Unavailable"}</dd></div><div><dt>Input destination</dt><dd>{describeRoute(snapshot).title}</dd></div><div><dt>Guest latency</dt><dd>Not measured</dd></div></dl></section><section className="card"><h2>Firmware</h2><p>Board identity and capabilities require a device handshake.</p><dl className="detail-list"><div><dt>Installed version</dt><dd>{snapshot.device.kind === "verified" ? snapshot.device.firmwareVersion ?? "Unavailable" : "Unknown"}</dd></div><div><dt>Protocol</dt><dd>{snapshot.device.kind === "verified" ? "Verified" : "Unverified"}</dd></div></dl><button type="button" onClick={onSetup}>Open setup</button></section></div>
     <div className="notice"><strong>Diagnostics</strong><span>Connection events and aggregate counters will be available later. Typed keys, pairing codes and bond secrets must never appear in exports.</span></div>
   </>;
 }
@@ -96,6 +101,8 @@ export default function App(): JSX.Element {
   const [preview, setPreview] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<SetupSnapshot>(unavailableSnapshot());
+  const [announcement, setAnnouncement] = useState<SwitchAnnouncement | null>(null);
+  const lastSnapshot = useRef<SetupSnapshot | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const focusHeading = useRef(false);
   const navRefs = useRef<Record<Destination, HTMLButtonElement | null>>({ systems: null, layout: null, mappings: null, shortcuts: null, device: null });
@@ -107,11 +114,35 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     let active = true;
-    async function refresh(): Promise<void> { const next = await setupSnapshot(); if (active) setSnapshot(next); }
+    async function refresh(): Promise<void> {
+      const next = await setupSnapshot();
+      if (!active) return;
+      const change = overlayForTransition(lastSnapshot.current, next);
+      if (change) setAnnouncement(change);
+      lastSnapshot.current = next;
+      setSnapshot(next);
+    }
     void refresh();
     const timer = window.setInterval(() => { void refresh(); }, 2000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen("tray-open-settings", () => {
+      setSetupOpen(false);
+      focusHeading.current = true;
+      setPage("device");
+    }).then((stop) => { if (active) unlisten = stop; else stop(); }).catch(() => {});
+    return () => { active = false; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!announcement || announcement.persistent) return;
+    const timer = window.setTimeout(() => setAnnouncement(null), 1500);
+    return () => window.clearTimeout(timer);
+  }, [announcement]);
 
   function selectPage(destination: Destination): void {
     setSetupOpen(false);
@@ -130,21 +161,26 @@ export default function App(): JSX.Element {
   }
 
   const selectedLabel = destinations.find(({ id }) => id === page)?.label ?? "Systems";
+  const route = describeRoute(snapshot);
+  function requestLocal(): void {
+    void returnToHost().catch((error) => setAnnouncement({ message: `Local return request failed: ${String(error)}. Check the device connection.`, persistent: true }));
+  }
   return <>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <div className="app-shell">
       <aside className="sidebar" aria-label="Application sidebar">
         <div className="brand"><span className="brand-mark" aria-hidden="true" />ESP32 KVM</div>
         <nav className="nav-list" aria-label="Main navigation">{destinations.map(({ id, label }) => <button key={id} type="button" ref={(node) => { navRefs.current[id] = node; }} className={`nav-item${page === id ? " nav-item--selected" : ""}`} aria-current={page === id ? "page" : undefined} onClick={() => selectPage(id)} onKeyDown={(event) => handleNavKey(event, id)}>{label}</button>)}</nav>
-        <div className="sidebar-bottom"><span className="sidebar-caption">WINDOWS HOST</span><strong>This computer</strong><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "Connection unavailable"}</StatusPill></div>
+        <div className="sidebar-bottom"><span className="sidebar-caption">ACTIVE TARGET</span><strong>{route.title}</strong><StatusPill tone={route.tone}>{snapshot.route.kind === "guest" ? "Guest controlling" : snapshot.route.kind === "switching" ? "Switch pending" : "Local control"}</StatusPill></div>
       </aside>
       <div className="workspace">
         <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "No verified device"}</StatusPill></div></header>
-        <div className="connection-status" role="status" aria-live="polite">{snapshot.device.kind === "verified" ? "Device verified. Guest control still requires an acknowledged route." : snapshot.device.kind === "candidate" ? "USB interface detected; firmware is not verified. Input stays with this computer." : "Device connection is unavailable. Input stays with this computer."}</div>
-        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} />}{page === "layout" && <LayoutPage preview={preview} headingRef={headingRef} />}{page === "mappings" && <MappingsPage preview={preview} headingRef={headingRef} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
-        <footer className="footer"><span>Local control only · Proposed return shortcut <KeyChord keys={["Ctrl", "Alt", "F10"]} /> is inactive</span><span>Emergency shortcut is not active yet</span></footer>
+        <div className="connection-status" role="status" aria-live="polite">{route.title}. {route.detail}</div>
+        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} />}{page === "layout" && <LayoutPage preview={preview} headingRef={headingRef} />}{page === "mappings" && <MappingsPage preview={preview} headingRef={headingRef} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
+        <footer className="footer"><span>{snapshot.route.kind === "guest" ? "Guest route confirmed" : "Local control"} · Proposed return shortcut <KeyChord keys={["Ctrl", "Alt", "F10"]} /> is inactive</span><span>Emergency shortcut is not active yet</span></footer>
       </div>
     </div>
+    {announcement && <div className={`switch-overlay${announcement.persistent ? " switch-overlay--persistent" : ""}`} role={announcement.persistent ? "alert" : "status"} aria-live={announcement.persistent ? "assertive" : "polite"}><strong>{announcement.persistent ? "Connection lost" : "Input destination changed"}</strong><span>{announcement.message}</span>{announcement.persistent && <button type="button" onClick={() => setAnnouncement(null)} aria-label="Dismiss connection alert">Dismiss</button>}</div>}
     <span className="sr-only" aria-live="polite">{selectedLabel} page</span>
   </>;
 }

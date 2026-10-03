@@ -6,7 +6,7 @@ import type { GuestProfile, SetupSnapshot } from "./setup-model";
 
 /** Return a truthful disconnected snapshot when the native shell is absent. */
 export function unavailableSnapshot(reason = "Native device service is unavailable."): SetupSnapshot {
-  return { device: { kind: "unavailable", reason }, pairing: { kind: "closed" },
+  return { device: { kind: "unavailable", reason }, route: { kind: "failed", reason: "native_service" }, pairing: { kind: "closed" },
     bondTokens: [], readyTokens: [], profiles: [], pairingAvailable: false };
 }
 
@@ -32,3 +32,6 @@ export function saveGuestProfile(profile: GuestProfile): Promise<void> {
 export function testGuestControls(bondToken: string): Promise<void> {
   return invoke("setup_test_controls", { bondToken });
 }
+
+/** Requests safe local return; the dashboard waits for actor status before updating. */
+export function returnToHost(): Promise<void> { return invoke("dashboard_return_local"); }

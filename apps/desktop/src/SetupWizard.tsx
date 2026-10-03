@@ -8,6 +8,7 @@ import { canBeginPairing, canFinishSetup, countdownSeconds, newBondToken, validG
 const previewToken = "00112233445566778899aabbccddeeff";
 const previewDevice: SetupSnapshot = {
   device: { kind: "verified", boardId: "esp32-kvm-s3", firmwareVersion: "Example firmware", maxBonds: 8, maxConnections: 1 },
+  route: { kind: "local" },
   pairing: { kind: "closed" }, bondTokens: [], readyTokens: [], profiles: [], pairingAvailable: true,
 };
 

@@ -21,6 +21,15 @@ export type PairingState =
   | { kind: "unsupported"; reason: string }
   | { kind: "failed"; reason: string };
 
+/** Actor-confirmed routing state, separate from USB and BLE readiness. */
+export type RouteState =
+  | { kind: "local" }
+  | { kind: "awaiting_status" }
+  | { kind: "switching" }
+  | { kind: "pairing" }
+  | { kind: "guest"; slot: number; bondToken: string }
+  | { kind: "failed"; reason: string };
+
 /** A local label keyed by an opaque 16-byte firmware bond identity. */
 export interface GuestProfile {
   bondToken: string;
@@ -32,6 +41,7 @@ export interface GuestProfile {
 /** Native snapshot of one setup session and remembered guest readiness. */
 export interface SetupSnapshot {
   device: DeviceState;
+  route: RouteState;
   pairing: PairingState;
   bondTokens: string[];
   readyTokens: string[];

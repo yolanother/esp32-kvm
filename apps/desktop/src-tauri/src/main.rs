@@ -1,10 +1,11 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
-// Starts the native desktop shell and one serial-owning setup actor thread.
-// Pairing requests use that actor; challenge confirmation and HID tests remain closed.
+// Starts the desktop shell, serial-owning actor and persistent system tray.
+// Closing hides to tray; explicit quit disarms capture and closes the actor.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actor_backend;
 mod setup;
+mod tray;
 
 use tauri::Manager;
 
@@ -16,7 +17,16 @@ fn main() {
                 directory,
                 Box::new(actor_backend::ActorBackend::start()),
             ));
+            tray::install(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && let tauri::WindowEvent::CloseRequested { api, .. } = event
+            {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             setup::setup_snapshot,
@@ -25,6 +35,7 @@ fn main() {
             setup::setup_confirm,
             setup::setup_save_profile,
             setup::setup_test_controls,
+            setup::dashboard_return_local,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run ESP32 KVM desktop shell");

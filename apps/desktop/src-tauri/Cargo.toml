@@ -8,7 +8,7 @@ license-file.workspace = true
 tauri-build = "=2.7.0"
 
 [dependencies]
-tauri = "=2.12.0"
+tauri = { version = "=2.12.0", features = ["tray-icon"] }
 esp32-kvm-input-core = { path = "../../../crates/input-core" }
 esp32-kvm-host-actor = { path = "../../../crates/host-actor" }
 esp32-kvm-platform-windows = { path = "../../../crates/platform-windows" }
