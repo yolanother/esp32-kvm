@@ -35,6 +35,8 @@ app-partition capacity. It must equal the supplied image byte count.
 `image_sha256` is 64 lowercase hexadecimal characters and must match those
 bytes. The SHA-256 check detects corruption; this schema does not authenticate
 a publisher. Distribution and firmware signing remain separate requirements.
+The Rust `Manifest` and `VerifiedImage` fields are private to the crate, so
+callers cannot construct an unchecked non-app or oversized flash plan.
 
 The manifest cannot request a full-chip flash, NVS erase, bond wipe, automatic
 guest arm, or profile deletion. A future schema version requires a new parser

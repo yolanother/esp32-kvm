@@ -27,9 +27,9 @@ fn device() -> DeviceIdentity {
 fn exact_board_protocol_size_and_digest_yield_an_app_only_plan() {
     let parsed = parse_manifest(&manifest(HASH_ABC, 3)).unwrap();
     let verified = verify_image(&parsed, b"abc", &device()).unwrap();
-    assert_eq!(verified.firmware_version, "0.2.0");
-    assert_eq!(verified.image_len, 3);
-    assert_eq!(verified.partition, "app");
+    assert_eq!(verified.firmware_version(), "0.2.0");
+    assert_eq!(verified.image_len(), 3);
+    assert_eq!(verified.partition(), "app");
 }
 
 #[test]

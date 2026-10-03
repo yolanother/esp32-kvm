@@ -11,27 +11,37 @@ pub const MAX_MANIFEST_BYTES: usize = 4096;
 pub const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One exact app-only release manifest; unknown and duplicate JSON keys fail parsing.
+/// Construction is restricted to `parse_manifest`, including the app-only rule:
+/// ```compile_fail
+/// use esp32_kvm_update_core::Manifest;
+/// let _unsafe_manifest = Manifest {
+///     schema: 1, board_id: "esp32-kvm-s3".into(), protocol_major: 1,
+///     protocol_minor_min: 0, protocol_minor_max: 1,
+///     firmware_version: "0.2.0".into(), partition: "nvs".into(),
+///     image_size: 9 * 1024 * 1024, image_sha256: "0".repeat(64),
+/// };
+/// ```
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// Manifest schema revision, currently one.
-    pub schema: u8,
+    schema: u8,
     /// Board ID advertised by verified USB CAPS.
-    pub board_id: String,
+    board_id: String,
     /// Incompatible protocol major required by the new image.
-    pub protocol_major: u8,
+    protocol_major: u8,
     /// Minimum host-compatible protocol minor for this update.
-    pub protocol_minor_min: u16,
+    protocol_minor_min: u16,
     /// Maximum host-compatible protocol minor for this update.
-    pub protocol_minor_max: u16,
+    protocol_minor_max: u16,
     /// Exact firmware version expected after reboot.
-    pub firmware_version: String,
+    firmware_version: String,
     /// Must be `app`; no NVS or full-flash operation is expressed.
-    pub partition: String,
+    partition: String,
     /// Exact app image byte count.
-    pub image_size: u64,
+    image_size: u64,
     /// Lowercase hexadecimal SHA-256 of the app image bytes.
-    pub image_sha256: String,
+    image_sha256: String,
 }
 
 /// Facts obtained from a verified USB session and a board partition manifest.
@@ -78,24 +88,51 @@ pub enum VerificationError {
 }
 
 /// Verified app-only artifact information retained across update phases.
+/// This plan can only be built by `verify_image` after manifest and byte checks:
+/// ```compile_fail
+/// use esp32_kvm_update_core::VerifiedImage;
+/// let _unverified = VerifiedImage {
+///     firmware_version: "0.2.0".into(), image_len: 3,
+///     image_sha256: [0; 32], partition: "nvs",
+///     board_id: "esp32-kvm-s3".into(), protocol_major: 1,
+///     protocol_minor_min: 0, protocol_minor_max: 1,
+/// };
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedImage {
     /// Expected version after reconnect.
-    pub firmware_version: String,
+    pub(crate) firmware_version: String,
     /// Exact bytes that may be flashed to the app partition.
-    pub image_len: usize,
+    pub(crate) image_len: usize,
     /// SHA-256 bytes verified at preflight.
-    pub image_sha256: [u8; 32],
+    pub(crate) image_sha256: [u8; 32],
     /// Fixed safe partition target.
-    pub partition: &'static str,
+    pub(crate) partition: &'static str,
     /// Board ID expected again after re-enumeration.
-    pub board_id: String,
+    pub(crate) board_id: String,
     /// Compatible protocol major.
-    pub protocol_major: u8,
+    pub(crate) protocol_major: u8,
     /// Lowest compatible minor after reboot.
-    pub protocol_minor_min: u16,
+    pub(crate) protocol_minor_min: u16,
     /// Highest compatible minor after reboot.
-    pub protocol_minor_max: u16,
+    pub(crate) protocol_minor_max: u16,
+}
+
+impl VerifiedImage {
+    /// Returns the firmware version required on reconnect.
+    pub fn firmware_version(&self) -> &str {
+        &self.firmware_version
+    }
+
+    /// Returns the exact verified image byte count.
+    pub fn image_len(&self) -> usize {
+        self.image_len
+    }
+
+    /// Returns the only permitted flash partition.
+    pub fn partition(&self) -> &str {
+        self.partition
+    }
 }
 
 /// Parses and validates a bounded, strict app-only JSON release manifest.
