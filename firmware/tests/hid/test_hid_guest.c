@@ -14,6 +14,7 @@
 
 struct ble_hs_cfg ble_hs_cfg;
 static hid_channel_t channel;
+static hid_channel_t idle_channels[HID_GATT_MAX_CONNECTIONS - 1];
 static int (*gap_callback)(struct ble_gap_event *, void *);
 static ble_addr_t active_peer;
 static int64_t time_us;
@@ -121,6 +122,11 @@ int ble_gap_conn_find(uint16_t handle, struct ble_gap_conn_desc *description)
   description->sec_state.authenticated = 1; return 0; }
 int hid_gatt_register(void) { hid_channel_init(&channel, NULL, NULL); return 0; }
 hid_channel_t *hid_gatt_channel(void) { return &channel; }
+hid_channel_t *hid_gatt_channel_at(uint8_t slot)
+{ return slot == 1 ? &channel : slot <= HID_GATT_MAX_CONNECTIONS ? &idle_channels[slot - 2] : NULL; }
+hid_channel_t *hid_gatt_channel_for(uint16_t handle)
+{ return channel.connected && channel.connection_handle == handle ? &channel : NULL; }
+size_t hid_gatt_connection_count(void) { return channel.connected ? 1 : 0; }
 bool hid_gatt_on_connect(uint16_t handle)
 { if (channel.connected) return false; hid_channel_connected(&channel, handle); return true; }
 void hid_gatt_on_disconnect(uint16_t handle)
@@ -152,7 +158,7 @@ int main(void)
     assert(terminations == 2 && !channel.connected);
     assert(hid_guest_pairing_open() == 0);
     gap_callback(&connect, NULL);
-    assert(channel.connected && !channel.armed);
+    assert(channel.connected && !channel.armed && advertisements == 2);
     struct ble_gap_event challenge = {.type = BLE_GAP_EVENT_PASSKEY_ACTION};
     challenge.passkey.conn_handle = 17;
     challenge.passkey.params.action = BLE_SM_IOACT_NUMCMP;
@@ -166,6 +172,13 @@ int main(void)
     encryption.enc_change.conn_handle = 17;
     gap_callback(&encryption, NULL);
     assert(channel.encrypted && !channel.armed && last_event.type == HID_GUEST_BONDED);
+    static const hid_token_t zero_token = {{0}};
+    assert(sizeof(last_event.token.bytes) == 16 &&
+           memcmp(last_event.token.bytes, zero_token.bytes, HID_PAIRING_TOKEN_LEN) != 0 && saved_size);
+    hid_token_t token = last_event.token;
+    assert(hid_guest_pairing_open() == 0);
+    assert(last_event.type == HID_GUEST_PAIRING_OPENED);
+    hid_guest_pairing_cancel();
     assert(!hid_guest_request_ready());
     channel.send = send_report;
     channel.subscribed[HID_REPORT_KEYBOARD] = true;
@@ -178,10 +191,6 @@ int main(void)
     assert(hid_guest_request_mouse(1, 10, -20, 0, 0));
     assert(hid_guest_request_consumer(0x00e9));
     assert(hid_guest_request_release() && sent_reports == 9);
-    static const hid_token_t zero_token = {{0}};
-    assert(sizeof(last_event.token.bytes) == 16 &&
-           memcmp(last_event.token.bytes, zero_token.bytes, HID_PAIRING_TOKEN_LEN) != 0 && saved_size);
-    hid_token_t token = last_event.token;
     uint8_t retained[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN];
     uint8_t retained_count = 0xff;
     assert(hid_guest_request_retained_bonds(retained, &retained_count));
@@ -201,7 +210,7 @@ int main(void)
     struct ble_gap_event disconnect = {.type = BLE_GAP_EVENT_DISCONNECT};
     disconnect.disconnect.conn.conn_handle = 17;
     gap_callback(&disconnect, NULL);
-    assert(advertisements == 2 && !channel.connected);
+    assert(advertisements == 3 && !channel.connected);
     assert(last_event.type == HID_GUEST_DISCONNECTED);
     assert(hid_guest_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 1 && memcmp(retained[0], token.bytes, 16) == 0);
@@ -240,8 +249,10 @@ int main(void)
     assert(hid_guest_pairing_forget(token, true) != 0);
     assert(hid_guest_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 1 && memcmp(retained[0], token.bytes, 16) == 0);
+    active_peer.val[0] = 99;
+    unsigned previous_terminations = terminations;
     assert(hid_guest_pairing_forget(token, true) == 0);
-    assert(terminations >= 5 && !channel.armed && channel.needs_disconnect);
+    assert(terminations == previous_terminations && !channel.armed);
     assert(hid_guest_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 0);
     return 0;

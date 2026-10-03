@@ -1,9 +1,10 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Exposes opt-in single-guest NimBLE startup for hardware bring-up. Firmware
+ * Exposes opt-in bounded three-link NimBLE startup for hardware bring-up. Firmware
  * main remains disarmed; callers must verify board recovery and explicitly
  * start this service before it can advertise or accept a guest. It also
  * exposes bounded NimBLE host-loop pairing requests and short status events.
- * Connected-peer STATUS lookup exposes only its stable opaque bond token;
+ * The current host/USB route uses slot one only. Connected-peer STATUS lookup
+ * exposes only its stable opaque bond token for that routed slot;
  * retained inventory reads use the same bounded host-loop bridge. */
 #ifndef ESP32_KVM_HID_GUEST_H
 #define ESP32_KVM_HID_GUEST_H

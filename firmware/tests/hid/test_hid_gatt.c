@@ -1,6 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Tests the composite GATT service registration and one encrypted guest's
- * connection-addressed notification behavior against NimBLE API stand-ins. */
+ * Tests the composite GATT service registration and encrypted guests'
+ * per-peer encryption, CCCD, held state and notification isolation across
+ * three simultaneous connections against NimBLE API stand-ins. */
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,12 +107,20 @@ int main(void)
     assert(led_reference.len == 2 && led_reference.data[0] == 1 && led_reference.data[1] == 2);
     assert(!hid_gatt_channel()->armed);
     assert(hid_gatt_on_connect(17));
-    assert(!hid_gatt_on_connect(18));
+    assert(hid_gatt_on_connect(18));
+    assert(hid_gatt_on_connect(19));
+    assert(!hid_gatt_on_connect(20));
+    assert(hid_gatt_connection_count() == 3);
+    assert(hid_gatt_channel_for(17) == hid_gatt_channel());
+    assert(hid_gatt_channel_for(18) && hid_gatt_channel_for(19));
+    assert(!hid_gatt_channel_for(20));
     struct os_mbuf packet = {0};
     assert(access(4, 17, BLE_GATT_ACCESS_OP_READ_CHR, NULL, 0, &packet) == BLE_ATT_ERR_INSUFFICIENT_ENC);
     hid_gatt_on_encryption(17, true);
     hid_gatt_on_subscribe(18, *characteristic(4)->val_handle, true);
     assert(!hid_gatt_channel()->subscribed[HID_REPORT_KEYBOARD]);
+    assert(hid_gatt_channel_for(18)->subscribed[HID_REPORT_KEYBOARD]);
+    assert(!hid_gatt_channel_for(18)->encrypted);
     for (unsigned index = 4; index <= 6; index++)
         hid_gatt_on_subscribe(17, *characteristic(index)->val_handle, true);
     assert(hid_channel_arm(hid_gatt_channel()));
@@ -120,6 +129,28 @@ int main(void)
     assert(hid_channel_keyboard(hid_gatt_channel(), keys));
     assert(notified_connection == 17 && notified_handle == *characteristic(4)->val_handle);
     assert(notified_length == 8 && notified_bytes[2] == 4);
+    assert(!hid_gatt_channel_for(18)->armed && !hid_gatt_channel_for(19)->armed);
+    assert(access(4, 18, BLE_GATT_ACCESS_OP_READ_CHR, NULL, 0, &packet) == BLE_ATT_ERR_INSUFFICIENT_ENC);
+    hid_gatt_on_encryption(18, true);
+    for (unsigned index = 5; index <= 6; index++)
+        hid_gatt_on_subscribe(18, *characteristic(index)->val_handle, true);
+    assert(hid_channel_arm(hid_gatt_channel_for(18)));
+    assert(notified_connection == 18 && hid_gatt_channel()->armed);
+    unsigned before = notified_count;
+    assert(hid_channel_keyboard(hid_gatt_channel_for(18), keys));
+    assert(notified_count == before + 1 && notified_connection == 18);
+    assert(hid_gatt_channel()->keyboard[2] == 4);
+    uint8_t other_keys[8] = {0, 0, 5};
+    assert(hid_channel_keyboard(hid_gatt_channel_for(18), other_keys));
+    assert(hid_gatt_channel()->keyboard[2] == 4);
+    hid_gatt_on_encryption(19, true);
+    for (unsigned index = 4; index <= 6; index++)
+        hid_gatt_on_subscribe(19, *characteristic(index)->val_handle, true);
+    assert(hid_channel_arm(hid_gatt_channel_for(19)) && notified_connection == 19);
+    uint8_t third_keys[8] = {0, 0, 6};
+    assert(hid_channel_keyboard(hid_gatt_channel_for(19), third_keys));
+    assert(notified_connection == 19 && notified_bytes[2] == 6);
+    assert(hid_gatt_channel_for(18)->keyboard[2] == 5 && hid_gatt_channel()->keyboard[2] == 4);
     uint8_t boot = 0;
     assert(access(3, 17, BLE_GATT_ACCESS_OP_WRITE_CHR, &boot, 1, NULL) == BLE_ATT_ERR_VALUE_NOT_ALLOWED);
     uint8_t leds = 3;
@@ -127,7 +158,11 @@ int main(void)
     assert(hid_gatt_channel()->keyboard_leds == 3);
     hid_gatt_on_encryption(17, false);
     assert(!hid_gatt_channel()->armed);
+    assert(hid_gatt_channel_for(18)->armed);
     hid_gatt_on_disconnect(17);
-    assert(!hid_gatt_channel()->connected);
+    assert(!hid_gatt_channel_for(17) && hid_gatt_channel_for(18)->armed);
+    assert(hid_gatt_connection_count() == 2);
+    assert(hid_gatt_on_connect(20) && hid_gatt_connection_count() == 3);
+    assert(!hid_gatt_channel_for(20)->encrypted && !hid_gatt_channel_for(20)->armed);
     return 0;
 }

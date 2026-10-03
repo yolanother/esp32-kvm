@@ -1,10 +1,11 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Starts an optional single-identity NimBLE HID peripheral after explicit
- * firmware integration. It advertises a composite HID service, requires an
+ * Starts a bounded NimBLE HID peripheral after explicit firmware integration.
+ * It admits up to three isolated connections to one composite HID service, requires an
  * authenticated bonded link and explicit pairing consent, while routing stays
  * disarmed until the host actor arms. A connected peer's opaque token is
  * resolved from the persisted pairing table only after link authentication.
- * Retained inventory copies opaque tokens on the NimBLE host loop. */
+ * Retained inventory copies opaque tokens on the NimBLE host loop. Only the
+ * first channel is routed pending a multi-slot host/status contract. */
 #include "hid_guest.h"
 
 #include <string.h>
@@ -104,7 +105,7 @@ static void advertise(void)
     static const char name[] = "ESP32 KVM";
     struct ble_hs_adv_fields fields = {0};
     struct ble_gap_adv_params parameters = {0};
-    if (hid_gatt_channel()->connected) return;
+    if (hid_gatt_connection_count() >= HID_GATT_MAX_CONNECTIONS) return;
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name = (uint8_t *)name;
     fields.name_len = sizeof(name) - 1;
@@ -128,7 +129,10 @@ static void advertise(void)
 static void on_reset(int reason)
 {
     (void)reason;
-    hid_channel_disconnected(hid_gatt_channel());
+    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+        hid_channel_t *channel = hid_gatt_channel_at(slot);
+        if (channel->connected) hid_channel_disconnected(channel);
+    }
     publish(HID_GUEST_DISCONNECTED, 0, 0, NULL);
 }
 
@@ -145,9 +149,8 @@ static void on_sync(void)
 static int gap_event(struct ble_gap_event *event, void *argument)
 {
     (void)argument;
-    hid_channel_t *channel = hid_gatt_channel();
     switch (event->type) {
-    case BLE_GAP_EVENT_CONNECT:
+    case BLE_GAP_EVENT_CONNECT: {
         if (event->connect.status != 0) { advertise(); return 0; }
         expire_window();
         struct ble_gap_conn_desc incoming;
@@ -165,17 +168,24 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         }
         if (ble_gap_security_initiate(event->connect.conn_handle) != 0)
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        else advertise();
         return 0;
-    case BLE_GAP_EVENT_DISCONNECT:
+    }
+    case BLE_GAP_EVENT_DISCONNECT: {
+        bool was_routed = hid_gatt_channel()->connected &&
+                          hid_gatt_channel()->connection_handle == event->disconnect.conn.conn_handle;
         hid_gatt_on_disconnect(event->disconnect.conn.conn_handle);
-        publish(HID_GUEST_DISCONNECTED, event->disconnect.conn.conn_handle, 0, NULL);
-        if (pairing.challenge_active)
+        if (was_routed) publish(HID_GUEST_DISCONNECTED, event->disconnect.conn.conn_handle, 0, NULL);
+        if (pairing.challenge_active && pairing.challenge_handle == event->disconnect.conn.conn_handle)
             publish(HID_GUEST_PAIRING_REJECTED, event->disconnect.conn.conn_handle, 0, NULL);
-        pairing.challenge_active = false;
-        pairing.challenge_approved = false;
-        pairing.challenge_id = 0;
+        if (pairing.challenge_handle == event->disconnect.conn.conn_handle) {
+            pairing.challenge_active = false;
+            pairing.challenge_approved = false;
+            pairing.challenge_id = 0;
+        }
         advertise();
         return 0;
+    }
     case BLE_GAP_EVENT_ENC_CHANGE: {
         struct ble_gap_conn_desc description;
         bool secure = event->enc_change.status == 0 &&
@@ -217,14 +227,15 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         hid_gatt_on_subscribe(event->subscribe.conn_handle,
                               event->subscribe.attr_handle, event->subscribe.cur_notify);
         return 0;
-    case BLE_GAP_EVENT_NOTIFY_TX:
-        if (event->notify_tx.status != 0 && channel->connected &&
-            channel->connection_handle == event->notify_tx.conn_handle) {
+    case BLE_GAP_EVENT_NOTIFY_TX: {
+        hid_channel_t *channel = hid_gatt_channel_for(event->notify_tx.conn_handle);
+        if (event->notify_tx.status != 0 && channel) {
             channel->armed = false;
             channel->needs_disconnect = true;
             ble_gap_terminate(channel->connection_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
         return 0;
+    }
     case BLE_GAP_EVENT_ADV_COMPLETE:
         expire_window();
         advertise();
@@ -306,7 +317,7 @@ void hid_guest_pairing_set_events(hid_guest_pairing_event_fn callback, void *con
 
 esp_err_t hid_guest_pairing_open(void)
 {
-    if (!started || hid_gatt_channel()->connected || !pairing_events) return ESP_ERR_INVALID_STATE;
+    if (!started || !pairing_events) return ESP_ERR_INVALID_STATE;
     ble_addr_t bonds[HID_PAIRING_MAX_BONDS];
     int count = 0;
     if (ble_store_util_bonded_peers(bonds, &count, HID_PAIRING_MAX_BONDS) != 0)
@@ -400,7 +411,24 @@ esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed)
     esp_err_t result = hid_pairing_store_save(&next);
     if (result == ESP_OK) {
         pairing = next;
-        if (hid_gatt_channel()->connected) hid_guest_disconnect_current();
+        for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+            hid_channel_t *channel = hid_gatt_channel_at(slot);
+            struct ble_gap_conn_desc description;
+            if (!channel->connected) continue;
+            if (ble_gap_conn_find(channel->connection_handle, &description) != 0) {
+                channel->armed = false;
+                channel->needs_disconnect = true;
+                ble_gap_terminate(channel->connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+                continue;
+            }
+            hid_peer_t connected = peer_identity(&description.peer_id_addr);
+            if (connected.type != peer.type ||
+                memcmp(connected.address, peer.address, sizeof(peer.address)) != 0)
+                continue;
+            channel->armed = false;
+            channel->needs_disconnect = true;
+            ble_gap_terminate(channel->connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
     }
     return result;
 }

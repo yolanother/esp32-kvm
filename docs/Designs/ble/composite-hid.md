@@ -1,5 +1,10 @@
 # Composite BLE HID guest contract
 
+The original one-link bring-up sequence below is historical. The current
+three-link source model and its remaining wire/physical gates are recorded in
+[Three-link HID source capacity](three-guest-source-capacity.md). The host still
+advertises and routes one live slot.
+
 ## Scope and wire layout
 
 The `firmware/components/hid` component registers one HID-over-GATT service (`0x1812`) with one composite report map. It owns report values and one connection's output gate. Its optional `hid_guest_start()` initializes NVS and NimBLE, advertises one GAP identity and initiates encrypted bonding for a single guest. Firmware `main` does not call it until board recovery and toolchain validation. This M0/M1 leaf supports one connected guest; extending it to three requires connection-indexed channels and measured controller capacity.
