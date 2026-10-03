@@ -747,6 +747,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp32-kvm-edge-policy"
+version = "0.1.0"
+dependencies = [
+ "esp32-kvm-topology-core",
+]
+
+[[package]]
 name = "esp32-kvm-host-actor"
 version = "0.1.0"
 dependencies = [
