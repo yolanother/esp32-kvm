@@ -9,4 +9,5 @@ esp32-kvm-input-core = { path = "../input-core" }
 esp32-kvm-platform-windows = { path = "../platform-windows" }
 esp32-kvm-protocol = { path = "../protocol" }
 esp32-kvm-usb-transport = { path = "../usb-transport" }
+esp32-kvm-update-core = { path = "../update-core" }
 serialport = "4.10.1"

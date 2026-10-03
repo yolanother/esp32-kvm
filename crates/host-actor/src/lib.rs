@@ -4,12 +4,18 @@
 // numeric pairing state reported by negotiated firmware STATUS. Terminal
 // suspend and shutdown end the session without input replay. Bond deletion
 // requires an exact device ACK and fresh retained-inventory exclusion before
-// profile removal; live STATUS slots never stand in for persisted bonds.
+// profile removal; live STATUS slots never stand in for persisted bonds. A
+// consuming update handoff releases input before any app-only flash adapter runs.
 
 #![forbid(unsafe_code)]
 
 mod set1;
+mod update;
 pub use set1::SetOneKeyMapper;
+pub use update::{
+    AppFlashRequest, AppFlasher, FlashError, FlashHandoff, HostUpdateError, ReconnectError,
+    Reconnector,
+};
 
 use esp32_kvm_input_core::{
     Action, Command, MappingEngine, MappingError, MappingProfile, RequestActor, Side, SourceKey,

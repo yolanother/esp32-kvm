@@ -1,10 +1,11 @@
 # Host update preflight and recovery model
 
 `esp32-kvm-update-core` provides a pure host-side preflight and release-first
-state machine. It does not open USB, invoke a flash tool, alter bonds or local
-profiles, or implement a bootloader. The production adapter must supply a
-verified device identity, current app-partition capacity, firmware image bytes,
-control replies, and the result of an app-only flash.
+state machine. `HostActor::prepare_update` consumes its sole verified USB
+session, preflights the manifest and image, disarms capture, sends `RELEASE_ALL`
+and `UPDATE_PREPARE`, and requires exact ACKs before returning a `FlashHandoff`.
+It does not invoke a flash tool, alter bonds or local profiles, or implement a
+bootloader. A failed step drops the actor, leaving capture disarmed.
 
 ## Release manifest v1
 
@@ -68,11 +69,41 @@ BOOT/manual recovery sequence and real app flash compatibility are native
 hardware gates owned by the root integration task; this source model does not
 claim they are proven.
 
+## Host actor handoff
+
+`prepare_update` runs on the native actor worker after capture-event delivery
+stops. It accepts only a stable local or active-guest state with no pending
+command. It requires board ID `esp32-kvm-s3`, the negotiated protocol version,
+and a manifest image that fits the checked-in **factory app** partition at
+`0x20000` with capacity `0x650000`. These constants mirror
+`firmware/partitions.csv`; the real flasher must verify the device's partition
+table and boot selection before writing. This source-only check is not proof
+that the attached device uses that table. A 500 ms bounded control wait does
+not retry commands. A stale ACK may be ignored; wrong session/kind/sequence/
+generation, NACK, malformed frame, link loss, and timeout all end the handoff.
+
+The returned `FlashHandoff` owns the verified bytes and releases the serial
+actor before any flash. `AppFlasher` accepts an `AppFlashRequest` with only the
+app partition, checked-in factory offset, fixed capacity, and bytes that the
+state machine rehashes immediately before the call. No NVS erase, full-chip
+write, or ARM operation is exposed by this API. A production flasher adapter
+must enforce those fields; none is included here. Flash failure or interruption
+returns recovery-required to the caller, without reconnect or automatic retry.
+
+After a successful flash, `Reconnector` must rediscover the USB identity and
+perform fresh CAPS, SESSION_OPEN and STATUS validation. The handoff rejects the
+old session ID, mismatched CAPS/STATUS identity or version, unexpected firmware
+version, and any nonlocal or armed STATUS. It returns success while input remains
+local. The concrete re-enumeration adapter and UI progress/recovery presentation
+remain integration work. Manual BOOT recovery and preservation of NVS bonds
+must be verified on the actual board before enabling this flow.
+
 ## Verification
 
 `cargo test --offline -p esp32-kvm-update-core` covers strict parsing,
 identity/capacity/digest checks, exact release/prepare order, stale and future
 responses, NACK/timeout, changed image bytes, and disarmed reconnect. Firmware
-`UPDATE_PREPARE` support, the host actor/flasher adapter, USB re-enumeration,
-preserved BLE bonds, interrupted-flash recovery, and physical BOOT recovery
-still require integration and native tests.
+`UPDATE_PREPARE` support and `cargo test --offline -p esp32-kvm-host-actor --test
+update` cover the host actor handoff with fake serial, flasher and reconnect
+adapters. A production flasher/re-enumeration adapter, preserved BLE bonds,
+interrupted-flash recovery, and physical BOOT recovery still require native tests.

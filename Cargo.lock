@@ -766,6 +766,7 @@ dependencies = [
  "esp32-kvm-input-core",
  "esp32-kvm-platform-windows",
  "esp32-kvm-protocol",
+ "esp32-kvm-update-core",
  "esp32-kvm-usb-transport",
  "serialport",
 ]
