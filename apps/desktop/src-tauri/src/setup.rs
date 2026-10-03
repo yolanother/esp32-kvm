@@ -1,5 +1,5 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
-// Provides the Tauri setup boundary and crash-tolerant local guest labels.
+// Provides the Tauri setup boundary and versioned, crash-tolerant local guest profiles.
 // The serial-owning host actor supplies verified bonds and pairing controls;
 // absent challenge events and all-up proof keep confirmation and testing closed.
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 
-const PROFILE_SCHEMA: u32 = 1;
+const PROFILE_SCHEMA: u32 = 2;
 
 /// USB state supplied by the serial owner, or a candidate-only scan.
 #[derive(Clone, Serialize)]
@@ -98,8 +98,18 @@ pub enum RouteState {
     },
 }
 
+/// Idempotent result of a confirmed guest forget request.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForgetOutcome {
+    /// Firmware no longer reports the bond and the local profile was removed.
+    Forgot,
+    /// No local profile remained from an earlier completed request.
+    AlreadyAbsent,
+}
+
 /// A user-editable label tied to a 16-byte opaque firmware identity.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GuestProfile {
     /// Lowercase hexadecimal token, never BLE keys or addresses.
@@ -110,6 +120,15 @@ pub struct GuestProfile {
     pub os: String,
     /// Explicit mapping profile choice.
     pub profile: String,
+    /// Optional direct-select shortcut label; registration is a separate gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_shortcut: Option<String>,
+    /// Optional identifier of a host-local mapping profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping_profile_id: Option<String>,
+    /// Optional identifier of a host-local monitor-layout link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_link_id: Option<String>,
 }
 
 /// Combined native status and locally stored labels for the webview.
@@ -124,6 +143,8 @@ pub struct SetupSnapshot {
     pub pairing: PairingState,
     /// Opaque identities currently reported by firmware.
     pub bond_tokens: Vec<String>,
+    /// Bond identities with a live BLE peer, even before HID subscription.
+    pub connected_tokens: Vec<String>,
     /// Identities with encrypted, subscribed HID readiness.
     pub ready_tokens: Vec<String>,
     /// Host-local names retained across unplug and restart.
@@ -143,6 +164,8 @@ pub struct BackendSnapshot {
     pub pairing: PairingState,
     /// Identities reported in firmware STATUS.
     pub bond_tokens: Vec<String>,
+    /// Connected peer identities from firmware STATUS.
+    pub connected_tokens: Vec<String>,
     /// Encrypted and subscribed live identities.
     pub ready_tokens: Vec<String>,
     /// Whether an actor-local pairing request can be accepted.
@@ -156,6 +179,7 @@ impl BackendSnapshot {
             route: self.route,
             pairing: self.pairing,
             bond_tokens: self.bond_tokens,
+            connected_tokens: self.connected_tokens,
             ready_tokens: self.ready_tokens,
             profiles,
             pairing_available: self.pairing_available,
@@ -167,6 +191,10 @@ impl BackendSnapshot {
 pub trait SetupBackend: Send + Sync {
     /// Returns a current snapshot without opening a second serial stream.
     fn snapshot(&self) -> Result<BackendSnapshot, String>;
+    /// Forgets one firmware bond and returns only after ACK and fresh STATUS.
+    fn forget_bond(&self, _bond_token: &str) -> Result<(), String> {
+        Err("Firmware bond forgetting is not wired to the host actor.".into())
+    }
     /// Requests an acknowledged return to the local host when an actor exists.
     fn return_local(&self) -> Result<(), String> {
         Err("Native local-return transport is unavailable.".into())
@@ -222,6 +250,7 @@ impl ProfileStore {
         };
         let mut saw_file = false;
         let mut saw_valid = false;
+        let mut selected_schema = 0;
         for slot in 0..2 {
             let bytes = match fs::read(store.slot(slot)) {
                 Ok(bytes) => bytes,
@@ -232,18 +261,20 @@ impl ProfileStore {
             let Ok(candidate) = serde_json::from_slice::<ProfileFile>(&bytes) else {
                 continue;
             };
-            if candidate.schema_version != PROFILE_SCHEMA
-                || candidate
-                    .profiles
-                    .iter()
-                    .any(|profile| !valid_profile(profile))
+            if !matches!(candidate.schema_version, 1 | PROFILE_SCHEMA)
+                || !valid_profiles(&candidate.profiles)
             {
                 continue;
             }
-            if !saw_valid || candidate.revision > store.revision {
+            if !saw_valid
+                || candidate.revision > store.revision
+                || (candidate.revision == store.revision
+                    && candidate.schema_version > selected_schema)
+            {
                 store.revision = candidate.revision;
                 store.active_slot = slot;
                 store.profiles = candidate.profiles;
+                selected_schema = candidate.schema_version;
             }
             saw_valid = true;
         }
@@ -252,7 +283,32 @@ impl ProfileStore {
                 "Saved guest profiles are incompatible or damaged; no file was erased.".into(),
             );
         }
+        if saw_valid && selected_schema == 1 {
+            store.backup_v1()?;
+            store.write_profiles(store.profiles.clone())?;
+        }
         Ok(store)
+    }
+
+    fn backup_v1(&self) -> Result<(), String> {
+        let path = self.directory.join("guest-profiles-v1-backup.json");
+        if path.exists() {
+            let bytes = fs::read(path).map_err(|error| error.to_string())?;
+            let saved: ProfileFile =
+                serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            if saved.schema_version != 1 || !valid_profiles(&saved.profiles) {
+                return Err("Existing v1 profile backup is damaged; migration stopped.".into());
+            }
+            return Ok(());
+        }
+        let bytes = fs::read(self.slot(self.active_slot)).map_err(|error| error.to_string())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())
     }
 
     fn save(&mut self, profile: GuestProfile) -> Result<(), String> {
@@ -268,6 +324,13 @@ impl ProfileStore {
         } else {
             profiles.push(profile);
         }
+        if !valid_profiles(&profiles) {
+            return Err("Duplicate bond identity or direct shortcut.".into());
+        }
+        self.write_profiles(profiles)
+    }
+
+    fn write_profiles(&mut self, profiles: Vec<GuestProfile>) -> Result<(), String> {
         let next = ProfileFile {
             schema_version: PROFILE_SCHEMA,
             revision: self.revision + 1,
@@ -290,6 +353,30 @@ impl ProfileStore {
         self.active_slot = slot;
         Ok(())
     }
+
+    fn remove(&mut self, token: &str) -> Result<(), String> {
+        let profiles: Vec<_> = self
+            .profiles
+            .iter()
+            .filter(|profile| profile.bond_token != token)
+            .cloned()
+            .collect();
+        if profiles.len() == self.profiles.len() {
+            return Ok(());
+        }
+        self.write_profiles(profiles)
+    }
+}
+
+fn valid_profiles(profiles: &[GuestProfile]) -> bool {
+    profiles.iter().enumerate().all(|(index, profile)| {
+        valid_profile(profile)
+            && profiles[..index].iter().all(|other| {
+                other.bond_token != profile.bond_token
+                    && (profile.direct_shortcut.is_none()
+                        || other.direct_shortcut != profile.direct_shortcut)
+            })
+    })
 }
 
 fn valid_profile(profile: &GuestProfile) -> bool {
@@ -303,6 +390,27 @@ fn valid_profile(profile: &GuestProfile) -> bool {
         && profile.name.trim().chars().count() <= 64
         && matches!(profile.os.as_str(), "windows" | "macos" | "linux" | "other")
         && matches!(profile.profile.as_str(), "unchanged" | "windows-to-mac")
+        && profile.direct_shortcut.as_deref().is_none_or(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-'))
+        })
+        && [
+            profile.mapping_profile_id.as_deref(),
+            profile.layout_link_id.as_deref(),
+        ]
+        .into_iter()
+        .all(|value| {
+            value.is_none_or(|id| {
+                !id.is_empty()
+                    && id.len() <= 64
+                    && id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            })
+        })
 }
 
 /// Shared Tauri setup service; its backend can be replaced by the host actor.
@@ -338,16 +446,65 @@ impl SetupService {
     }
 
     fn save_profile(&self, profile: GuestProfile) -> Result<(), String> {
-        if !self
-            .backend
-            .snapshot()?
-            .bond_tokens
-            .contains(&profile.bond_token)
+        let known = self
+            .profiles
+            .lock()
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .map_err(Clone::clone)?
+            .profiles
+            .iter()
+            .any(|entry| entry.bond_token == profile.bond_token);
+        if !known
+            && !self
+                .backend
+                .snapshot()?
+                .bond_tokens
+                .contains(&profile.bond_token)
         {
             return Err("Firmware has not reported this bond identity.".into());
         }
         let mut guard = self.profiles.lock().map_err(|error| error.to_string())?;
         guard.as_mut().map_err(|error| error.clone())?.save(profile)
+    }
+
+    fn forget_profile(&self, token: &str) -> Result<ForgetOutcome, String> {
+        let exists = self
+            .profiles
+            .lock()
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .map_err(Clone::clone)?
+            .profiles
+            .iter()
+            .any(|entry| entry.bond_token == token);
+        if !exists {
+            return Ok(ForgetOutcome::AlreadyAbsent);
+        }
+        let before = self.backend.snapshot()?;
+        if !matches!(before.device, DeviceState::Verified { .. })
+            || !matches!(before.route, RouteState::Local)
+        {
+            return Err("Return locally with a verified device before forgetting this guest; the profile was kept.".into());
+        }
+        if before.bond_tokens.iter().any(|bond| bond == token) {
+            self.backend.forget_bond(token)?;
+        }
+        let after = self.backend.snapshot()?;
+        if !matches!(after.device, DeviceState::Verified { .. })
+            || !matches!(after.route, RouteState::Local)
+            || after.bond_tokens.iter().any(|bond| bond == token)
+        {
+            return Err(
+                "Firmware has not confirmed bond removal; the local profile was kept.".into(),
+            );
+        }
+        let mut guard = self.profiles.lock().map_err(|error| error.to_string())?;
+        guard
+            .as_mut()
+            .map_err(|error| error.clone())?
+            .remove(token)?;
+        Ok(ForgetOutcome::Forgot)
     }
 }
 
@@ -385,6 +542,19 @@ pub fn setup_save_profile(
     profile: GuestProfile,
 ) -> Result<(), String> {
     service.save_profile(profile)
+}
+
+/// Forgets a guest only after explicit confirmation and firmware removal.
+#[tauri::command]
+pub fn setup_forget_guest(
+    service: State<'_, SetupService>,
+    bond_token: String,
+    confirmed: bool,
+) -> Result<ForgetOutcome, String> {
+    if !confirmed {
+        return Err("Explicit confirmation is required; no profile was removed.".into());
+    }
+    service.forget_profile(&bond_token)
 }
 /// Performs an explicit native HID test that must end with all-up.
 #[tauri::command]
@@ -428,6 +598,7 @@ mod tests {
                 bond_token: "00112233445566778899aabbccddeeff".into(),
             },
             bond_tokens: vec!["00112233445566778899aabbccddeeff".into()],
+            connected_tokens: vec!["00112233445566778899aabbccddeeff".into()],
             ready_tokens: Vec::new(),
             pairing_available: true,
         };
@@ -456,6 +627,7 @@ mod tests {
                 route: RouteState::Local,
                 pairing: PairingState::Closed,
                 bond_tokens: vec!["00112233445566778899aabbccddeeff".into()],
+                connected_tokens: vec!["00112233445566778899aabbccddeeff".into()],
                 ready_tokens: Vec::new(),
                 pairing_available: false,
             })
@@ -468,6 +640,9 @@ mod tests {
             name: "Work Mac".into(),
             os: "macos".into(),
             profile: "unchanged".into(),
+            direct_shortcut: None,
+            mapping_profile_id: None,
+            layout_link_id: None,
         }
     }
 
@@ -522,6 +697,184 @@ mod tests {
         let snapshot = service.snapshot().unwrap();
         assert_eq!(snapshot.profiles.len(), 1);
         assert!(snapshot.ready_tokens.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn v1_labels_migrate_to_v2_with_a_retained_backup() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-migrate-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let original = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1, "revision": 7,
+            "profiles": [{"bondToken":"00112233445566778899aabbccddeeff", "name":"Work Mac", "os":"macos", "profile":"unchanged"}]
+        })).unwrap();
+        fs::write(directory.join("guest-profiles-0.json"), &original).unwrap();
+        let store = ProfileStore::load(directory.clone()).unwrap();
+        assert_eq!(store.revision, 8);
+        assert_eq!(store.profiles[0].direct_shortcut, None);
+        assert_eq!(
+            fs::read(directory.join("guest-profiles-v1-backup.json")).unwrap(),
+            original
+        );
+        let upgraded: ProfileFile =
+            serde_json::from_slice(&fs::read(store.slot(store.active_slot)).unwrap()).unwrap();
+        assert_eq!(upgraded.schema_version, 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn profile_links_survive_restart_without_storing_bond_secrets() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-links-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let mut store = ProfileStore::load(directory.clone()).unwrap();
+        let mut linked = profile("00112233445566778899aabbccddeeff");
+        linked.direct_shortcut = Some("Ctrl+Alt+1".into());
+        linked.mapping_profile_id = Some("mac-default".into());
+        linked.layout_link_id = Some("desk-right".into());
+        store.save(linked.clone()).unwrap();
+        let mut conflicting = profile("ffeeddccbbaa99887766554433221100");
+        conflicting.direct_shortcut = linked.direct_shortcut.clone();
+        assert!(store.save(conflicting).is_err());
+        let loaded = ProfileStore::load(directory.clone()).unwrap();
+        assert_eq!(loaded.profiles, vec![linked]);
+        let bytes = fs::read(loaded.slot(loaded.active_slot)).unwrap();
+        assert!(!String::from_utf8(bytes).unwrap().contains("bleKey"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    struct OfflineBackend;
+    impl SetupBackend for OfflineBackend {
+        fn snapshot(&self) -> Result<BackendSnapshot, String> {
+            Ok(BackendSnapshot {
+                device: DeviceState::Missing,
+                route: RouteState::Local,
+                pairing: PairingState::Closed,
+                bond_tokens: Vec::new(),
+                connected_tokens: Vec::new(),
+                ready_tokens: Vec::new(),
+                pairing_available: false,
+            })
+        }
+    }
+
+    #[test]
+    fn existing_host_label_can_be_edited_while_guest_is_offline() {
+        let directory = std::env::temp_dir().join(format!(
+            "esp32-kvm-offline-edit-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let token = "00112233445566778899aabbccddeeff";
+        SetupService::new(directory.clone(), Box::new(OneBondBackend))
+            .save_profile(profile(token))
+            .unwrap();
+        let service = SetupService::new(directory.clone(), Box::new(OfflineBackend));
+        let mut renamed = profile(token);
+        renamed.name = "Travel Mac".into();
+        service.save_profile(renamed).unwrap();
+        assert_eq!(
+            ProfileStore::load(directory.clone()).unwrap().profiles[0].name,
+            "Travel Mac"
+        );
+        assert!(
+            service
+                .save_profile(profile("ffeeddccbbaa99887766554433221100"))
+                .is_err()
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn forget_preserves_local_profile_until_firmware_confirms_removal() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-forget-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let token = "00112233445566778899aabbccddeeff";
+        let service = SetupService::new(directory.clone(), Box::new(OneBondBackend));
+        service.save_profile(profile(token)).unwrap();
+        assert!(service.forget_profile(token).is_err());
+        assert_eq!(service.snapshot().unwrap().profiles.len(), 1);
+        let offline = SetupService::new(directory.clone(), Box::new(OfflineBackend));
+        assert!(offline.forget_profile(token).is_err());
+        assert_eq!(offline.snapshot().unwrap().profiles.len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    struct ConfirmedForgetBackend {
+        present: std::sync::atomic::AtomicBool,
+        acknowledge: bool,
+    }
+    impl SetupBackend for ConfirmedForgetBackend {
+        fn snapshot(&self) -> Result<BackendSnapshot, String> {
+            let bonds = if self.present.load(std::sync::atomic::Ordering::SeqCst) {
+                vec!["00112233445566778899aabbccddeeff".into()]
+            } else {
+                Vec::new()
+            };
+            Ok(BackendSnapshot {
+                device: DeviceState::Verified {
+                    board_id: "esp32-kvm-s3".into(),
+                    firmware_version: None,
+                    max_bonds: 8,
+                    max_connections: 1,
+                },
+                route: RouteState::Local,
+                pairing: PairingState::Closed,
+                bond_tokens: bonds,
+                connected_tokens: Vec::new(),
+                ready_tokens: Vec::new(),
+                pairing_available: false,
+            })
+        }
+        fn forget_bond(&self, _bond_token: &str) -> Result<(), String> {
+            if self.acknowledge {
+                self.present
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn forget_is_retry_safe_after_firmware_status_removes_bond() {
+        let directory =
+            std::env::temp_dir().join(format!("esp32-kvm-forget-ack-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let token = "00112233445566778899aabbccddeeff";
+        let service = SetupService::new(
+            directory.clone(),
+            Box::new(ConfirmedForgetBackend {
+                present: std::sync::atomic::AtomicBool::new(true),
+                acknowledge: false,
+            }),
+        );
+        service.save_profile(profile(token)).unwrap();
+        assert!(service.forget_profile(token).is_err());
+        assert_eq!(service.snapshot().unwrap().profiles.len(), 1);
+        let service = SetupService::new(
+            directory.clone(),
+            Box::new(ConfirmedForgetBackend {
+                present: std::sync::atomic::AtomicBool::new(true),
+                acknowledge: true,
+            }),
+        );
+        assert_eq!(
+            service.forget_profile(token).unwrap(),
+            ForgetOutcome::Forgot
+        );
+        assert_eq!(
+            service.forget_profile(token).unwrap(),
+            ForgetOutcome::AlreadyAbsent
+        );
+        assert!(
+            ProfileStore::load(directory.clone())
+                .unwrap()
+                .profiles
+                .is_empty()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

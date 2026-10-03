@@ -3,7 +3,7 @@
 // completion requirements before the pairing wizard is connected to hardware.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canBeginPairing, canFinishSetup, countdownSeconds, newBondToken, profileState, validGuestName } from "./setup-model.ts";
+import { canBeginPairing, canFinishSetup, countdownSeconds, liveGuestState, newBondToken, profileState, validDirectShortcut, validGuestName } from "./setup-model.ts";
 
 const verified = { kind: "verified", boardId: "esp32-kvm-s3", firmwareVersion: "0.1.0-m1", maxBonds: 8, maxConnections: 1 };
 const token = "00112233445566778899aabbccddeeff";
@@ -46,4 +46,20 @@ test("the wizard selects only a bond added after its explicit pairing attempt", 
   assert.equal(newBondToken(previous, [token, next], false), null);
   assert.equal(newBondToken(previous, previous, true), null);
   assert.equal(newBondToken(previous, [token, next], true), next);
+});
+
+test("connection model keeps connected, ready and active separate", () => {
+  const data = { device: verified, route: { kind: "local" }, connectedTokens: [], readyTokens: [] };
+  assert.equal(liveGuestState(token, data), "offline");
+  assert.equal(liveGuestState(token, { ...data, connectedTokens: [token] }), "connected");
+  assert.equal(liveGuestState(token, { ...data, connectedTokens: [token], readyTokens: [token] }), "ready");
+  assert.equal(liveGuestState(token, { ...data, connectedTokens: [token], readyTokens: [token], route: { kind: "guest", slot: 1, bondToken: token } }), "active");
+  assert.equal(liveGuestState(token, { ...data, device: { kind: "missing" }, connectedTokens: [token], readyTokens: [token] }), "offline");
+});
+
+test("optional direct shortcut rejects unbounded or malformed values", () => {
+  assert.equal(validDirectShortcut(""), true);
+  assert.equal(validDirectShortcut("Ctrl+Alt+1"), true);
+  assert.equal(validDirectShortcut("Ctrl Alt 1"), false);
+  assert.equal(validDirectShortcut("x".repeat(65)), false);
 });

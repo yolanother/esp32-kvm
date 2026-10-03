@@ -7,7 +7,7 @@ import type { GuestProfile, SetupSnapshot } from "./setup-model";
 /** Return a truthful disconnected snapshot when the native shell is absent. */
 export function unavailableSnapshot(reason = "Native device service is unavailable."): SetupSnapshot {
   return { device: { kind: "unavailable", reason }, route: { kind: "failed", reason: "native_service" }, pairing: { kind: "closed" },
-    bondTokens: [], readyTokens: [], profiles: [], pairingAvailable: false };
+    bondTokens: [], connectedTokens: [], readyTokens: [], profiles: [], pairingAvailable: false };
 }
 
 /** Reads current USB and pairing state without activating input routing. */
@@ -27,6 +27,11 @@ export function confirmPairing(challengeId: number, approved: boolean): Promise<
 /** Saves a local label for a firmware-proven opaque bond token. */
 export function saveGuestProfile(profile: GuestProfile): Promise<void> {
   return invoke("setup_save_profile", { profile });
+}
+
+/** Explicitly requests firmware bond removal before deleting a local profile. */
+export function forgetGuestProfile(bondToken: string): Promise<"forgot" | "already_absent"> {
+  return invoke("setup_forget_guest", { bondToken, confirmed: true });
 }
 /** Runs an explicit bounded HID test ending in an all-up report. */
 export function testGuestControls(bondToken: string): Promise<void> {

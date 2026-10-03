@@ -31,7 +31,9 @@ impl TrayModel {
             };
             let checked = matches!(&snapshot.route, RouteState::Guest { bond_token, .. } if bond_token == &profile.bond_token);
             let ready = snapshot.ready_tokens.contains(&profile.bond_token) && matches!(snapshot.device, crate::setup::DeviceState::Verified { .. }) && !matches!(snapshot.route, RouteState::Failed { .. });
-            let state = if checked { "Controlling" } else if ready { "Ready" } else { "Offline" };
+            let connected = snapshot.connected_tokens.contains(&profile.bond_token)
+                && matches!(snapshot.device, crate::setup::DeviceState::Verified { .. });
+            let state = if checked { "Controlling" } else if ready { "Ready" } else if connected { "Connected" } else { "Offline" };
             TrayGuest { label: format!("{} — {state}", profile.name), checked, enabled: false }
         }).collect();
         let tooltip = if let RouteState::Guest { bond_token, slot } = &snapshot.route {
@@ -175,12 +177,16 @@ mod tests {
             route,
             pairing: PairingState::Closed,
             bond_tokens: vec!["abababababababababababababababab".into()],
+            connected_tokens: vec!["abababababababababababababababab".into()],
             ready_tokens: vec!["abababababababababababababababab".into()],
             profiles: vec![GuestProfile {
                 bond_token: "abababababababababababababababab".into(),
                 name: "Work Mac".into(),
                 os: "macos".into(),
                 profile: "unchanged".into(),
+                direct_shortcut: None,
+                mapping_profile_id: None,
+                layout_link_id: None,
             }],
             pairing_available: true,
         }

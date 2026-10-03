@@ -1,6 +1,6 @@
 /* Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
  * Defines semantic design tokens and responsive, keyboard-visible styling for the five-page
- * desktop shell, setup wizard, dashboard and route overlay. Preview content and unavailable device
+ * desktop shell, setup wizard, profile editor, dashboard and route overlay. Preview content and unavailable device
  * states remain readable without color. */
 :root {
   font-family: "Segoe UI", system-ui, sans-serif;
@@ -118,6 +118,16 @@ tr:last-child td { border-bottom: 0; }
 .setup-details label { display: grid; gap: .3rem; font-weight: 600; }
 .setup-details input, .setup-details select { width: 100%; min-height: 2.55rem; padding: .5rem .6rem; border: 1px solid #78938f; border-radius: .4rem; background: #0d1820; color: var(--text); }
 .setup-details button { justify-self: start; }
+.profile-editor { max-width: 48rem; }
+.profile-editor h3 { margin: 0 0 .5rem; }
+.profile-editor > .card-heading > button, .profile-form button, .profile-danger button { min-height: 2.5rem; padding: .45rem .8rem; border: 1px solid #78938f; border-radius: .4rem; background: #24443c; color: var(--text); }
+.profile-form { display: grid; gap: .9rem; }
+.profile-form label { display: grid; gap: .3rem; font-weight: 600; }
+.profile-form input, .profile-form select { min-height: 2.5rem; padding: .5rem .6rem; border: 1px solid #78938f; border-radius: .4rem; background: #0d1820; color: var(--text); }
+.profile-form button { justify-self: start; }
+.profile-form .small { margin: -.55rem 0 0; }
+.profile-danger { margin-top: 1.5rem; padding-top: 1.2rem; border-top: 1px solid var(--border); }
+.profile-danger .notice { align-items: center; flex-wrap: wrap; }
 .device-grid { margin-top: 1rem; }
 .detail-list { margin: 0; }
 .detail-list div { display: flex; justify-content: space-between; gap: 1rem; padding: .65rem 0; border-bottom: 1px solid var(--border); }

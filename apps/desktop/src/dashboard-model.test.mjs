@@ -8,7 +8,7 @@ import { describeRoute, overlayForTransition, systemChoices } from "./dashboard-
 const token = "abababababababababababababababab";
 const base = {
   device: { kind: "verified", boardId: "esp32-kvm-s3", firmwareVersion: null, maxBonds: 8, maxConnections: 1 },
-  pairing: { kind: "closed" }, bondTokens: [token], readyTokens: [token],
+  pairing: { kind: "closed" }, bondTokens: [token], connectedTokens: [token], readyTokens: [token],
   profiles: [{ bondToken: token, name: "Work Mac", os: "macos", profile: "unchanged" }], pairingAvailable: true,
 };
 
@@ -25,9 +25,15 @@ test("offline and failed sessions say local without claiming a connected guest",
   const failed = describeRoute({ ...base, device: { kind: "unavailable", reason: "Disconnected" }, route: { kind: "failed", reason: "transport" }, readyTokens: [] });
   assert.equal(failed.title, "This computer");
   assert.match(failed.detail, /transport/i);
-  const choices = systemChoices({ ...base, readyTokens: [], route: { kind: "local" } });
+  const choices = systemChoices({ ...base, connectedTokens: [], readyTokens: [], route: { kind: "local" } });
   assert.equal(choices[0].state, "Offline");
   assert.equal(choices[0].selectEnabled, false);
+});
+
+test("a connected peer without HID subscription stays distinct from ready", () => {
+  const waiting = systemChoices({ ...base, readyTokens: [], connectedTokens: [token], route: { kind: "local" } });
+  assert.equal(waiting[0].state, "Connected");
+  assert.equal(waiting[0].selectEnabled, false);
 });
 
 test("switch overlay appears only after a real route change and persists on loss", () => {

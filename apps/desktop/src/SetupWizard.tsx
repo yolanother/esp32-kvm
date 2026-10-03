@@ -9,7 +9,7 @@ const previewToken = "00112233445566778899aabbccddeeff";
 const previewDevice: SetupSnapshot = {
   device: { kind: "verified", boardId: "esp32-kvm-s3", firmwareVersion: "Example firmware", maxBonds: 8, maxConnections: 1 },
   route: { kind: "local" },
-  pairing: { kind: "closed" }, bondTokens: [], readyTokens: [], profiles: [], pairingAvailable: true,
+  pairing: { kind: "closed" }, bondTokens: [], connectedTokens: [], readyTokens: [], profiles: [], pairingAvailable: true,
 };
 
 /** Describe connection evidence without treating a COM name as verification. */
@@ -82,7 +82,7 @@ export default function SetupWizard({ preview, onClose }: { preview: boolean; on
   function answer(approved: boolean): void {
     if (snapshot.pairing.kind !== "challenge") return;
     if (preview) {
-      setSnapshot({ ...previewDevice, pairing: { kind: "closed" }, bondTokens: approved ? [previewToken] : [], readyTokens: approved ? [previewToken] : [] });
+      setSnapshot({ ...previewDevice, pairing: { kind: "closed" }, bondTokens: approved ? [previewToken] : [], connectedTokens: approved ? [previewToken] : [], readyTokens: approved ? [previewToken] : [] });
       return;
     }
     void perform(() => confirmPairing(snapshot.pairing.kind === "challenge" ? snapshot.pairing.challengeId : 0, approved));

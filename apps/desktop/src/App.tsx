@@ -6,6 +6,7 @@ import { destinations, moveSelection, type Destination } from "./navigation";
 import { listen } from "@tauri-apps/api/event";
 import { exampleGuests, exampleMappings } from "./preview-fixtures";
 import SetupWizard from "./SetupWizard";
+import ProfileEditor from "./ProfileEditor";
 import { returnToHost, setupSnapshot, unavailableSnapshot } from "./setup-api";
 import { type SetupSnapshot } from "./setup-model";
 import { describeRoute, overlayForTransition, systemChoices, type SwitchAnnouncement } from "./dashboard-model";
@@ -31,7 +32,7 @@ function PageIntro({ title, description, headingRef }: { title: string; descript
 }
 
 /** Systems destination with truthful local state and optional sample guest cards. */
-function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: () => void; onReturn: () => void }): JSX.Element {
+function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEdit }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: () => void; onReturn: () => void; onEdit: (bondToken: string) => void }): JSX.Element {
   const route = describeRoute(snapshot);
   const choices = systemChoices(snapshot);
   return <>
@@ -40,7 +41,7 @@ function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn }: { 
     <section className="card route-card" aria-label="Active input destination"><span className="eyebrow">ACTIVE TARGET</span><h2>{route.title}</h2><p>{route.detail}</p><div className="setup-actions"><button type="button" onClick={onReturn} disabled={snapshot.route.kind === "local" || snapshot.route.kind === "failed"}>Return to this computer</button><button type="button" disabled title="Native capture and physical input ledger are not connected">Pause capture unavailable</button><button type="button" disabled title="Native capture and physical input ledger are not connected">Select a system unavailable</button></div></section>
     <div className="card-grid">
       <article className={`card${snapshot.route.kind === "local" ? " card--local" : ""}`}><div className="card-heading"><h2>This computer</h2><StatusPill tone={snapshot.route.kind === "local" ? "accent" : "neutral"}>{snapshot.route.kind === "local" ? "Controlling" : "Local host"}</StatusPill></div><p>Windows host keyboard and mouse.</p><div className="card-tail"><span className="small muted">Return target</span><span className="small muted">Actor handles local return</span></div></article>
-      {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : choices.length ? choices.map((choice) => { const guest = snapshot.profiles.find((item) => item.bondToken === choice.bondToken)!; return <article className={`card${choice.state === "Controlling" ? " card--local" : ""}`} key={choice.bondToken}><div className="card-heading"><h2>{choice.name}</h2><StatusPill tone={choice.state === "Offline" ? "warning" : "accent"}>{choice.state}</StatusPill></div><p>{guest.os} · {guest.profile === "unchanged" ? "Unchanged keys" : "Windows shortcuts to Mac"}</p><div className="card-tail"><span className="small muted">Saved identity</span><button type="button" disabled={!choice.selectEnabled} title="Native capture and physical input ledger are not connected">Select unavailable</button></div></article>; }) : <article className="card card--empty"><h2>No guest profiles yet</h2><p>Connect the device and pair a guest to add a saved profile.</p><StatusPill tone="warning">No saved guest</StatusPill></article>}
+      {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : choices.length ? choices.map((choice) => { const guest = snapshot.profiles.find((item) => item.bondToken === choice.bondToken)!; return <article className={`card${choice.state === "Controlling" ? " card--local" : ""}`} key={choice.bondToken}><div className="card-heading"><h2>{choice.name}</h2><StatusPill tone={choice.state === "Offline" || choice.state === "Connected" ? "warning" : "accent"}>{choice.state}</StatusPill></div><p>{guest.os} · {guest.profile === "unchanged" ? "Unchanged keys" : "Windows shortcuts to Mac"}</p><div className="card-tail"><button type="button" onClick={() => onEdit(choice.bondToken)}>Edit profile</button><button type="button" disabled={!choice.selectEnabled} title="Native capture and physical input ledger are not connected">Select unavailable</button></div></article>; }) : <article className="card card--empty"><h2>No guest profiles yet</h2><p>Connect the device and pair a guest to add a saved profile.</p><StatusPill tone="warning">No saved guest</StatusPill></article>}
     </div>
     {preview && <PreviewNotice />}
     <div className="notice"><strong>Stay in control</strong><span>Guest selection and pause will enable after native capture and physical all-up validation are connected. A ready bond alone is not an active route.</span></div>
@@ -100,6 +101,7 @@ export default function App(): JSX.Element {
   const [page, setPage] = useState<Destination>("systems");
   const [preview, setPreview] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [editingToken, setEditingToken] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<SetupSnapshot>(unavailableSnapshot());
   const [announcement, setAnnouncement] = useState<SwitchAnnouncement | null>(null);
   const lastSnapshot = useRef<SetupSnapshot | null>(null);
@@ -132,6 +134,7 @@ export default function App(): JSX.Element {
     let unlisten: (() => void) | null = null;
     void listen("tray-open-settings", () => {
       setSetupOpen(false);
+      setEditingToken(null);
       focusHeading.current = true;
       setPage("device");
     }).then((stop) => { if (active) unlisten = stop; else stop(); }).catch(() => {});
@@ -146,6 +149,7 @@ export default function App(): JSX.Element {
 
   function selectPage(destination: Destination): void {
     setSetupOpen(false);
+    setEditingToken(null);
     focusHeading.current = true;
     if (page === destination) headingRef.current?.focus();
     else setPage(destination);
@@ -162,6 +166,11 @@ export default function App(): JSX.Element {
 
   const selectedLabel = destinations.find(({ id }) => id === page)?.label ?? "Systems";
   const route = describeRoute(snapshot);
+  const editingGuest = snapshot.profiles.find((profile) => profile.bondToken === editingToken);
+  function closeEditor(): void {
+    setEditingToken(null);
+    requestAnimationFrame(() => headingRef.current?.focus());
+  }
   function requestLocal(): void {
     void returnToHost().catch((error) => setAnnouncement({ message: `Local return request failed: ${String(error)}. Check the device connection.`, persistent: true }));
   }
@@ -176,7 +185,7 @@ export default function App(): JSX.Element {
       <div className="workspace">
         <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "No verified device"}</StatusPill></div></header>
         <div className="connection-status" role="status" aria-live="polite">{route.title}. {route.detail}</div>
-        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} />}{page === "layout" && <LayoutPage preview={preview} headingRef={headingRef} />}{page === "mappings" && <MappingsPage preview={preview} headingRef={headingRef} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
+        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} />}{page === "layout" && <LayoutPage preview={preview} headingRef={headingRef} />}{page === "mappings" && <MappingsPage preview={preview} headingRef={headingRef} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
         <footer className="footer"><span>{snapshot.route.kind === "guest" ? "Guest route confirmed" : "Local control"} · Proposed return shortcut <KeyChord keys={["Ctrl", "Alt", "F10"]} /> is inactive</span><span>Emergency shortcut is not active yet</span></footer>
       </div>
     </div>

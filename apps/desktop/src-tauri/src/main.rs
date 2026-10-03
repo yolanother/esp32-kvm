@@ -34,6 +34,7 @@ fn main() {
             setup::setup_cancel,
             setup::setup_confirm,
             setup::setup_save_profile,
+            setup::setup_forget_guest,
             setup::setup_test_controls,
             setup::dashboard_return_local,
         ])

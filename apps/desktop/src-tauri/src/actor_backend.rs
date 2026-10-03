@@ -116,6 +116,7 @@ fn empty_snapshot(device: DeviceState) -> BackendSnapshot {
         route: RouteState::Local,
         pairing: PairingState::Closed,
         bond_tokens: Vec::new(),
+        connected_tokens: Vec::new(),
         ready_tokens: Vec::new(),
         pairing_available: false,
     }
@@ -167,6 +168,12 @@ fn map_snapshot(value: ActorSnapshot, monotonic_ms: u64, wall_ms: u64) -> Backen
         .iter()
         .map(|slot| token_hex(&slot.bond_token))
         .collect();
+    let connected_tokens = value
+        .slots
+        .iter()
+        .filter(|slot| active && slot.ready)
+        .map(|slot| token_hex(&slot.bond_token))
+        .collect();
     let ready_tokens = value
         .slots
         .iter()
@@ -207,6 +214,7 @@ fn map_snapshot(value: ActorSnapshot, monotonic_ms: u64, wall_ms: u64) -> Backen
         route,
         pairing,
         bond_tokens,
+        connected_tokens,
         ready_tokens,
         pairing_available: value.state == HostState::Local
             && value.pairing_status != PairingStatus::Unsupported,
@@ -381,6 +389,7 @@ mod tests {
         assert!(local.pairing_available);
         assert_eq!(local.bond_tokens, vec!["ab".repeat(16)]);
         assert_eq!(local.ready_tokens, local.bond_tokens);
+        assert_eq!(local.connected_tokens, local.bond_tokens);
         assert!(matches!(local.route, crate::setup::RouteState::Local));
         let awaiting = map_snapshot(actor(HostState::AwaitStatus), 0, 1_000);
         assert!(!awaiting.pairing_available);
@@ -407,6 +416,7 @@ mod tests {
         let failed = map_snapshot(actor(HostState::Failed), 0, 1_000);
         assert!(!failed.pairing_available);
         assert!(failed.ready_tokens.is_empty());
+        assert!(failed.connected_tokens.is_empty());
         assert!(matches!(
             failed.route,
             crate::setup::RouteState::Failed { .. }
@@ -444,5 +454,14 @@ mod tests {
             map_snapshot(failed, 0, 100_000).pairing,
             PairingState::Closed
         ));
+    }
+
+    #[test]
+    fn connected_peer_without_subscription_is_not_hid_ready() {
+        let mut value = actor(HostState::Local);
+        value.slots[0].subscribed = false;
+        let snapshot = map_snapshot(value, 0, 0);
+        assert_eq!(snapshot.connected_tokens, vec!["ab".repeat(16)]);
+        assert!(snapshot.ready_tokens.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Turns verified actor routing state into dashboard, tray and overlay labels.
 // A ready BLE bond alone is never described as the active input recipient.
-import type { SetupSnapshot, RouteState } from "./setup-model";
+import { liveGuestState, type SetupSnapshot, type RouteState } from "./setup-model.ts";
 
 /** Text and tone for the only actor-confirmed input destination. */
 export interface RouteDescription {
@@ -14,7 +14,7 @@ export interface RouteDescription {
 export interface SystemChoice {
   bondToken: string;
   name: string;
-  state: "Controlling" | "Ready" | "Offline";
+  state: "Controlling" | "Ready" | "Connected" | "Offline";
   selectEnabled: boolean;
 }
 
@@ -45,7 +45,7 @@ export function systemChoices(snapshot: SetupSnapshot): SystemChoice[] {
   return snapshot.profiles.map((guest) => ({
     bondToken: guest.bondToken,
     name: guest.name,
-    state: snapshot.route.kind === "guest" && snapshot.route.bondToken === guest.bondToken ? "Controlling" : snapshot.readyTokens.includes(guest.bondToken) ? "Ready" : "Offline",
+    state: ({ active: "Controlling", ready: "Ready", connected: "Connected", offline: "Offline" } as const)[liveGuestState(guest.bondToken, snapshot)],
     selectEnabled: false,
   }));
 }

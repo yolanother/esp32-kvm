@@ -36,6 +36,9 @@ export interface GuestProfile {
   name: string;
   os: "windows" | "macos" | "linux" | "other";
   profile: "unchanged" | "windows-to-mac";
+  directShortcut?: string | null;
+  mappingProfileId?: string | null;
+  layoutLinkId?: string | null;
 }
 
 /** Native snapshot of one setup session and remembered guest readiness. */
@@ -44,6 +47,7 @@ export interface SetupSnapshot {
   route: RouteState;
   pairing: PairingState;
   bondTokens: string[];
+  connectedTokens: string[];
   readyTokens: string[];
   profiles: GuestProfile[];
   pairingAvailable: boolean;
@@ -65,6 +69,15 @@ export function profileState(profiles: readonly GuestProfile[], token: string, r
   return readyTokens.includes(token) ? "ready" : "offline";
 }
 
+/** Derives one guest's live state from verified STATUS and acknowledged route. */
+export function liveGuestState(token: string, snapshot: Pick<SetupSnapshot, "device" | "route" | "connectedTokens" | "readyTokens">): "offline" | "connected" | "ready" | "active" {
+  if (snapshot.device.kind !== "verified") return "offline";
+  if (snapshot.route.kind === "guest" && snapshot.route.bondToken === token) return "active";
+  if (snapshot.readyTokens.includes(token)) return "ready";
+  if (snapshot.connectedTokens.includes(token)) return "connected";
+  return "offline";
+}
+
 /** Selects only an identity first reported after the user's pairing request. */
 export function newBondToken(previous: readonly string[], current: readonly string[], attempted: boolean): string | null {
   if (!attempted) return null;
@@ -75,6 +88,11 @@ export function newBondToken(previous: readonly string[], current: readonly stri
 export function validGuestName(name: string): boolean {
   const length = name.trim().length;
   return length > 0 && length <= 64;
+}
+
+/** Accepts an optional direct-select chord label in the native store's format. */
+export function validDirectShortcut(value: string): boolean {
+  return value.length === 0 || (value.length <= 64 && /^[A-Za-z0-9+-]+$/.test(value));
 }
 
 /** Finishing requires a saved identity, explicit test, and live HID readiness. */
