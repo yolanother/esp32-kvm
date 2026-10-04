@@ -884,6 +884,53 @@ mod tests {
     }
 
     #[test]
+    fn idle_bump_timer_restarts_after_release_or_guest_reconnection() {
+        let target = BumpTarget {
+            slot: 1,
+            bond_token: [0xab; 16],
+            generation: 9,
+        };
+        let started = Instant::now();
+        let mut since = None;
+        assert!(!bump_due(&mut since, Some(target), started));
+        assert!(!bump_due(
+            &mut since,
+            None,
+            started + Duration::from_secs(20)
+        ));
+        assert!(!bump_due(
+            &mut since,
+            Some(target),
+            started + Duration::from_secs(21)
+        ));
+        assert!(!bump_due(
+            &mut since,
+            Some(target),
+            started + Duration::from_secs(49)
+        ));
+        let reconnected = BumpTarget {
+            generation: 10,
+            ..target
+        };
+        assert!(!bump_due(
+            &mut since,
+            Some(reconnected),
+            started + Duration::from_secs(50)
+        ));
+        assert!(!bump_due(
+            &mut since,
+            Some(reconnected),
+            started + Duration::from_secs(79)
+        ));
+        assert!(bump_due(
+            &mut since,
+            Some(reconnected),
+            started + Duration::from_secs(80)
+        ));
+        assert_eq!(since, None);
+    }
+
+    #[test]
     fn verified_status_exposes_opaque_bonds_but_only_local_allows_begin() {
         let local = map_snapshot(actor(HostState::Local), 0, 1_000);
         assert!(local.pairing_available);
