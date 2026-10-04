@@ -3,7 +3,7 @@
 // completion requirements before the pairing wizard is connected to hardware.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canBeginPairing, canFinishSetup, canForgetRetainedGuest, countdownSeconds, liveGuestState, newBondToken, profileState, validDirectShortcut, validGuestName } from "./setup-model.ts";
+import { adoptableBondTokens, canBeginPairing, canFinishSetup, canForgetRetainedGuest, countdownSeconds, liveGuestState, newBondToken, profileState, validDirectShortcut, validGuestName } from "./setup-model.ts";
 
 const verified = { kind: "verified", boardId: "esp32-kvm-s3", firmwareVersion: "0.1.0-m1", maxBonds: 8, maxConnections: 1 };
 const token = "00112233445566778899aabbccddeeff";
@@ -46,6 +46,18 @@ test("the wizard selects only a bond added after its explicit pairing attempt", 
   assert.equal(newBondToken(previous, [token, next], false), null);
   assert.equal(newBondToken(previous, previous, true), null);
   assert.equal(newBondToken(previous, [token, next], true), next);
+});
+
+test("an existing firmware-reported guest can be saved without pairing again", () => {
+  const second = "ffeeddccbbaa99887766554433221100";
+  const snapshot = {
+    device: verified, route: { kind: "local" }, bondTokens: [token, second],
+    profiles: [{ bondToken: second, name: "Other Mac", os: "macos", profile: "unchanged" }],
+  };
+  assert.deepEqual(adoptableBondTokens(snapshot), [token]);
+  assert.deepEqual(adoptableBondTokens({ ...snapshot, device: { kind: "missing" } }), []);
+  assert.deepEqual(adoptableBondTokens({ ...snapshot, route: { kind: "guest", slot: 1, bondToken: token } }), []);
+  assert.deepEqual(adoptableBondTokens({ ...snapshot, bondTokens: [] }), []);
 });
 
 test("connection model keeps connected, ready and active separate", () => {
