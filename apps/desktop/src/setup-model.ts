@@ -104,6 +104,12 @@ export function newBondToken(previous: readonly string[], current: readonly stri
   return current.find((token) => !previous.includes(token)) ?? null;
 }
 
+/** Lists live firmware-reported bonds that have no host profile yet. */
+export function adoptableBondTokens(snapshot: Pick<SetupSnapshot, "device" | "route" | "bondTokens" | "profiles">): string[] {
+  if (snapshot.device.kind !== "verified" || snapshot.route.kind !== "local") return [];
+  return snapshot.bondTokens.filter((token) => !snapshot.profiles.some((profile) => profile.bondToken === token));
+}
+
 /** Validates a user label before it is stored alongside an opaque token. */
 export function validGuestName(name: string): boolean {
   const length = name.trim().length;

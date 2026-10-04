@@ -22,6 +22,7 @@ Source: https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides
 
 ## Ownership/state
 Host owns profiles, mappings, monitor layout, shortcuts and intended target. Firmware owns BLE bonds, actual connection readiness, selected slot, routing generation and the authoritative output gate. Only one routing actor mutates state. Firmware button requests and desktop hotkeys use the same switch transaction; firmware may unconditionally release/suspend, but may not silently select an unannounced target.
+Windows setup can save a host profile for an already paired guest when verified firmware reports its live bond identity; it need not reopen pairing or install software on the guest. The host stores a friendly label and mapping under that opaque identity. A stale or invented identity is never offered for adoption, and HID readiness remains a separate gate for routing and the explicit control test.
 LOCAL → PREPARING → ACTIVE(slot,generation) → RELEASING → LOCAL. Any fault → LOCAL/paused. Firmware lease expiry → SUSPENDED and zero reports. Pairing/update use SUSPENDED. New sessions always begin disarmed.
 
 ## Repository plan
