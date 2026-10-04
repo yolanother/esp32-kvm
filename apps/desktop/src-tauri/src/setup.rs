@@ -1,7 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Provides the Tauri setup boundary and versioned, crash-tolerant local guest profiles.
 // The serial-owning host actor supplies live status, authoritative retained
-// inventory, pairing controls, and physical key rule storage. Removal preserves
+// inventory, pairing controls, a session-only idle bump toggle, and physical key rule storage. Removal preserves
 // profiles until verified, while mapping drafts are validated before install.
 use esp32_kvm_input_core::{
     Destination, MappingPreset, MappingProfile, MappingRule, Side, SourceKey, preset_profile,
@@ -365,6 +365,12 @@ pub trait SetupBackend: Send + Sync {
     fn select_guest(&self, _bond_token: [u8; 16]) -> Result<(), String> {
         Err("Native guest-selection transport is unavailable.".into())
     }
+    /// Reports whether session-only guest pointer bumps were opted in.
+    fn keep_awake_enabled(&self) -> bool {
+        false
+    }
+    /// Changes the session-only pointer bump preference.
+    fn set_keep_awake(&self, _enabled: bool) {}
     /// Disarms capture and closes the verified stream before app exit.
     fn release_for_exit(&self) -> Result<(), String> {
         Err("Native release transport is unavailable.".into())
@@ -727,6 +733,16 @@ impl SetupService {
         self.backend.select_guest(bond_token)
     }
 
+    /// Returns the current session-only guest pointer bump preference.
+    pub(crate) fn keep_awake_enabled(&self) -> bool {
+        self.backend.keep_awake_enabled()
+    }
+
+    /// Enables or disables guest pointer bumps without affecting the active route.
+    pub(crate) fn set_keep_awake(&self, enabled: bool) {
+        self.backend.set_keep_awake(enabled);
+    }
+
     /// Disarms and stops the actor for an explicit tray quit.
     pub(crate) fn release_for_exit(&self) -> Result<(), String> {
         self.backend.release_for_exit()
@@ -934,6 +950,18 @@ pub fn dashboard_select_guest(
     bond_token: String,
 ) -> Result<(), String> {
     service.select_guest(&bond_token)
+}
+
+/// Reads the opt-in guest pointer bump preference for this desktop session.
+#[tauri::command]
+pub fn dashboard_keep_awake_enabled(service: State<'_, SetupService>) -> bool {
+    service.keep_awake_enabled()
+}
+
+/// Changes the opt-in guest pointer bump preference for this desktop session.
+#[tauri::command]
+pub fn dashboard_set_keep_awake(service: State<'_, SetupService>, enabled: bool) {
+    service.set_keep_awake(enabled);
 }
 
 #[cfg(test)]

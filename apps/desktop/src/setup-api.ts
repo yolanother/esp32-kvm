@@ -1,6 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Calls typed Tauri setup commands. A browser preview and missing native
 // command surface report unavailable status rather than simulating hardware.
+// Includes session-only control of guest idle pointer bumps.
 import { invoke } from "@tauri-apps/api/core";
 import type { GuestProfile, SetupSnapshot } from "./setup-model";
 
@@ -42,3 +43,7 @@ export function testGuestControls(bondToken: string): Promise<void> {
 export function returnToHost(): Promise<void> { return invoke("dashboard_return_local"); }
 /** Requests a saved, HID-ready guest; native code resolves its current slot. */
 export function selectGuest(bondToken: string): Promise<void> { return invoke("dashboard_select_guest", { bondToken }); }
+/** Reads the opt-in pointer bump setting for this desktop session. */
+export function keepAwakeEnabled(): Promise<boolean> { return invoke("dashboard_keep_awake_enabled"); }
+/** Changes whether the actor may send idle pointer bumps to its active guest. */
+export function setKeepAwake(enabled: boolean): Promise<void> { return invoke("dashboard_set_keep_awake", { enabled }); }

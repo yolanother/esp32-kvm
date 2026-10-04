@@ -1,6 +1,6 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Owns the desktop's one verified host actor, native capture worker, and
-// prepared host-edge routing. It maps STATUS into fail-closed Tauri setup facts;
+// prepared host-edge routing, and opt-in idle guest pointer bumps. It maps STATUS into fail-closed Tauri setup facts;
 // no UI thread opens serial or controls input timing.
 
 use crate::layout::{EdgeGate, LayoutRuntime};
@@ -14,13 +14,14 @@ use esp32_kvm_host_actor::{
 use esp32_kvm_input_core::Action;
 use esp32_kvm_input_core::MappingProfile;
 use esp32_kvm_platform_windows::{
-    CaptureEvent, CaptureGate, CaptureService, discover_monitors, foreground_fullscreen,
-    physical_cursor_position,
+    CaptureEvent, CaptureGate, CaptureService, PhysicalEvent, discover_monitors,
+    foreground_fullscreen, physical_cursor_position,
 };
 use esp32_kvm_usb_transport::{ProbeError, available_usb_ports, candidate_ports};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, SyncSender},
 };
 use std::thread;
@@ -31,12 +32,14 @@ const HOST_VERSION: &str = "0.1.0-m1";
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 const INVENTORY_TIMEOUT: Duration = Duration::from_millis(900);
 const FORGET_TIMEOUT: Duration = Duration::from_millis(2500);
+const KEEP_AWAKE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The native setup adapter: one worker owns and drives the confirmed serial stream.
 pub struct ActorBackend {
     snapshot: Arc<Mutex<BackendSnapshot>>,
     commands: SyncSender<Command>,
     capture: Arc<dyn CaptureControl + Send + Sync>,
+    keep_awake: Arc<AtomicBool>,
 }
 
 enum CommandKind {
@@ -111,6 +114,8 @@ impl ActorBackend {
             }
         };
         let worker_capture = Arc::clone(&capture);
+        let keep_awake = Arc::new(AtomicBool::new(false));
+        let worker_keep_awake = Arc::clone(&keep_awake);
         thread::Builder::new()
             .name("esp32-kvm-setup-actor".into())
             .spawn(move || {
@@ -121,6 +126,7 @@ impl ActorBackend {
                     capture_events,
                     layout,
                     capture_running,
+                    worker_keep_awake,
                 )
             })
             .expect("failed to start setup actor thread");
@@ -128,6 +134,7 @@ impl ActorBackend {
             snapshot,
             commands,
             capture,
+            keep_awake,
         }
     }
 
@@ -152,6 +159,13 @@ impl ActorBackend {
 }
 
 impl SetupBackend for ActorBackend {
+    fn keep_awake_enabled(&self) -> bool {
+        self.keep_awake.load(Ordering::Acquire)
+    }
+
+    fn set_keep_awake(&self, enabled: bool) {
+        self.keep_awake.store(enabled, Ordering::Release);
+    }
     fn snapshot(&self) -> Result<BackendSnapshot, String> {
         self.snapshot
             .lock()
@@ -374,6 +388,115 @@ fn ready_slot(snapshot: &ActorSnapshot, token: &[u8; 16]) -> Option<u8> {
         .map(|slot| slot.slot)
 }
 
+/// A continuous idle window belongs to one exact authenticated guest route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BumpTarget {
+    slot: u8,
+    bond_token: [u8; 16],
+    generation: u32,
+}
+
+/// Resolves an eligible route only while capture is healthy and physical input is released.
+fn bump_target(
+    snapshot: &ActorSnapshot,
+    capture_running: bool,
+    generation: u32,
+    capture_healthy: bool,
+    physical_all_up: bool,
+) -> Option<BumpTarget> {
+    if !capture_running || generation == 0 || !capture_healthy || !physical_all_up {
+        return None;
+    }
+    let HostState::Guest(slot) = snapshot.state else {
+        return None;
+    };
+    snapshot
+        .slots
+        .iter()
+        .find(|seen| seen.slot == slot && seen.ready && seen.subscribed)
+        .map(|seen| BumpTarget {
+            slot,
+            bond_token: seen.bond_token,
+            generation,
+        })
+}
+
+/// Requires one uninterrupted eligible interval for the same guest and generation.
+fn bump_due(
+    since: &mut Option<(BumpTarget, Instant)>,
+    target: Option<BumpTarget>,
+    now: Instant,
+) -> bool {
+    let Some(target) = target else {
+        *since = None;
+        return false;
+    };
+    match since {
+        Some((previous, started)) if *previous == target => {
+            if now.duration_since(*started) >= KEEP_AWAKE_INTERVAL {
+                *since = None;
+                true
+            } else {
+                false
+            }
+        }
+        _ => {
+            *since = Some((target, now));
+            false
+        }
+    }
+}
+
+/// Emits a cancelling X pair after thirty seconds on a confirmed guest route.
+fn keep_guest_awake(
+    actor: &mut HostActor<Box<dyn serialport::SerialPort>>,
+    capture: &dyn CaptureControl,
+    capture_running: bool,
+    enabled: bool,
+    since: &mut Option<(BumpTarget, Instant)>,
+    now_ms: u64,
+) {
+    let target = enabled
+        .then(|| {
+            bump_target(
+                &actor.setup_snapshot(),
+                capture_running,
+                capture.generation(),
+                capture.fault().is_none(),
+                capture.physical_all_up(),
+            )
+        })
+        .flatten();
+    let now = Instant::now();
+    if !bump_due(since, target, now) {
+        return;
+    }
+    let target = target.expect("an eligible target is required when a bump is due");
+    actor.on_capture(
+        CaptureEvent {
+            generation: target.generation,
+            event: PhysicalEvent::Motion(1, 0),
+        },
+        now_ms,
+    );
+    if bump_target(
+        &actor.setup_snapshot(),
+        capture_running,
+        capture.generation(),
+        capture.fault().is_none(),
+        capture.physical_all_up(),
+    ) == Some(target)
+    {
+        actor.on_capture(
+            CaptureEvent {
+                generation: target.generation,
+                event: PhysicalEvent::Motion(-1, 0),
+            },
+            now_ms,
+        );
+    }
+}
+
 fn worker(
     receiver: Receiver<Command>,
     shared: Arc<Mutex<BackendSnapshot>>,
@@ -381,12 +504,14 @@ fn worker(
     capture_events: Receiver<CaptureEvent>,
     layout: Arc<Mutex<LayoutRuntime>>,
     capture_running: bool,
+    keep_awake: Arc<AtomicBool>,
 ) {
     let started = Instant::now();
     let mut actor: Option<HostActor<Box<dyn serialport::SerialPort>>> = None;
     let mut mappings = BTreeMap::<[u8; 16], MappingProfile>::new();
     let mut next_scan = Instant::now();
     let mut next_topology_scan = Instant::now();
+    let mut keep_awake_since = None;
     loop {
         match receiver.recv_timeout(Duration::from_millis(20)) {
             Ok(command) => {
@@ -499,6 +624,14 @@ fn worker(
                 &mut next_topology_scan,
                 started.elapsed().as_millis() as u64,
             );
+            keep_guest_awake(
+                current,
+                capture.as_ref(),
+                capture_running,
+                keep_awake.load(Ordering::Acquire),
+                &mut keep_awake_since,
+                started.elapsed().as_millis() as u64,
+            );
             let now_ms = started.elapsed().as_millis() as u64;
             let wall_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -514,9 +647,11 @@ fn worker(
                     .unwrap_or_else(|error| error.into_inner())
                     .set_gate(EdgeGate::default());
                 actor = None;
+                keep_awake_since = None;
                 next_scan = Instant::now() + Duration::from_secs(1);
             }
         } else if Instant::now() >= next_scan {
+            keep_awake_since = None;
             next_scan = Instant::now() + Duration::from_secs(1);
             match available_usb_ports() {
                 Err(error) => publish(
@@ -724,6 +859,28 @@ mod tests {
         assert_eq!(ready_slot(&snapshot, &[0xcd; 16]), None);
         snapshot.slots[0].subscribed = false;
         assert_eq!(ready_slot(&snapshot, &[0xab; 16]), None);
+    }
+
+    #[test]
+    fn idle_bump_requires_a_healthy_captured_guest_with_no_physical_input() {
+        let mut snapshot = actor(HostState::Guest(1));
+        let target = bump_target(&snapshot, true, 9, true, true).unwrap();
+        assert_eq!(target.slot, 1);
+        assert_eq!(target.bond_token, [0xab; 16]);
+        assert_eq!(target.generation, 9);
+        assert_eq!(bump_target(&snapshot, true, 0, true, true), None);
+        assert_eq!(bump_target(&snapshot, true, 9, true, false), None);
+        assert_eq!(bump_target(&snapshot, true, 9, false, true), None);
+        assert_eq!(bump_target(&snapshot, false, 9, true, true), None);
+        snapshot.slots[0].subscribed = false;
+        assert_eq!(bump_target(&snapshot, true, 9, true, true), None);
+        snapshot.slots[0].subscribed = true;
+        snapshot.state = HostState::Local;
+        assert_eq!(bump_target(&snapshot, true, 9, true, true), None);
+        snapshot.state = HostState::Guest(1);
+        assert_ne!(bump_target(&snapshot, true, 10, true, true), Some(target));
+        snapshot.slots[0].bond_token = [0xcd; 16];
+        assert_ne!(bump_target(&snapshot, true, 9, true, true), Some(target));
     }
 
     #[test]

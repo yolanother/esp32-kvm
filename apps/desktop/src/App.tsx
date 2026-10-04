@@ -1,6 +1,7 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
 // Renders five desktop destinations, actor-confirmed route status, a switch
-// overlay, and setup. Native status owns device truth; the webview never routes input.
+// overlay, setup, and the opt-in guest idle bump control. Native status owns
+// device truth; the webview never routes input.
 import { useEffect, useRef, useState, type KeyboardEvent, type JSX } from "react";
 import { destinations, moveSelection, type Destination } from "./navigation";
 import { listen } from "@tauri-apps/api/event";
@@ -10,7 +11,7 @@ import ProfileEditor from "./ProfileEditor";
 import MappingPresets from "./MappingPresets";
 import LayoutEditor from "./LayoutEditor";
 import { mappingLabel } from "./mapping-presets";
-import { returnToHost, selectGuest, setupSnapshot, unavailableSnapshot } from "./setup-api";
+import { keepAwakeEnabled, returnToHost, selectGuest, setKeepAwake, setupSnapshot, unavailableSnapshot } from "./setup-api";
 import { type SetupSnapshot } from "./setup-model";
 import { describeRoute, overlayForTransition, systemChoices, type SwitchAnnouncement } from "./dashboard-model";
 
@@ -35,7 +36,7 @@ function PageIntro({ title, description, headingRef }: { title: string; descript
 }
 
 /** Systems destination with truthful local state and optional sample guest cards. */
-function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEdit, onSelect }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: () => void; onReturn: () => void; onEdit: (bondToken: string) => void; onSelect: (bondToken: string) => void }): JSX.Element {
+function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEdit, onSelect, keepAwake, keepAwakePending, onKeepAwake }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: () => void; onReturn: () => void; onEdit: (bondToken: string) => void; onSelect: (bondToken: string) => void; keepAwake: boolean; keepAwakePending: boolean; onKeepAwake: (enabled: boolean) => void }): JSX.Element {
   const route = describeRoute(snapshot);
   const choices = systemChoices(snapshot);
   return <>
@@ -47,6 +48,7 @@ function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEd
       {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : choices.length ? choices.map((choice) => { const guest = snapshot.profiles.find((item) => item.bondToken === choice.bondToken)!; return <article className={`card${choice.state === "Controlling" ? " card--local" : ""}`} key={choice.bondToken}><div className="card-heading"><h2>{choice.name}</h2><StatusPill tone={choice.state === "Offline" || choice.state === "Connected" ? "warning" : "accent"}>{choice.state}</StatusPill></div><p>{guest.os} · {mappingLabel(guest.profile)}</p><div className="card-tail"><button type="button" onClick={() => onEdit(choice.bondToken)}>Edit profile</button><button type="button" disabled={!choice.selectEnabled} onClick={() => onSelect(choice.bondToken)}>Select guest</button></div></article>; }) : <article className="card card--empty"><h2>No guest profiles yet</h2><p>Connect the device and pair a guest to add a saved profile.</p><StatusPill tone="warning">No saved guest</StatusPill></article>}
     </div>
     {preview && <PreviewNotice />}
+    <div className="card"><label className="preview-toggle"><input type="checkbox" checked={keepAwake} disabled={keepAwakePending} onChange={(event) => onKeepAwake(event.target.checked)} />Keep guest awake with a mouse bump</label><p className="small muted">While a guest is controlling, send a cancelling pair of tiny pointer moves every 30 seconds when all physical keys and buttons are released. This setting resets when the app exits.</p></div>
     <div className="notice"><strong>Stay in control</strong><span>Select a ready guest after releasing every key and mouse button. The device must confirm the route before input moves.</span></div>
   </>;
 }
@@ -78,6 +80,8 @@ export default function App(): JSX.Element {
   const [editingToken, setEditingToken] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<SetupSnapshot>(unavailableSnapshot());
   const [snapshotLoaded, setSnapshotLoaded] = useState(false);
+  const [keepAwake, setKeepAwakeState] = useState(false);
+  const [keepAwakePending, setKeepAwakePending] = useState(false);
   const [announcement, setAnnouncement] = useState<SwitchAnnouncement | null>(null);
   const lastSnapshot = useRef<SetupSnapshot | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -88,6 +92,12 @@ export default function App(): JSX.Element {
     if (focusHeading.current) headingRef.current?.focus();
     focusHeading.current = false;
   }, [page]);
+
+  useEffect(() => {
+    let active = true;
+    void keepAwakeEnabled().then((enabled) => { if (active) setKeepAwakeState(enabled); }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -153,6 +163,12 @@ export default function App(): JSX.Element {
   function requestGuest(bondToken: string): void {
     void selectGuest(bondToken).catch((error) => setAnnouncement({ title: "Control request failed", message: `Guest selection failed: ${String(error)}`, persistent: true }));
   }
+  function changeKeepAwake(enabled: boolean): void {
+    setKeepAwakePending(true);
+    void setKeepAwake(enabled).then(() => setKeepAwakeState(enabled)).catch((error) => {
+      setAnnouncement({ title: "Mouse bump unavailable", message: String(error), persistent: true });
+    }).finally(() => setKeepAwakePending(false));
+  }
   return <>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <div className="app-shell">
@@ -164,7 +180,7 @@ export default function App(): JSX.Element {
       <div className="workspace">
         <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "No verified device"}</StatusPill></div></header>
         <div className="connection-status" role="status" aria-live="polite">{route.title}. {route.detail}</div>
-        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} onSelect={requestGuest} />}{page === "layout" && <LayoutEditor profiles={snapshot.profiles} profilesReady={snapshotLoaded} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
+        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} onSelect={requestGuest} keepAwake={keepAwake} keepAwakePending={keepAwakePending} onKeepAwake={changeKeepAwake} />}{page === "layout" && <LayoutEditor profiles={snapshot.profiles} profilesReady={snapshotLoaded} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
         <footer className="footer"><span>{snapshot.route.kind === "guest" ? "Guest route confirmed" : "Local control"} · Return with <KeyChord keys={["Ctrl", "Alt", "F10"]} /></span><span>Emergency: hold both Ctrl keys for one second</span></footer>
       </div>
     </div>
