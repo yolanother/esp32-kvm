@@ -6,6 +6,7 @@
 mod actor_backend;
 mod layout;
 mod setup;
+mod switch_shortcut;
 mod tray;
 
 use std::sync::{Arc, Mutex};

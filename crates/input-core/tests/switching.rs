@@ -77,6 +77,44 @@ fn direct_shortcuts_are_physical_and_editable_with_conflicts_rejected() {
 }
 
 #[test]
+fn replacing_cycle_shortcut_preserves_return_and_other_switches() {
+    let configured = HotkeyConfig::defaults()
+        .with_next(key(0x42, false), Modifiers::CTRL.union(Modifiers::ALT))
+        .unwrap(); // physical F8
+    let mut matcher = HotkeyMatcher::new(configured);
+    matcher.on_key(key(0x1d, false), true, false, 0);
+    matcher.on_key(key(0x38, false), true, false, 0);
+    assert_eq!(matcher.on_key(key(0x58, false), true, false, 1).action, None);
+    assert_eq!(
+        matcher.on_key(key(0x42, false), true, false, 2).action,
+        Some(Action::Next)
+    );
+    assert_eq!(
+        matcher.on_key(key(0x57, false), true, false, 3).action,
+        Some(Action::Previous)
+    );
+    assert_eq!(
+        matcher.on_key(key(0x44, false), true, false, 4).action,
+        Some(Action::Local)
+    );
+    assert_eq!(
+        matcher.on_key(key(0x02, false), true, false, 5).action,
+        Some(Action::Direct(1))
+    );
+    assert_eq!(
+        HotkeyConfig::defaults().with_next(
+            key(0x44, false),
+            Modifiers::CTRL.union(Modifiers::ALT)
+        ),
+        Err(ShortcutError::Conflict)
+    );
+    assert_eq!(
+        HotkeyConfig::defaults().with_next(key(0x1d, false), Modifiers::CTRL),
+        Err(ShortcutError::ModifierTrigger)
+    );
+}
+
+#[test]
 fn both_control_keys_hold_for_one_second_to_preempt() {
     let mut matcher = HotkeyMatcher::new(HotkeyConfig::defaults());
     matcher.on_key(key(0x1d, false), true, false, 20);
