@@ -84,7 +84,10 @@ fn replacing_cycle_shortcut_preserves_return_and_other_switches() {
     let mut matcher = HotkeyMatcher::new(configured);
     matcher.on_key(key(0x1d, false), true, false, 0);
     matcher.on_key(key(0x38, false), true, false, 0);
-    assert_eq!(matcher.on_key(key(0x58, false), true, false, 1).action, None);
+    assert_eq!(
+        matcher.on_key(key(0x58, false), true, false, 1).action,
+        None
+    );
     assert_eq!(
         matcher.on_key(key(0x42, false), true, false, 2).action,
         Some(Action::Next)
@@ -102,10 +105,7 @@ fn replacing_cycle_shortcut_preserves_return_and_other_switches() {
         Some(Action::Direct(1))
     );
     assert_eq!(
-        HotkeyConfig::defaults().with_next(
-            key(0x44, false),
-            Modifiers::CTRL.union(Modifiers::ALT)
-        ),
+        HotkeyConfig::defaults().with_next(key(0x44, false), Modifiers::CTRL.union(Modifiers::ALT)),
         Err(ShortcutError::Conflict)
     );
     assert_eq!(

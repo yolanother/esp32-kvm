@@ -19,8 +19,8 @@ fn main() {
             app.manage(Arc::clone(&layout));
             let directory = app.path().app_config_dir()?;
             app.manage(setup::SetupService::new(
-                directory,
-                Box::new(actor_backend::ActorBackend::start(layout)),
+                directory.clone(),
+                Box::new(actor_backend::ActorBackend::start(layout, directory)),
             ));
             tray::install(app)?;
             Ok(())
@@ -45,6 +45,8 @@ fn main() {
             setup::dashboard_select_guest,
             setup::dashboard_keep_awake_enabled,
             setup::dashboard_set_keep_awake,
+            setup::shortcut_get_cycle,
+            setup::shortcut_set_cycle,
             layout::layout_validate_draft,
             layout::layout_discover,
             layout::layout_apply,

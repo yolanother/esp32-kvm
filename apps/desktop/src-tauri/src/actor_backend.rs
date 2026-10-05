@@ -1,12 +1,14 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Owns the desktop's one verified host actor, native capture worker, and
-// prepared host-edge routing, and opt-in idle guest pointer bumps. It maps STATUS into fail-closed Tauri setup facts;
+// prepared host-edge routing, editable physical shortcuts, and opt-in idle
+// guest pointer bumps. It maps STATUS into fail-closed Tauri setup facts;
 // no UI thread opens serial or controls input timing.
 
 use crate::layout::{EdgeGate, LayoutRuntime};
 use crate::setup::{
     BackendSnapshot, DeviceState, PairingState, RouteState, SetupBackend, token_bytes,
 };
+use crate::switch_shortcut::{SwitchBinding, SwitchShortcutStore};
 use esp32_kvm_host_actor::{
     CaptureControl, ConnectError, ForgetError, HostActor, HostState, InventoryError, PairingError,
     PairingStatus, SetOneKeyMapper, SetupSnapshot as ActorSnapshot, connect_system,
@@ -19,6 +21,7 @@ use esp32_kvm_platform_windows::{
 };
 use esp32_kvm_usb_transport::{ProbeError, available_usb_ports, candidate_ports};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -40,6 +43,7 @@ pub struct ActorBackend {
     commands: SyncSender<Command>,
     capture: Arc<dyn CaptureControl + Send + Sync>,
     keep_awake: Arc<AtomicBool>,
+    shortcut_store: Arc<Mutex<Result<SwitchShortcutStore, String>>>,
 }
 
 enum CommandKind {
@@ -60,6 +64,9 @@ enum CommandKind {
     SetMapping {
         bond_token: [u8; 16],
         profile: MappingProfile,
+    },
+    SetSwitchShortcut {
+        binding: SwitchBinding,
     },
     Quit,
 }
@@ -94,7 +101,7 @@ impl CaptureControl for DisabledCapture {
 
 impl ActorBackend {
     /// Starts a disarmed worker; its first verified session is opened on that thread.
-    pub fn start(layout: Arc<Mutex<LayoutRuntime>>) -> Self {
+    pub fn start(layout: Arc<Mutex<LayoutRuntime>>, directory: PathBuf) -> Self {
         let snapshot = Arc::new(Mutex::new(empty_snapshot(DeviceState::Missing)));
         let (commands, receiver) = mpsc::sync_channel(8);
         let worker_snapshot = Arc::clone(&snapshot);
@@ -114,6 +121,17 @@ impl ActorBackend {
             }
         };
         let worker_capture = Arc::clone(&capture);
+        let mut stored_shortcut = SwitchShortcutStore::load(directory);
+        if capture_running
+            && let Ok(store) = stored_shortcut.as_ref()
+            && let Ok(config) = store.current().validate()
+            && !capture.set_hotkeys(config)
+        {
+            stored_shortcut =
+                Err("Native capture could not install the saved cycle shortcut.".into());
+        }
+        let shortcut_store = Arc::new(Mutex::new(stored_shortcut));
+        let worker_shortcut_store = Arc::clone(&shortcut_store);
         let keep_awake = Arc::new(AtomicBool::new(false));
         let worker_keep_awake = Arc::clone(&keep_awake);
         thread::Builder::new()
@@ -127,6 +145,7 @@ impl ActorBackend {
                     layout,
                     capture_running,
                     worker_keep_awake,
+                    worker_shortcut_store,
                 )
             })
             .expect("failed to start setup actor thread");
@@ -135,6 +154,7 @@ impl ActorBackend {
             commands,
             capture,
             keep_awake,
+            shortcut_store,
         }
     }
 
@@ -142,6 +162,7 @@ impl ActorBackend {
         let timeout = match &kind {
             CommandKind::RefreshInventory => INVENTORY_TIMEOUT,
             CommandKind::Forget { .. } => FORGET_TIMEOUT,
+            CommandKind::SetSwitchShortcut { .. } => Duration::from_secs(2),
             _ => COMMAND_TIMEOUT,
         };
         let (reply, result) = mpsc::sync_channel(1);
@@ -159,6 +180,19 @@ impl ActorBackend {
 }
 
 impl SetupBackend for ActorBackend {
+    fn cycle_shortcut(&self) -> Result<SwitchBinding, String> {
+        self.shortcut_store
+            .lock()
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .map(|store| store.current().clone())
+            .map_err(Clone::clone)
+    }
+
+    fn set_cycle_shortcut(&self, binding: SwitchBinding) -> Result<(), String> {
+        self.request(CommandKind::SetSwitchShortcut { binding })
+    }
+
     fn keep_awake_enabled(&self) -> bool {
         self.keep_awake.load(Ordering::Acquire)
     }
@@ -505,6 +539,7 @@ fn worker(
     layout: Arc<Mutex<LayoutRuntime>>,
     capture_running: bool,
     keep_awake: Arc<AtomicBool>,
+    shortcut_store: Arc<Mutex<Result<SwitchShortcutStore, String>>>,
 ) {
     let started = Instant::now();
     let mut actor: Option<HostActor<Box<dyn serialport::SerialPort>>> = None;
@@ -552,6 +587,34 @@ fn worker(
                     applied.map(|()| {
                         mappings.insert(bond_token, profile);
                     })
+                } else if let CommandKind::SetSwitchShortcut { binding } = command.kind {
+                    let config = binding.validate();
+                    if actor
+                        .as_ref()
+                        .is_some_and(|current| current.state() != HostState::Local)
+                        || capture.generation() != 0
+                    {
+                        Err("Return to local control before changing the cycle shortcut.".into())
+                    } else if !capture_running || capture.fault().is_some() {
+                        Err("Native input capture is unavailable.".into())
+                    } else if !capture.physical_all_up() {
+                        Err("Release every physical key and mouse button, then retry.".into())
+                    } else {
+                        config.and_then(|config| {
+                            let mut guard =
+                                shortcut_store.lock().map_err(|error| error.to_string())?;
+                            let store = guard.as_mut().map_err(|error| error.clone())?;
+                            let previous = store.current().validate()?;
+                            if !capture.set_hotkeys(config) {
+                                return Err("Native capture rejected the cycle shortcut.".into());
+                            }
+                            if let Err(error) = store.save(binding) {
+                                let _ = capture.set_hotkeys(previous);
+                                return Err(error);
+                            }
+                            Ok(())
+                        })
+                    }
                 } else if let Some(current) = actor.as_mut() {
                     let now_ms = started.elapsed().as_millis() as u64;
                     match command.kind {
@@ -590,6 +653,7 @@ fn worker(
                             current.forget_bond(token, now_ms).map_err(forget_error)
                         }
                         CommandKind::SetMapping { .. } => unreachable!(),
+                        CommandKind::SetSwitchShortcut { .. } => unreachable!(),
                         CommandKind::Quit => unreachable!(),
                     }
                 } else if matches!(command.kind, CommandKind::Local) {

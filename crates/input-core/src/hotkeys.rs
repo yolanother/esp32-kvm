@@ -133,6 +133,18 @@ impl HotkeyConfig {
         .collect();
         Self { shortcuts }
     }
+
+    /// Replaces the cycle-forward binding while preserving every other action.
+    pub fn with_next(mut self, trigger: Key, modifiers: Modifiers) -> Result<Self, ShortcutError> {
+        self.shortcuts
+            .retain(|shortcut| shortcut.action != Action::Next);
+        self.shortcuts.push(Shortcut {
+            trigger,
+            modifiers,
+            action: Action::Next,
+        });
+        Self::try_new(self.shortcuts)
+    }
 }
 
 /// Result of classifying one physical key event before guest mapping.

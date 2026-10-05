@@ -31,8 +31,9 @@ R8 Optional guest helper enables accurate cursor placement and bidirectional edg
 
 Relative BLE HID does not provide live guest cursor coordinates or monitor topology. Do not imply that accumulated deltas provide reliable seamless return. Absolute pointer HID is a compatibility experiment, not a dependency or shipped promise. A guest helper is optional; losing it immediately degrades to Standard BLE.
 
-## Proposed defaults (editable)
-Next system: Ctrl+Alt+F12. Previous: Ctrl+Alt+F11. Host: Ctrl+Alt+F10. Guests 1–3: Ctrl+Alt+1/2/3. Emergency local release: hold both Ctrl keys for 1 second; device BOOT runtime long press is a second path. Hotkeys evaluated on physical keys before guest mapping.
+## Physical switch shortcuts
+The Windows Shortcuts page edits the cycle-to-next action. It defaults to Ctrl+Alt+F12 and accepts one physical letter, digit, or F1–F12 trigger with at least one of Ctrl, Alt, Shift, or Win. The host saves the choice across restarts and installs it only while local and all physical inputs are released. A conflicting or unavailable capture setting is rejected without replacing the last good choice.
+Previous: Ctrl+Alt+F11. Host: Ctrl+Alt+F10. Guests 1–3: Ctrl+Alt+1/2/3. These direct and return combinations remain reserved. Emergency local release: hold both Ctrl keys for 1 second; device BOOT runtime long press is a second path. Hotkeys are evaluated on physical keys before guest mapping.
 Only connected/ready guests participate in cycling, plus Host; explicit selection of offline guest offers reconnect and keeps local control. No broadcast-input mode.
 Edge crossing is opt-in per edge; default dwell 200 ms, 12 px corner exclusion, 500 ms re-arm cooldown, and disabled while buttons are held or capture is paused. Edges mean exposed physical-pixel segments of the complete Windows desktop, not internal monitor seams.
 Default mapping is unchanged physical keys. Presets are previewed and explicitly applied. Local host input is not remapped.
@@ -49,4 +50,3 @@ A Windows-host user pairs a macOS guest once, selects it via shortcut, types and
 
 ## Success targets — measured, not guarantees
 USB acceptance p95 ≤ 5 ms; active-guest input p95 ≤ 30 ms; already-connected target switch p95 ≤ 100 ms on the declared test matrix. Reconnection has a visible state with a 10-second UI timeout, not an instant-switch guarantee. Zero wrong-target events and zero stuck keys across 1,000 switch cycles.
-

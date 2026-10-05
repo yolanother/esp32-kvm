@@ -1,8 +1,10 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Provides the Tauri setup boundary and versioned, crash-tolerant local guest profiles.
 // The serial-owning host actor supplies live status, authoritative retained
-// inventory, pairing controls, a session-only idle bump toggle, and physical key rule storage. Removal preserves
+// inventory, pairing controls, host cycle-shortcut and idle-bump settings, and
+// physical key rule storage. Removal preserves
 // profiles until verified, while mapping drafts are validated before install.
+use crate::switch_shortcut::SwitchBinding;
 use esp32_kvm_input_core::{
     Destination, MappingPreset, MappingProfile, MappingRule, Side, SourceKey, preset_profile,
 };
@@ -339,6 +341,14 @@ impl BackendSnapshot {
 
 /// Device facts and controls provided by the single serial-owning host actor.
 pub trait SetupBackend: Send + Sync {
+    /// Reads the installed host cycle shortcut from its durable native setting.
+    fn cycle_shortcut(&self) -> Result<SwitchBinding, String> {
+        Err("Native cycle shortcut settings are unavailable.".into())
+    }
+    /// Validates, installs, and persists a new cycle shortcut while local.
+    fn set_cycle_shortcut(&self, _binding: SwitchBinding) -> Result<(), String> {
+        Err("Native cycle shortcut settings are unavailable.".into())
+    }
     /// Returns a current snapshot without opening a second serial stream.
     fn snapshot(&self) -> Result<BackendSnapshot, String>;
     /// Caches a validated per-bond mapping in the single serial-owning worker.
@@ -743,6 +753,16 @@ impl SetupService {
         self.backend.set_keep_awake(enabled);
     }
 
+    /// Reads the active physical cycle shortcut shown on the Shortcuts page.
+    pub(crate) fn cycle_shortcut(&self) -> Result<SwitchBinding, String> {
+        self.backend.cycle_shortcut()
+    }
+
+    /// Installs and saves one validated physical cycle shortcut.
+    pub(crate) fn set_cycle_shortcut(&self, binding: SwitchBinding) -> Result<(), String> {
+        self.backend.set_cycle_shortcut(binding)
+    }
+
     /// Disarms and stops the actor for an explicit tray quit.
     pub(crate) fn release_for_exit(&self) -> Result<(), String> {
         self.backend.release_for_exit()
@@ -962,6 +982,21 @@ pub fn dashboard_keep_awake_enabled(service: State<'_, SetupService>) -> bool {
 #[tauri::command]
 pub fn dashboard_set_keep_awake(service: State<'_, SetupService>, enabled: bool) {
     service.set_keep_awake(enabled);
+}
+
+/// Returns the installed physical cycle shortcut.
+#[tauri::command]
+pub fn shortcut_get_cycle(service: State<'_, SetupService>) -> Result<SwitchBinding, String> {
+    service.cycle_shortcut()
+}
+
+/// Validates, installs, and persists a new cycle shortcut while locally disarmed.
+#[tauri::command]
+pub fn shortcut_set_cycle(
+    service: State<'_, SetupService>,
+    binding: SwitchBinding,
+) -> Result<(), String> {
+    service.set_cycle_shortcut(binding)
 }
 
 #[cfg(test)]

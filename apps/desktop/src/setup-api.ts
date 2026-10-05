@@ -1,9 +1,10 @@
 // Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 // Calls typed Tauri setup commands. A browser preview and missing native
 // command surface report unavailable status rather than simulating hardware.
-// Includes session-only control of guest idle pointer bumps.
+// Includes host cycle-shortcut settings and session-only guest idle bumps.
 import { invoke } from "@tauri-apps/api/core";
 import type { GuestProfile, SetupSnapshot } from "./setup-model";
+import type { SwitchBinding } from "./switch-shortcut-model";
 
 /** Return a truthful disconnected snapshot when the native shell is absent. */
 export function unavailableSnapshot(reason = "Native device service is unavailable."): SetupSnapshot {
@@ -47,3 +48,7 @@ export function selectGuest(bondToken: string): Promise<void> { return invoke("d
 export function keepAwakeEnabled(): Promise<boolean> { return invoke("dashboard_keep_awake_enabled"); }
 /** Changes whether the actor may send idle pointer bumps to its active guest. */
 export function setKeepAwake(enabled: boolean): Promise<void> { return invoke("dashboard_set_keep_awake", { enabled }); }
+/** Reads the cycle shortcut currently installed by the native capture worker. */
+export function getCycleShortcut(): Promise<SwitchBinding> { return invoke("shortcut_get_cycle"); }
+/** Installs and persists one validated physical cycle shortcut while local. */
+export function setCycleShortcut(binding: SwitchBinding): Promise<void> { return invoke("shortcut_set_cycle", { binding }); }

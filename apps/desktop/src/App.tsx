@@ -1,6 +1,6 @@
 // Copyright (c) ESP32 KVM contributors. Use of this file is governed by the root LICENSE.
 // Renders five desktop destinations, actor-confirmed route status, a switch
-// overlay, setup, and the opt-in guest idle bump control. Native status owns
+// overlay, setup, editable cycle shortcut, and opt-in guest idle bump. Native status owns
 // device truth; the webview never routes input.
 import { useEffect, useRef, useState, type KeyboardEvent, type JSX } from "react";
 import { destinations, moveSelection, type Destination } from "./navigation";
@@ -11,7 +11,8 @@ import ProfileEditor from "./ProfileEditor";
 import MappingPresets from "./MappingPresets";
 import LayoutEditor from "./LayoutEditor";
 import { mappingLabel } from "./mapping-presets";
-import { keepAwakeEnabled, returnToHost, selectGuest, setKeepAwake, setupSnapshot, unavailableSnapshot } from "./setup-api";
+import { getCycleShortcut, keepAwakeEnabled, returnToHost, selectGuest, setCycleShortcut, setKeepAwake, setupSnapshot, unavailableSnapshot } from "./setup-api";
+import { defaultSwitchBinding, formatSwitchBinding, switchTriggerOptions, validateSwitchBinding, type SwitchBinding } from "./switch-shortcut-model";
 import { type SetupSnapshot } from "./setup-model";
 import { describeRoute, overlayForTransition, systemChoices, type SwitchAnnouncement } from "./dashboard-model";
 
@@ -53,10 +54,41 @@ function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEd
   </>;
 }
 
-/** Shortcuts destination describes the installed physical return controls. */
-function ShortcutsPage({ headingRef }: { headingRef: React.RefObject<HTMLHeadingElement | null> }): JSX.Element {
+/** Edits the native cycle shortcut while keeping the physical return controls visible. */
+function ShortcutsPage({ headingRef, preview, routeIsLocal }: { headingRef: React.RefObject<HTMLHeadingElement | null>; preview: boolean; routeIsLocal: boolean }): JSX.Element {
+  const [saved, setSaved] = useState<SwitchBinding | null>(preview ? defaultSwitchBinding : null);
+  const [draft, setDraft] = useState<SwitchBinding>(defaultSwitchBinding);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (preview) { setSaved(defaultSwitchBinding); setDraft(defaultSwitchBinding); return; }
+    let active = true;
+    void getCycleShortcut().then((binding) => {
+      if (active) { setSaved(binding); setDraft(binding); setError(""); }
+    }).catch((failure) => { if (active) setError(String(failure)); });
+    return () => { active = false; };
+  }, [preview]);
+  function changeModifier(bit: number): void {
+    setDraft((current) => ({ ...current, modifiers: current.modifiers ^ bit }));
+  }
+  function save(): void {
+    const invalid = validateSwitchBinding(draft);
+    if (invalid) { setError(invalid); return; }
+    setBusy(true); setError("");
+    void setCycleShortcut(draft).then(() => setSaved(draft)).catch((failure) => setError(String(failure))).finally(() => setBusy(false));
+  }
+  const validation = validateSwitchBinding(draft);
   return <>
-    <PageIntro title="Shortcuts" description="Use a physical keyboard shortcut to return input to this computer." headingRef={headingRef} />
+    <PageIntro title="Shortcuts" description="Choose a physical shortcut to cycle between ready devices and this computer." headingRef={headingRef} />
+    <div className="card"><h2>Switch to next device</h2><p>Current: {saved ? <KeyChord keys={formatSwitchBinding(saved).split("+")} /> : "Waiting for native shortcut settings"}</p><p className="small muted">The cycle includes ready guests and this computer. The default is Ctrl+Alt+F12. Changes are saved on this Windows host.</p>
+      <fieldset><legend>Required modifiers</legend>{([[1, "Ctrl"], [2, "Alt"], [4, "Shift"], [8, "Win"]] as const).map(([bit, label]) => <label className="preview-toggle" key={bit}><input type="checkbox" checked={(draft.modifiers & bit) !== 0} onChange={() => changeModifier(bit)} />{label}</label>)}</fieldset>
+      <label>Physical trigger key<select value={draft.trigger} onChange={(event) => setDraft((current) => ({ ...current, trigger: event.target.value }))}>{switchTriggerOptions.map((option) => <option key={option.code} value={option.code}>{option.label}</option>)}</select></label>
+      <p className="small muted">Proposed: {formatSwitchBinding(draft)}. Choose at least one modifier; return and direct-select combinations stay reserved.</p>
+      {validation && <p className="notice notice--warning" role="alert">{validation}</p>}
+      {error && <p className="notice notice--warning" role="alert">{error}</p>}
+      {!routeIsLocal && <p className="small muted">Return to this computer before saving a shortcut.</p>}
+      <div className="setup-actions"><button type="button" onClick={() => setDraft(defaultSwitchBinding)}>Use default in editor</button><button type="button" onClick={save} disabled={preview || busy || !routeIsLocal || !!validation || !saved}>Save switch shortcut</button></div>
+    </div>
     <div className="card table-card"><h2>Return to this computer</h2><div className="table-scroll"><table><thead><tr><th scope="col">Action</th><th scope="col">Physical key combination</th></tr></thead><tbody><tr><td>Return to Windows</td><td><KeyChord keys={["Ctrl", "Alt", "F10"]} /></td></tr></tbody></table></div></div>
     <div className="card emergency-card"><h2>Emergency return</h2><p>Hold both physical Ctrl keys for one second. The capture worker releases Windows input immediately, then asks the device to return to local control.</p></div>
   </>;
@@ -180,7 +212,7 @@ export default function App(): JSX.Element {
       <div className="workspace">
         <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "No verified device"}</StatusPill></div></header>
         <div className="connection-status" role="status" aria-live="polite">{route.title}. {route.detail}</div>
-        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} onSelect={requestGuest} keepAwake={keepAwake} keepAwakePending={keepAwakePending} onKeepAwake={changeKeepAwake} />}{page === "layout" && <LayoutEditor profiles={snapshot.profiles} profilesReady={snapshotLoaded} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
+        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} onSelect={requestGuest} keepAwake={keepAwake} keepAwakePending={keepAwakePending} onKeepAwake={changeKeepAwake} />}{page === "layout" && <LayoutEditor profiles={snapshot.profiles} profilesReady={snapshotLoaded} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} preview={preview} routeIsLocal={snapshot.route.kind === "local"} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
         <footer className="footer"><span>{snapshot.route.kind === "guest" ? "Guest route confirmed" : "Local control"} · Return with <KeyChord keys={["Ctrl", "Alt", "F10"]} /></span><span>Emergency: hold both Ctrl keys for one second</span></footer>
       </div>
     </div>

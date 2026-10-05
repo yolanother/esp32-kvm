@@ -20,8 +20,8 @@ pub use update::{
 };
 
 use esp32_kvm_input_core::{
-    Action, Command, MappingEngine, MappingError, MappingProfile, RequestActor, Side, SourceKey,
-    State,
+    Action, Command, HotkeyConfig, MappingEngine, MappingError, MappingProfile, RequestActor, Side,
+    SourceKey, State,
 };
 #[cfg(windows)]
 use esp32_kvm_platform_windows::CaptureService;
@@ -93,6 +93,10 @@ pub trait CaptureControl {
     fn physical_all_up(&self) -> bool;
     /// Renews the independent routing actor watchdog while this actor advances.
     fn actor_heartbeat(&self) {}
+    /// Installs a validated physical shortcut set on a native capture worker.
+    fn set_hotkeys(&self, _config: HotkeyConfig) -> bool {
+        false
+    }
 }
 
 impl CaptureControl for CaptureGate {
@@ -133,6 +137,9 @@ impl CaptureControl for CaptureService {
     fn actor_heartbeat(&self) {
         CaptureService::actor_heartbeat(self);
     }
+    fn set_hotkeys(&self, config: HotkeyConfig) -> bool {
+        CaptureService::set_hotkeys(self, config)
+    }
 }
 
 impl<T: CaptureControl + ?Sized> CaptureControl for Arc<T> {
@@ -153,6 +160,9 @@ impl<T: CaptureControl + ?Sized> CaptureControl for Arc<T> {
     }
     fn actor_heartbeat(&self) {
         (**self).actor_heartbeat();
+    }
+    fn set_hotkeys(&self, config: HotkeyConfig) -> bool {
+        (**self).set_hotkeys(config)
     }
 }
 
