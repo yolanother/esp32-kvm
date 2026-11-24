@@ -25,13 +25,14 @@ function deviceMessage(snapshot: SetupSnapshot): string {
 }
 
 /** Setup wizard state is local until the native backend confirms each action. */
-export default function SetupWizard({ preview, onClose }: { preview: boolean; onClose: () => void }): JSX.Element {
-  const [step, setStep] = useState<"connect" | "pair" | "test">("connect");
+/** `adoptToken` opens directly at guest naming for a guest the board already reports. */
+export default function SetupWizard({ preview, adoptToken = null, onClose }: { preview: boolean; adoptToken?: string | null; onClose: () => void }): JSX.Element {
+  const [step, setStep] = useState<"connect" | "pair" | "test">(adoptToken ? "pair" : "connect");
   const [snapshot, setSnapshot] = useState<SetupSnapshot>(preview ? previewDevice : unavailableSnapshot());
   const [now, setNow] = useState(Date.now());
   const [knownTokens, setKnownTokens] = useState<string[]>([]);
   const [pairingAttempted, setPairingAttempted] = useState(false);
-  const [bondToken, setBondToken] = useState<string | null>(null);
+  const [bondToken, setBondToken] = useState<string | null>(adoptToken);
   const [name, setName] = useState("");
   const [os, setOs] = useState<GuestProfile["os"]>("macos");
   const [profile, setProfile] = useState<GuestProfile["profile"]>("unchanged");

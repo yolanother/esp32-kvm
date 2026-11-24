@@ -43,7 +43,7 @@ const uint8_t hid_report_map[] = {
 
 const size_t hid_report_map_len = sizeof(hid_report_map);
 
-static bool ready(const hid_channel_t *channel)
+bool hid_channel_ready(const hid_channel_t *channel)
 {
     if (!channel->connected || !channel->encrypted || channel->needs_disconnect) return false;
     if (channel->protocol_mode == 0)
@@ -73,8 +73,10 @@ static bool send_report(hid_channel_t *channel, uint8_t id, const uint8_t *data,
 static bool all_up(hid_channel_t *channel)
 {
     static const uint8_t keyboard[HID_KEYBOARD_REPORT_LEN] = {0};
+#ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
     static const uint8_t mouse[HID_MOUSE_REPORT_LEN] = {0};
     static const uint8_t consumer[HID_CONSUMER_REPORT_LEN] = {0};
+#endif
     bool boot = channel->protocol_mode == 0;
     bool keyboard_ok = send_report(channel, boot ? HID_REPORT_BOOT_KEYBOARD : HID_REPORT_KEYBOARD,
                                    keyboard, sizeof(keyboard));
@@ -132,7 +134,7 @@ void hid_channel_subscribed(hid_channel_t *channel, uint8_t report_id, bool subs
 
 bool hid_channel_arm(hid_channel_t *channel)
 {
-    if (!ready(channel) || channel->armed) return false;
+    if (!hid_channel_ready(channel) || channel->armed) return false;
     if (!all_up(channel)) return false;
     channel->armed = true;
     return true;
@@ -141,7 +143,7 @@ bool hid_channel_arm(hid_channel_t *channel)
 bool hid_channel_release(hid_channel_t *channel)
 {
     channel->armed = false;
-    if (!ready(channel)) {
+    if (!hid_channel_ready(channel)) {
         channel->needs_disconnect = true;
         return false;
     }
@@ -154,7 +156,7 @@ bool hid_channel_release(hid_channel_t *channel)
 
 bool hid_channel_keyboard(hid_channel_t *channel, const uint8_t keys[HID_KEYBOARD_REPORT_LEN])
 {
-    if (!channel->armed || !ready(channel) || keys[1] != 0) return false;
+    if (!channel->armed || !hid_channel_ready(channel) || keys[1] != 0) return false;
     if (!send_report(channel, channel->protocol_mode == 0 ? HID_REPORT_BOOT_KEYBOARD : HID_REPORT_KEYBOARD,
                      keys, HID_KEYBOARD_REPORT_LEN)) {
         channel->needs_disconnect = true;
@@ -167,7 +169,13 @@ bool hid_channel_keyboard(hid_channel_t *channel, const uint8_t keys[HID_KEYBOAR
 bool hid_channel_mouse(hid_channel_t *channel, uint8_t buttons, int16_t dx, int16_t dy,
                        int8_t wheel, int8_t pan)
 {
-    if (!channel->armed || !ready(channel) || (buttons & 0xe0u) != 0) return false;
+    if (!channel->armed || !hid_channel_ready(channel) || (buttons & 0xe0u) != 0) return false;
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    /* The host always sends a composite all-up baseline after ARM. There is
+     * no mouse characteristic in this profile, so an empty baseline is a
+     * successful no-op; actual mouse input remains unsupported. */
+    return buttons == 0 && dx == 0 && dy == 0 && wheel == 0 && pan == 0;
+#else
     uint8_t report[HID_MOUSE_REPORT_LEN] = {
         buttons, (uint8_t)dx, (uint8_t)((uint16_t)dx >> 8),
         (uint8_t)dy, (uint8_t)((uint16_t)dy >> 8), (uint8_t)wheel, (uint8_t)pan
@@ -191,11 +199,15 @@ bool hid_channel_mouse(hid_channel_t *channel, uint8_t buttons, int16_t dx, int1
     }
     channel->mouse_buttons = buttons;
     return true;
+#endif
 }
 
 bool hid_channel_consumer(hid_channel_t *channel, uint16_t usage)
 {
-    if (!channel->armed || !ready(channel) || channel->protocol_mode == 0 ||
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    return channel->armed && hid_channel_ready(channel) && usage == 0;
+#else
+    if (!channel->armed || !hid_channel_ready(channel) || channel->protocol_mode == 0 ||
         usage > 0x03ffu) return false;
     uint8_t report[HID_CONSUMER_REPORT_LEN] = {(uint8_t)usage, (uint8_t)(usage >> 8)};
     if (!send_report(channel, HID_REPORT_CONSUMER, report, sizeof(report))) {
@@ -204,11 +216,16 @@ bool hid_channel_consumer(hid_channel_t *channel, uint16_t usage)
     }
     channel->consumer_usage = usage;
     return true;
+#endif
 }
 
 bool hid_channel_set_protocol_mode(hid_channel_t *channel, uint8_t mode)
 {
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    if (!channel->connected || mode > 1) return false;
+#else
     if (!channel->connected || !channel->encrypted || mode > 1) return false;
+#endif
     if (mode == channel->protocol_mode) return true;
     if (channel->armed && !hid_channel_release(channel)) return false;
     channel->protocol_mode = mode;
@@ -217,7 +234,11 @@ bool hid_channel_set_protocol_mode(hid_channel_t *channel, uint8_t mode)
 
 bool hid_channel_led_output(hid_channel_t *channel, uint8_t leds)
 {
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    if (!channel->connected || (leds & 0xe0u) != 0) return false;
+#else
     if (!channel->connected || !channel->encrypted || (leds & 0xe0u) != 0) return false;
+#endif
     channel->keyboard_leds = leds;
     return true;
 }

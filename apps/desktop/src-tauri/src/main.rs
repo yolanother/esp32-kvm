@@ -12,7 +12,48 @@ mod tray;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
+#[cfg(windows)]
+struct InstanceMutex(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl InstanceMutex {
+    fn acquire() -> Option<Self> {
+        use windows_sys::Win32::Foundation::{
+            ERROR_ALREADY_EXISTS, GetLastError, WAIT_ABANDONED, WAIT_OBJECT_0,
+        };
+        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+        let name: Vec<u16> = "Local\\ESP32KVMDesktop\0".encode_utf16().collect();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+        if handle.is_null() {
+            return None;
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            let result = unsafe { WaitForSingleObject(handle, 5_000) };
+            if result != WAIT_OBJECT_0 && result != WAIT_ABANDONED {
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+                return None;
+            }
+        }
+        Some(Self(handle))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for InstanceMutex {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Threading::ReleaseMutex(self.0);
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    let Some(_instance) = InstanceMutex::acquire() else {
+        return;
+    };
     tauri::Builder::default()
         .setup(|app| {
             let layout = Arc::new(Mutex::new(layout::LayoutRuntime::default()));
@@ -40,6 +81,7 @@ fn main() {
             setup::setup_confirm,
             setup::setup_save_profile,
             setup::setup_forget_guest,
+            setup::setup_set_guest_enabled,
             setup::setup_test_controls,
             setup::dashboard_return_local,
             setup::dashboard_select_guest,

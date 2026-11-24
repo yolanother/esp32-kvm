@@ -18,3 +18,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Router test compile failed' }
 & (Join-Path $output 'test_router.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Router tests failed' }
 Write-Output 'PASS test_router'
+& $compiler /nologo /W4 /WX /std:c11 @includes (Join-Path $PSScriptRoot 'test_hardware_route.c') (Join-Path $repo 'firmware/components/router/hardware_route.c') "/Fo:$output/" "/Fe:$output/test_hardware_route.exe" /link @libraries
+if ($LASTEXITCODE -ne 0) { throw 'Hardware route test compile failed' }
+& (Join-Path $output 'test_hardware_route.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Hardware route tests failed' }
+Write-Output 'PASS test_hardware_route'

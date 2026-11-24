@@ -34,7 +34,9 @@ impl Key {
         match self.scan {
             0x1d => Some(Modifiers::CTRL.0),
             0x38 => Some(Modifiers::ALT.0),
-            0x2a | 0x36 if !self.extended => Some(Modifiers::SHIFT.0),
+            0x2a if !self.extended => Some(Modifiers::SHIFT.0),
+            // Some Windows hooks flag the right Shift scan code as extended.
+            0x36 => Some(Modifiers::SHIFT.0),
             0x5b | 0x5c if self.extended => Some(Modifiers::GUI.0),
             _ => None,
         }
@@ -252,7 +254,7 @@ impl HotkeyMatcher {
         if present(0x38, false) || present(0x38, true) {
             bits |= Modifiers::ALT.0;
         }
-        if present(0x2a, false) || present(0x36, false) {
+        if present(0x2a, false) || present(0x36, false) || present(0x36, true) {
             bits |= Modifiers::SHIFT.0;
         }
         if present(0x5b, true) || present(0x5c, true) {

@@ -18,7 +18,7 @@ pub const MAGIC: u16 = 0x4b56;
 /// Current incompatible protocol version.
 pub const MAJOR: u8 = 1;
 /// Highest compatible minor supported by this implementation.
-pub const MINOR: u16 = 2;
+pub const MINOR: u16 = 4;
 /// Highest live HID slot number that minor two can describe.
 pub const MAX_LIVE_SLOTS: usize = 3;
 
@@ -26,6 +26,8 @@ pub const MAX_LIVE_SLOTS: usize = 3;
 pub const BOND_INVENTORY_VERSION: u8 = 1;
 /// Maximum opaque retained bond identities in one inventory response.
 pub const MAX_BONDS: usize = 8;
+/// Maximum UTF-8 bytes in a persisted guest display name.
+pub const MAX_GUEST_LABEL_BYTES: usize = 24;
 
 /// Authoritative, bounded retained identities; never BLE addresses or keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +100,8 @@ pub enum MessageKind {
     GetBonds = 0x44,
     Bonds = 0x45,
     DeviceSelectRequest = 0x50,
+    SetGuestLabel = 0x51,
+    SetGuestEnabled = 0x52,
     UpdatePrepare = 0x60,
     Ack = 0x70,
     Nack = 0x71,
@@ -129,6 +133,8 @@ impl TryFrom<u8> for MessageKind {
             0x44 => GetBonds,
             0x45 => Bonds,
             0x50 => DeviceSelectRequest,
+            0x51 => SetGuestLabel,
+            0x52 => SetGuestEnabled,
             0x60 => UpdatePrepare,
             0x70 => Ack,
             0x71 => Nack,
@@ -266,10 +272,11 @@ pub fn validate_payload(kind: MessageKind, payload: &[u8]) -> Result<(), Protoco
         PairCancel => Some(0),
         GetBonds => Some(1),
         DeviceSelectRequest => Some(5),
+        SetGuestEnabled => Some(17),
         UpdatePrepare => Some(0),
         Ack | Nack => Some(10),
         InputProgress => Some(8),
-        Caps | SessionOpen | Status | ForgetBond | PairReply | Bonds => None,
+        Caps | SessionOpen | Status | ForgetBond | PairReply | Bonds | SetGuestLabel => None,
     };
     if let Some(size) = size {
         if payload.len() != size {
@@ -277,6 +284,21 @@ pub fn validate_payload(kind: MessageKind, payload: &[u8]) -> Result<(), Protoco
         }
     } else if kind == Bonds {
         BondInventory::decode(payload)?;
+    } else if kind == SetGuestLabel {
+        let Some((&name_len, name)) = payload.get(16).zip(payload.get(17..)) else {
+            return Err(ProtocolError::Payload);
+        };
+        let Ok(value) = std::str::from_utf8(name) else {
+            return Err(ProtocolError::Payload);
+        };
+        if payload[..16] == [0; 16]
+            || name_len == 0
+            || name_len as usize > MAX_GUEST_LABEL_BYTES
+            || name.len() != name_len as usize
+            || value.chars().any(char::is_control)
+        {
+            return Err(ProtocolError::Payload);
+        }
     } else {
         cbor::validate(kind, payload)?;
     }
@@ -301,6 +323,9 @@ pub fn validate_payload(kind: MessageKind, payload: &[u8]) -> Result<(), Protoco
         }
         Arm if payload[0] > 3 => return Err(ProtocolError::Payload),
         DeviceSelectRequest if payload[0] > 3 => return Err(ProtocolError::Payload),
+        SetGuestEnabled if payload[..16] == [0; 16] || payload[16] > 1 => {
+            return Err(ProtocolError::Payload);
+        }
         Ack if payload[5] != 0 => return Err(ProtocolError::Payload),
         Nack if !(1..=8).contains(&payload[5]) => return Err(ProtocolError::Payload),
         _ => {}

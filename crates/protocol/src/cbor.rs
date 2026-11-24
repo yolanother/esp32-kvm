@@ -250,7 +250,7 @@ pub(crate) fn validate(kind: MessageKind, payload: &[u8]) -> Result<(), Protocol
                 bytes16(fields, 2)?;
                 boolean(fields, 3)?;
                 boolean(fields, 4)?;
-                uint(fields, 5, 0, u16::MAX as u64)?;
+                uint(fields, 5, 0, u32::MAX as u64)?;
             }
             uint(fields, 4, 0, u32::MAX as u64)?;
             uint(fields, 5, 0, u32::MAX as u64)?;

@@ -52,6 +52,8 @@ export interface GuestProfile {
   directShortcut?: string | null;
   mappingProfileId?: string | null;
   layoutLinkId?: string | null;
+  /** False while the user has temporarily removed this guest from switching. */
+  enabled?: boolean;
 }
 
 /** Native snapshot of one setup session and remembered guest readiness. */

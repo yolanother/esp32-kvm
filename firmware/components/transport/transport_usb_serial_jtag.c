@@ -12,6 +12,7 @@
 #include "transport_display_status.h"
 #include "display.h"
 #include "display_pairing.h"
+#include "display_labels.h"
 #include "hid_guest.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
@@ -43,6 +44,7 @@ static bool started;
 static TaskHandle_t usb_task;
 static QueueHandle_t pairing_queue;
 static QueueHandle_t pairing_touch_queue;
+static QueueHandle_t target_touch_queue;
 static atomic_bool pairing_overflow;
 static kvm_display_pairing_t display_pairing;
 
@@ -73,6 +75,10 @@ static bool pair_forget(void *context, const uint8_t token[16])
 { (void)context; return hid_guest_request_forget_bond(token); }
 static bool pair_inventory(void *context, uint8_t tokens[8][16], uint8_t *count)
 { (void)context; return hid_guest_request_retained_bonds(tokens, count); }
+static bool set_label(void *context, const uint8_t token[16], const char *name, size_t length)
+{ (void)context; return kvm_display_label_set(token, name, length); }
+static bool set_enabled(void *context, const uint8_t token[16], bool enabled)
+{ (void)context; return kvm_display_guest_hidden_set(token, !enabled); }
 
 static void pairing_event(const hid_guest_pairing_event_t *event, void *context)
 {
@@ -131,6 +137,12 @@ void kvm_transport_pairing_touch(kvm_display_pair_request_t request)
     if (pairing_touch_queue) (void)xQueueSend(pairing_touch_queue, &request, 0);
 }
 
+void kvm_transport_target_touch(uint8_t slot)
+{
+    if (target_touch_queue && slot <= KVM_ROUTER_MAX_SLOTS)
+        (void)xQueueSend(target_touch_queue, &slot, 0);
+}
+
 static void drain_pairing_touch(uint64_t time_ms)
 {
     kvm_display_pair_request_t request;
@@ -164,12 +176,13 @@ void kvm_transport_button_event(kvm_display_event_t event)
     if (bit) (void)xTaskNotify(usb_task, bit, eSetBits);
 }
 
-static void publish_status(bool connected, bool guest_ready,
+static void publish_status(bool connected, bool guest_ready, uint8_t paired_guests,
                            const kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS])
 {
     kvm_display_status_t status;
     kvm_transport_display_status(&core, &router, connected, guest_ready,
                                  (uint64_t)(esp_timer_get_time() / 1000), &status);
+    status.paired_guests = paired_guests;
     /* USB can remain electrically connected after the verified host session
        closes. Keep the authenticated BLE slot visible in either case. */
     if (!connected || !core.session_open || !router.session_open) {
@@ -178,12 +191,33 @@ static void publish_status(bool connected, bool guest_ready,
             for (size_t i = 0; i < sizeof(slots[slot].token); ++i)
                 has_token |= slots[slot].token[i] != 0;
             if (!has_token) continue;
+            status.occupied_mask |= (uint8_t)(1u << slot);
             status.guest_slots = slot + 1u;
             if (slots[slot].ready && slots[slot].subscribed) {
                 status.ready_slots++;
                 status.ready_mask |= (uint8_t)(1u << slot);
             }
         }
+    }
+    /* A guest the host disabled stays bonded and connected but leaves the screen. */
+    for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot) {
+        uint8_t bit = (uint8_t)(1u << slot);
+        if (!(status.occupied_mask & bit) || !kvm_display_guest_hidden(slots[slot].token)) continue;
+        status.occupied_mask &= (uint8_t)~bit;
+        if (status.ready_mask & bit) {
+            status.ready_mask &= (uint8_t)~bit;
+            if (status.ready_slots) status.ready_slots--;
+        }
+    }
+    status.guest_slots = 0;
+    for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot)
+        if (status.occupied_mask & (1u << slot)) status.guest_slots = slot + 1u;
+    for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot) {
+        bool has_token = false;
+        for (size_t i = 0; i < sizeof(slots[slot].token); ++i)
+            has_token |= slots[slot].token[i] != 0;
+        if (!has_token) continue;
+        (void)kvm_display_label_get(slots[slot].token, status.guest_names[slot]);
     }
     if (display_pairing.state != KVM_DISPLAY_PAIRING_CLOSED) {
         status.pairing_state = display_pairing.state;
@@ -228,6 +262,7 @@ static void usb_worker(void *context)
     uint8_t bytes[128];
     bool was_connected = false;
     bool guest_ready = false;
+    uint8_t paired_guests = 0;
     uint64_t last_ready_ms = 0;
     bool ready_sampled = false;
     kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS] = {0};
@@ -247,14 +282,23 @@ static void usb_worker(void *context)
         if (drain_pairing_events()) ready_sampled = false;
         kvm_display_pairing_expire(&display_pairing, time_ms);
         if (!(button_bits & 2u)) drain_pairing_touch(time_ms);
+        uint8_t touched_slot;
+        while (target_touch_queue && xQueueReceive(target_touch_queue, &touched_slot, 0) == pdTRUE)
+            (void)kvm_transport_core_device_select_request(&core, touched_slot);
         if (!ready_sampled || time_ms < last_ready_ms || time_ms - last_ready_ms >= 1000) {
             hid_guest_slot_snapshot_t sampled[HID_GATT_MAX_CONNECTIONS];
             bool valid = hid_guest_request_slots(sampled);
+            uint8_t retained[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN] = {{0}};
+            uint8_t retained_count = 0;
+            if (hid_guest_request_retained_bonds(retained, &retained_count))
+                paired_guests = retained_count;
+            memset(retained, 0, sizeof(retained));
             memset(slots, 0, sizeof(slots));
             if (valid) for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot) {
                 memcpy(slots[slot].token, sampled[slot].token, 16);
                 slots[slot].ready = sampled[slot].ready;
                 slots[slot].subscribed = sampled[slot].subscribed;
+                slots[slot].notify_tx_successes = sampled[slot].notify_tx_successes;
             }
             memset(sampled, 0, sizeof(sampled));
             guest_ready = false;
@@ -277,7 +321,7 @@ static void usb_worker(void *context)
                 kvm_transport_core_reset(&core);
             }
             was_connected = false;
-            publish_status(false, guest_ready, slots);
+            publish_status(false, guest_ready, paired_guests, slots);
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -286,8 +330,11 @@ static void usb_worker(void *context)
                                           new_session(), send_binary, NULL);
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
             kvm_transport_core_bind_pairing(&core,
-                (kvm_transport_pairing_ops_t){pair_begin, pair_cancel, pair_reply,
-                                               pair_forget, pair_inventory}, NULL);
+                (kvm_transport_pairing_ops_t){
+                    .begin = pair_begin, .cancel = pair_cancel, .reply = pair_reply,
+                    .forget = pair_forget, .inventory = pair_inventory, .label = set_label,
+                    .enabled = set_enabled,
+                }, NULL);
             if (!kvm_transport_core_set_slots(&core, slots)) {
                 memset(slots, 0, sizeof(slots));
                 (void)kvm_transport_core_set_slots(&core, slots);
@@ -295,17 +342,25 @@ static void usb_worker(void *context)
             was_connected = true;
         }
         int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(20));
-        if (read > 0) kvm_transport_core_feed(&core, bytes, (size_t)read);
+        if (read > 0) {
+            if (kvm_transport_diagnostics_requested(bytes, (size_t)read)) {
+                kvm_router_emergency_release(&router);
+                kvm_transport_core_reset(&core);
+                kvm_transport_diagnostics_dump();
+                was_connected = false;
+            } else kvm_transport_core_feed(&core, bytes, (size_t)read);
+        }
         kvm_transport_core_tick(&core);
         if ((button_bits & 1u) && !(button_bits & 2u)) {
             uint8_t ready_mask = 0;
             for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot)
-                if (slots[slot].ready && slots[slot].subscribed)
+                if (slots[slot].ready && slots[slot].subscribed &&
+                    !kvm_display_guest_hidden(slots[slot].token))
                     ready_mask |= (uint8_t)(1u << slot);
             (void)kvm_transport_core_device_select_request(&core,
                 kvm_display_next_ready_slot(ready_mask, router.slot));
         }
-        publish_status(true, guest_ready, slots);
+        publish_status(true, guest_ready, paired_guests, slots);
     }
 }
 
@@ -330,14 +385,25 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }
+    target_touch_queue = xQueueCreate(4, sizeof(uint8_t));
+    if (!target_touch_queue) {
+        vQueueDelete(pairing_queue);
+        vQueueDelete(pairing_touch_queue);
+        pairing_queue = NULL;
+        pairing_touch_queue = NULL;
+        (void)usb_serial_jtag_driver_uninstall();
+        return ESP_ERR_NO_MEM;
+    }
     hid_guest_pairing_set_events(pairing_event, NULL);
     kvm_router_init(&router, kvm_router_hid_output(), NULL);
     if (!kvm_router_set_capacity(&router, KVM_ROUTER_MAX_SLOTS)) {
         hid_guest_pairing_set_events(NULL, NULL);
         vQueueDelete(pairing_queue);
         vQueueDelete(pairing_touch_queue);
+        vQueueDelete(target_touch_queue);
         pairing_queue = NULL;
         pairing_touch_queue = NULL;
+        target_touch_queue = NULL;
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_INVALID_STATE;
     }
@@ -345,8 +411,10 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
         hid_guest_pairing_set_events(NULL, NULL);
         vQueueDelete(pairing_queue);
         vQueueDelete(pairing_touch_queue);
+        vQueueDelete(target_touch_queue);
         pairing_queue = NULL;
         pairing_touch_queue = NULL;
+        target_touch_queue = NULL;
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }

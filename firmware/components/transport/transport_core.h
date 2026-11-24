@@ -28,6 +28,7 @@ typedef struct {
     uint8_t token[16];
     bool ready;
     bool subscribed;
+    uint32_t notify_tx_successes;
 } kvm_transport_slot_t;
 
 /** Minor-one pairing states carried in STATUS key 6. */
@@ -45,6 +46,10 @@ typedef struct {
     bool (*forget)(void *context, const uint8_t token[16]);
     /** Copies up to eight retained opaque tokens; false means unavailable. */
     bool (*inventory)(void *context, uint8_t tokens[8][16], uint8_t *count);
+    /** Persists a friendly card label for an opaque bond token. */
+    bool (*label)(void *context, const uint8_t token[16], const char *name, size_t length);
+    /** Hides or shows a guest on the device screen; never touches the bond or link. */
+    bool (*enabled)(void *context, const uint8_t token[16], bool enabled);
 } kvm_transport_pairing_ops_t;
 
 /** Private stream and handshake state for one USB connection. */

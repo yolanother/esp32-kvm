@@ -1,4 +1,5 @@
 # Architecture
+The primary input path is now device-owned: paired Bluetooth LE keyboard and mouse feed the ESP32-S3, which selects USB HID to Windows or BLE HID to a guest. The Windows capture-to-USB path remains an optional advanced source. See [device-owned input path](../Designs/hardware-primary/README.md) for the migration and safety gates; the desktop and USB-session design below describes the current implementation until those gates pass.
 ## Selected implementation baseline
 Windows 11 x64 first. Rust native routing/capture core and Tauri 2 desktop shell with React/TypeScript. UI is configuration/status only: webview latency never blocks input processing. Pin exact Rust/Node/Tauri/ESP-IDF/NimBLE/LVGL versions after the M0 build spike, and check in lockfiles. ESP-IDF C/C++ firmware, NimBLE GATT HID service, TinyUSB CDC device transport, LVGL screen using verified Waveshare BSP. Toolchain versions are implementation decisions to validate, not assumed installed versions.
 

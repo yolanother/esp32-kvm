@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ESP32 KVM",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "ai.doubtech.esp32-kvm",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -28,6 +28,12 @@
     "targets": [
       "msi"
     ],
+    "windows": {
+      "wix": {
+        "fragmentPaths": ["./windows/fragments/autostart.wxs"],
+        "componentRefs": ["DesktopAutostart"]
+      }
+    },
     "icon": [
       "icons/icon.ico"
     ]

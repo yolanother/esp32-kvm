@@ -6,13 +6,17 @@
 #include "esp_log.h"
 #include "hid_guest.h"
 #include "display.h"
+#include "display_labels.h"
 #include "transport_usb_serial_jtag.h"
 
 /** Starts services; any startup error leaves the routing gate disarmed. */
 void app_main(void)
 {
+    kvm_transport_diagnostics_init();
     esp_err_t hid_result = hid_guest_start();
     if (hid_result != ESP_OK) ESP_LOGE("esp32-kvm", "HID startup failed: %d", hid_result);
+    esp_err_t labels_result = kvm_display_labels_init();
+    if (labels_result != ESP_OK) ESP_LOGE("esp32-kvm", "Display label storage failed: %d", labels_result);
     esp_err_t usb_result = kvm_transport_usb_serial_jtag_start();
     if (usb_result != ESP_OK) ESP_LOGE("esp32-kvm", "USB startup failed: %d", usb_result);
 #if CONFIG_KVM_DISPLAY_WAVESHARE_TOUCH_154_VERIFIED
@@ -21,6 +25,7 @@ void app_main(void)
     const bool enable_panel = false;
 #endif
     esp_err_t display_result = kvm_display_start(enable_panel, kvm_transport_button_event,
-                                                 kvm_transport_pairing_touch);
+                                                 kvm_transport_pairing_touch,
+                                                 kvm_transport_target_touch);
     if (display_result != ESP_OK) ESP_LOGE("esp32-kvm", "Display/button startup failed: %d", display_result);
 }

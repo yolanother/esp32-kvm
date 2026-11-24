@@ -59,3 +59,24 @@ fn unknown_or_synthetic_scan_codes_are_never_guessed_from_virtual_key() {
     assert_eq!(mapper.map_key(0x41, 0x021d, false), None);
     assert_eq!(mapper.map_key(0x13, 0x45, false), None);
 }
+
+#[test]
+fn right_shift_is_a_modifier_whether_or_not_windows_flags_it_extended() {
+    let mapper = SetOneKeyMapper;
+    // A real keyboard delivered right Shift as vk 0xa1, scan 0x36 with the extended flag.
+    assert_eq!(
+        mapper.map_key(0xa1, 0x36, true),
+        Some(MappedKey::Modifier(0x20))
+    );
+    assert_eq!(
+        mapper.map_key(0xa1, 0x36, false),
+        Some(MappedKey::Modifier(0x20))
+    );
+    // Left Shift stays non-extended only; the fake E0 2A that frames Insert/Home with
+    // NumLock on must not become a Shift press.
+    assert_eq!(
+        mapper.map_key(0xa0, 0x2a, false),
+        Some(MappedKey::Modifier(2))
+    );
+    assert_eq!(mapper.map_key(0xa0, 0x2a, true), None);
+}

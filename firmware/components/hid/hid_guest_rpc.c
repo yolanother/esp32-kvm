@@ -45,17 +45,6 @@ typedef struct {
 } rpc_state_t;
 static rpc_state_t rpc;
 
-static bool channel_ready(const hid_channel_t *channel)
-{
-    if (!channel->connected || !channel->encrypted || channel->needs_disconnect) return false;
-    if (channel->protocol_mode == 0)
-        return channel->subscribed[HID_REPORT_BOOT_KEYBOARD] &&
-               channel->subscribed[HID_REPORT_BOOT_MOUSE];
-    return channel->subscribed[HID_REPORT_KEYBOARD] &&
-           channel->subscribed[HID_REPORT_MOUSE] &&
-           channel->subscribed[HID_REPORT_CONSUMER];
-}
-
 static void on_host(struct ble_npl_event *event)
 {
     (void)event;
@@ -70,7 +59,7 @@ static void on_host(struct ble_npl_event *event)
     if (execute) {
         hid_channel_t *channel = hid_gatt_channel_at(rpc.slot);
         switch (rpc.operation) {
-        case RPC_READY: rpc.result = channel_ready(channel); break;
+        case RPC_READY: rpc.result = hid_channel_ready(channel); break;
         case RPC_ARM: rpc.result = hid_channel_arm(channel); break;
         case RPC_RELEASE: rpc.result = hid_channel_release(channel); break;
         case RPC_KEYBOARD: rpc.result = hid_channel_keyboard(channel, rpc.keyboard); break;

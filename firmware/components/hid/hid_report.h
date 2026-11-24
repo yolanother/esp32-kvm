@@ -49,6 +49,8 @@ typedef struct {
     uint8_t keyboard[HID_KEYBOARD_REPORT_LEN];
     uint8_t mouse_buttons;
     uint16_t consumer_usage;
+    /** Controller-confirmed notification completions for this live connection. */
+    uint32_t notify_tx_successes;
 } hid_channel_t;
 
 /** Initializes an inert channel with a connection-addressed send callback. */
@@ -61,6 +63,8 @@ void hid_channel_disconnected(hid_channel_t *channel);
 void hid_channel_encrypted(hid_channel_t *channel, bool encrypted);
 /** Updates one connection's report subscription; losing it disarms. */
 void hid_channel_subscribed(hid_channel_t *channel, uint8_t report_id, bool subscribed);
+/** Shared profile-aware readiness for routing, snapshots, and host-loop RPCs. */
+bool hid_channel_ready(const hid_channel_t *channel);
 /** Sends an all-up baseline and arms only when encrypted and fully subscribed. */
 bool hid_channel_arm(hid_channel_t *channel);
 /** Disarms first, then enqueues zero keyboard, mouse, and consumer reports. */

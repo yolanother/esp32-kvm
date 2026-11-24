@@ -19,7 +19,8 @@ impl KeyMapper for SetOneKeyMapper {
             (0x38, false) => Some(4),
             (0x5b, true) => Some(8),
             (0x1d, true) => Some(0x10),
-            (0x36, false) => Some(0x20),
+            // Some Windows hooks flag the right Shift scan code as extended.
+            (0x36, _) => Some(0x20),
             (0x38, true) => Some(0x40),
             (0x5c, true) => Some(0x80),
             _ => None,

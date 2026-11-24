@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="DesktopAutostart" Guid="f66d5eb2-a43a-4567-a030-08f0c667c7b7">
+        <RegistryValue Root="HKCU"
+                       Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="ESP32 KVM"
+                       Type="string"
+                       Value="&quot;[INSTALLDIR]esp32-kvm-desktop.exe&quot;"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

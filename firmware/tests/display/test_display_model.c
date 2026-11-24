@@ -136,6 +136,13 @@ int main(void)
     assert(request.challenge_id == 0);
     assert(kvm_display_pair_touch_action(&status, 120, 180, &touched));
     assert(touched == KVM_DISPLAY_PAIR_BEGIN);
+    status.paired_guests = 2;
+    kvm_display_make_view(&status, 1000, &view);
+    assert(view.show_guest_settings);
+    assert(!kvm_display_pair_touch_action(&status, 120, 180, &touched));
+    assert(kvm_display_pair_touch_action(&status, 210, 214, &touched));
+    assert(touched == KVM_DISPLAY_PAIR_BEGIN);
+    status.paired_guests = 0;
     status.pairing_state = KVM_DISPLAY_PAIRING_WAITING;
     assert(kvm_display_pair_request(&status, 1000, KVM_DISPLAY_PAIR_CANCEL, &request));
     assert(!kvm_display_pair_touch_action(&status, 180, 180, &touched));

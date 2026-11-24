@@ -34,7 +34,16 @@ const CLASS_NAME: &[u16] = &[
     69, 83, 80, 51, 50, 75, 86, 77, 67, 97, 112, 116, 117, 114, 101, 0,
 ];
 const SCAN_SLOTS: usize = 512;
+
+/// Test-only: KVM_CAPTURE_ACCEPT_INJECTED=1 lets synthetic SendInput events drive
+/// the real capture path so automation can exercise it without physical hardware.
+fn accept_injected() -> bool {
+    static ACCEPT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ACCEPT.get_or_init(|| std::env::var_os("KVM_CAPTURE_ACCEPT_INJECTED").is_some_and(|v| v == "1"))
+}
 const HOTKEY_TIMER: usize = 1;
+const WM_KVM_HIDE_CURSOR: u32 = WM_APP + 1;
+const WM_KVM_SHOW_CURSOR: u32 = WM_APP + 2;
 
 struct HotkeySettings {
     config: RwLock<HotkeyConfig>,
@@ -137,6 +146,16 @@ impl CaptureService {
                             if outcome == 0 {
                                 break;
                             }
+                            if message.hwnd.is_null() {
+                                if message.message == WM_KVM_HIDE_CURSOR {
+                                    hide_cursor_for_thread();
+                                    continue;
+                                }
+                                if message.message == WM_KVM_SHOW_CURSOR {
+                                    show_cursor_for_thread();
+                                    continue;
+                                }
+                            }
                             unsafe {
                                 TranslateMessage(&message);
                                 DispatchMessageW(&message);
@@ -165,7 +184,7 @@ impl CaptureService {
                             thread::sleep(Duration::from_millis(25));
                             watchdog_gate.check_watchdog_at(started.elapsed().as_millis() as u64);
                             if watchdog_gate.generation() == 0 {
-                                restore_cursor(&watchdog_cursor);
+                                restore_cursor(&watchdog_cursor, thread_id);
                             }
                         }
                     }) {
@@ -232,12 +251,15 @@ impl CaptureService {
             return false;
         }
         *origin = Some(point);
+        unsafe {
+            PostThreadMessageW(self.thread_id, WM_KVM_HIDE_CURSOR, 0, 0);
+        }
         true
     }
     /// Restore local pass-through immediately.
     pub fn disarm(&self) {
         self.gate.disarm();
-        restore_cursor(&self.cursor_origin);
+        restore_cursor(&self.cursor_origin, self.thread_id);
     }
     /// Read the active route generation, or zero when locally disarmed.
     pub fn generation(&self) -> u32 {
@@ -255,7 +277,7 @@ impl CaptureService {
     /// Disarms on lock, suspend, shutdown, or resume before a fresh session.
     pub fn system_transition(&self) {
         self.gate.system_transition();
-        restore_cursor(&self.cursor_origin);
+        restore_cursor(&self.cursor_origin, self.thread_id);
     }
     /// Returns true only when every observed physical key and mouse button is up.
     pub fn physical_all_up(&self) -> bool {
@@ -285,20 +307,35 @@ fn os_all_up() -> bool {
     (1..=255).all(|virtual_key| unsafe { GetAsyncKeyState(virtual_key) as u16 & 0x8000 == 0 })
 }
 
-// Only this service's saved position is restored. It never changes ClipCursor
-// or ShowCursor, so it must not undo another application's cursor ownership.
-fn restore_cursor(origin: &Mutex<Option<POINT>>) {
+// ShowCursor keeps a counter per thread. Both operations are posted to the
+// capture worker so a fail-local transition cannot leave the cursor hidden.
+fn hide_cursor_for_thread() {
+    unsafe {
+        while ShowCursor(0) >= 0 {}
+    }
+}
+
+fn show_cursor_for_thread() {
+    unsafe {
+        while ShowCursor(1) < 0 {}
+    }
+}
+
+fn restore_cursor(origin: &Mutex<Option<POINT>>, thread_id: u32) {
     let mut saved = origin.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(point) = saved.as_ref()
-        && unsafe { SetCursorPos(point.x, point.y) } != 0
-    {
-        *saved = None;
+    if let Some(point) = saved.take() {
+        // A failed restore must not leave stale route state that blocks the
+        // next attempt to arm capture.
+        unsafe {
+            SetCursorPos(point.x, point.y);
+            PostThreadMessageW(thread_id, WM_KVM_SHOW_CURSOR, 0, 0);
+        }
     }
 }
 impl Drop for CaptureService {
     fn drop(&mut self) {
         self.gate.disarm();
-        restore_cursor(&self.cursor_origin);
+        restore_cursor(&self.cursor_origin, self.thread_id);
         self.watchdog_stop.store(true, Ordering::Release);
         unsafe {
             PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
@@ -490,7 +527,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, param: LPARA
                 } else {
                     0
                 };
-            let injected = input.flags & LLKHF_INJECTED != 0;
+            let injected = input.flags & LLKHF_INJECTED != 0 && !accept_injected();
             let repeat = down && context.held[index];
             if !injected {
                 context.gate.record_physical_key(
@@ -589,14 +626,14 @@ unsafe extern "system" fn mouse_proc(code: i32, message: WPARAM, param: LPARAM) 
         if let Ok(slot) = cell.try_borrow()
             && let Some(context) = slot.as_ref()
         {
-            if input.flags & LLMHF_INJECTED == 0
+            if (input.flags & LLMHF_INJECTED == 0 || accept_injected())
                 && let MouseInput::Button(button, down) = kind
             {
                 context.gate.record_physical_button(button, down);
             }
             let decision = classify_mouse(
                 context.gate.generation() != 0,
-                input.flags & LLMHF_INJECTED != 0,
+                input.flags & LLMHF_INJECTED != 0 && !accept_injected(),
                 kind,
             );
             if !decision.pass_to_os {

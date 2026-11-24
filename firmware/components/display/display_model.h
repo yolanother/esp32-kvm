@@ -19,6 +19,9 @@ typedef struct {
     uint8_t guest_slots;
     uint8_t ready_slots;
     uint8_t ready_mask;
+    uint8_t occupied_mask;
+    uint8_t paired_guests;
+    char guest_names[3][25];
     bool show_guest_list;
     bool touch_available;
     uint8_t pairing_state;
@@ -66,6 +69,11 @@ typedef struct {
     char rows[3][32];
     uint8_t selectable_slots;
     bool touch_available;
+    char card_labels[4][25];
+    uint8_t card_visible_mask;
+    uint8_t card_ready_mask;
+    uint8_t selected_card;
+    bool show_guest_settings;
 } kvm_display_view_t;
 
 /** Derives visible text from confirmed status and a monotonic timestamp. */

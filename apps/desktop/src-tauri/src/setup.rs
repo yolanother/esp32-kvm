@@ -145,6 +145,13 @@ pub struct GuestProfile {
     /// Bounded per-guest physical key and exact-chord overrides.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_rules: Vec<StoredKeyRule>,
+    /// False while the user has temporarily removed this guest from switching.
+    #[serde(default = "guest_enabled_default")]
+    pub enabled: bool,
+}
+
+fn guest_enabled_default() -> bool {
+    true
 }
 
 /// One physical modifier replacement in a guest's custom preset.
@@ -274,6 +281,19 @@ pub(crate) fn token_bytes(token: &str) -> Result<[u8; 16], String> {
     Ok(bytes)
 }
 
+/// Fits a host profile name into the device's 24-byte UTF-8 card label.
+fn device_display_name(name: &str) -> String {
+    let trimmed = name.trim();
+    let end = trimmed
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(trimmed.len()))
+        .take_while(|end| *end <= 24)
+        .last()
+        .unwrap_or(0);
+    trimmed[..end].to_owned()
+}
+
 /// Combined native status and locally stored labels for the webview.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -356,6 +376,7 @@ pub trait SetupBackend: Send + Sync {
         &self,
         _bond_token: [u8; 16],
         _profile: MappingProfile,
+        _display_name: &str,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -370,6 +391,10 @@ pub trait SetupBackend: Send + Sync {
     /// Requests an acknowledged return to the local host when an actor exists.
     fn return_local(&self) -> Result<(), String> {
         Err("Native local-return transport is unavailable.".into())
+    }
+    /// Temporarily removes a guest from cycling, selection and edge routing.
+    fn install_enabled(&self, _bond_token: [u8; 16], _enabled: bool) -> Result<(), String> {
+        Ok(())
     }
     /// Selects a currently ready guest by its opaque bond identity.
     fn select_guest(&self, _bond_token: [u8; 16]) -> Result<(), String> {
@@ -678,11 +703,46 @@ impl SetupService {
                     .collect()
             })
             .unwrap_or_default();
-        Self {
+        let disabled: Vec<String> = profiles
+            .as_ref()
+            .map(|store| {
+                store
+                    .profiles
+                    .iter()
+                    .filter(|guest| !guest.enabled)
+                    .map(|guest| guest.bond_token.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let service = Self {
             backend,
             profiles: Mutex::new(profiles),
             mapping_pending: Mutex::new(pending),
+        };
+        for token in disabled {
+            if let Ok(bytes) = token_bytes(&token) {
+                let _ = service.backend.install_enabled(bytes, false);
+            }
         }
+        service
+    }
+
+    /// Persists the enabled flag, then applies it to the actor's routing.
+    pub(crate) fn set_guest_enabled(&self, token: &str, enabled: bool) -> Result<(), String> {
+        let bytes = token_bytes(token)?;
+        {
+            let mut guard = self.profiles.lock().map_err(|error| error.to_string())?;
+            let store = guard.as_mut().map_err(|error| error.clone())?;
+            let mut profile = store
+                .profiles
+                .iter()
+                .find(|guest| guest.bond_token == token)
+                .cloned()
+                .ok_or("Name this guest before disabling it.")?;
+            profile.enabled = enabled;
+            store.save(profile)?;
+        }
+        self.backend.install_enabled(bytes, enabled)
     }
 
     fn reconcile_one(&self, pending: &mut BTreeSet<String>) {
@@ -703,7 +763,10 @@ impl SetupService {
             return;
         };
         if let (Ok(bytes), Ok(mapping)) = (token_bytes(&token), mapping_profile(&profile))
-            && self.backend.install_mapping(bytes, mapping).is_ok()
+            && self
+                .backend
+                .install_mapping(bytes, mapping, &device_display_name(&profile.name))
+                .is_ok()
         {
             pending.remove(&token);
         }
@@ -714,7 +777,7 @@ impl SetupService {
         self.backend.return_local()
     }
 
-    /// Selects a saved, ready guest only while the verified route is local.
+    /// Selects a firmware-reported ready guest only while the verified route is local.
     pub(crate) fn select_guest(&self, token: &str) -> Result<(), String> {
         let bond_token = token_bytes(token)?;
         let snapshot = self.snapshot()?;
@@ -722,13 +785,6 @@ impl SetupService {
             || !matches!(snapshot.route, RouteState::Local)
         {
             return Err("Guest selection requires verified local control.".into());
-        }
-        if !snapshot
-            .profiles
-            .iter()
-            .any(|profile| profile.bond_token == token)
-        {
-            return Err("Save a guest profile before selecting it.".into());
         }
         if snapshot
             .mapping_pending_tokens
@@ -928,6 +984,16 @@ pub fn setup_save_profile(
     service.save_profile(profile)
 }
 
+/// Temporarily removes a named guest from switching, or restores it.
+#[tauri::command]
+pub fn setup_set_guest_enabled(
+    service: State<'_, SetupService>,
+    bond_token: String,
+    enabled: bool,
+) -> Result<(), String> {
+    service.set_guest_enabled(&bond_token, enabled)
+}
+
 /// Forgets a guest only after explicit confirmation and firmware removal.
 #[tauri::command]
 pub fn setup_forget_guest(
@@ -1082,6 +1148,7 @@ mod tests {
             custom_base_preset: None,
             modifier_bindings: Vec::new(),
             key_rules: Vec::new(),
+            enabled: true,
         }
     }
 
@@ -1097,18 +1164,16 @@ mod tests {
     }
 
     #[test]
-    fn selection_requires_saved_ready_guest_and_forwards_opaque_token() {
+    fn selection_requires_ready_guest_and_forwards_opaque_token_without_a_profile() {
         let directory =
             std::env::temp_dir().join(format!("esp32-kvm-selection-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         let token = "00112233445566778899aabbccddeeff";
         let ready = SetupService::new(directory.clone(), Box::new(ReadyBondBackend));
-        assert!(ready.select_guest(token).is_err());
-        ready.save_profile(profile(token)).unwrap();
         ready.select_guest(token).unwrap();
         let offline = SetupService::new(directory.clone(), Box::new(OneBondBackend));
         assert!(offline.select_guest(token).is_err());
-        fs::remove_dir_all(directory).unwrap();
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -1599,7 +1664,7 @@ mod tests {
         );
     }
 
-    type RecordedMappings = std::sync::Arc<Mutex<Vec<([u8; 16], MappingProfile)>>>;
+    type RecordedMappings = std::sync::Arc<Mutex<Vec<([u8; 16], MappingProfile, String)>>>;
     struct MappingRecorder(RecordedMappings);
 
     impl SetupBackend for MappingRecorder {
@@ -1607,8 +1672,16 @@ mod tests {
             OneBondBackend.snapshot()
         }
 
-        fn install_mapping(&self, token: [u8; 16], profile: MappingProfile) -> Result<(), String> {
-            self.0.lock().unwrap().push((token, profile));
+        fn install_mapping(
+            &self,
+            token: [u8; 16],
+            profile: MappingProfile,
+            display_name: &str,
+        ) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((token, profile, display_name.into()));
             Ok(())
         }
     }
@@ -1641,6 +1714,7 @@ mod tests {
             token_bytes("00112233445566778899aabbccddeeff").unwrap()
         );
         assert_eq!(records[0].1.preset[0].source[0].usage, 0xe3);
+        assert_eq!(records[0].2, "Work Mac");
         drop(records);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1656,6 +1730,7 @@ mod tests {
             &self,
             _token: [u8; 16],
             _profile: MappingProfile,
+            _display_name: &str,
         ) -> Result<(), String> {
             if self.0.load(std::sync::atomic::Ordering::SeqCst) {
                 Ok(())

@@ -99,21 +99,6 @@ int main(void)
     assert(registered[2].type == BLE_GATT_SVC_TYPE_PRIMARY);
     assert((uintptr_t)registered[2].uuid == 0x180a);
     assert(registered[3].type == 0);
-    for (unsigned index = 4; index <= 6; index++) {
-        const struct ble_gatt_chr_def *chr = characteristic(index);
-        assert(chr->flags & BLE_GATT_CHR_F_NOTIFY);
-        assert(chr->flags & BLE_GATT_CHR_F_READ_ENC);
-        assert(chr->descriptors != NULL && chr->descriptors[0].uuid != NULL);
-        struct os_mbuf reference = {0};
-        struct ble_gatt_access_ctxt descriptor = {.op = BLE_GATT_ACCESS_OP_READ_DSC, .om = &reference};
-        assert(chr->descriptors[0].access_cb(17, 0, &descriptor, chr->descriptors[0].arg) == 0);
-        assert(reference.len == 2 && reference.data[0] == index - 3 && reference.data[1] == 1);
-    }
-    struct os_mbuf led_reference = {0};
-    struct ble_gatt_access_ctxt descriptor = {.op = BLE_GATT_ACCESS_OP_READ_DSC, .om = &led_reference};
-    assert(characteristic(7)->descriptors[0].access_cb(17, 0, &descriptor,
-           characteristic(7)->descriptors[0].arg) == 0);
-    assert(led_reference.len == 2 && led_reference.data[0] == 1 && led_reference.data[1] == 2);
     assert((uintptr_t)characteristic(8)->uuid == 0x2a22);
     assert((uintptr_t)characteristic(9)->uuid == 0x2a32);
     assert((uintptr_t)characteristic(10)->uuid == 0x2a33);
@@ -131,6 +116,22 @@ int main(void)
     struct os_mbuf packet = {0};
     assert(access(4, 17, BLE_GATT_ACCESS_OP_READ_CHR, NULL, 0, &packet) == BLE_ATT_ERR_INSUFFICIENT_ENC);
     hid_gatt_on_encryption(17, true);
+    for (unsigned index = 4; index <= 6; index++) {
+        const struct ble_gatt_chr_def *chr = characteristic(index);
+        assert(chr->flags & BLE_GATT_CHR_F_NOTIFY);
+        assert(chr->flags & BLE_GATT_CHR_F_READ_ENC);
+        assert(chr->descriptors != NULL && chr->descriptors[0].uuid != NULL);
+        assert(chr->descriptors[0].att_flags & BLE_ATT_F_READ_ENC);
+        struct os_mbuf reference = {0};
+        struct ble_gatt_access_ctxt descriptor = {.op = BLE_GATT_ACCESS_OP_READ_DSC, .om = &reference};
+        assert(chr->descriptors[0].access_cb(17, 0, &descriptor, chr->descriptors[0].arg) == 0);
+        assert(reference.len == 2 && reference.data[0] == index - 3 && reference.data[1] == 1);
+    }
+    struct os_mbuf led_reference = {0};
+    struct ble_gatt_access_ctxt descriptor = {.op = BLE_GATT_ACCESS_OP_READ_DSC, .om = &led_reference};
+    assert(characteristic(7)->descriptors[0].access_cb(17, 0, &descriptor,
+           characteristic(7)->descriptors[0].arg) == 0);
+    assert(led_reference.len == 2 && led_reference.data[0] == 1 && led_reference.data[1] == 2);
     hid_gatt_on_subscribe(18, *characteristic(4)->val_handle, true);
     assert(!hid_gatt_channel()->subscribed[HID_REPORT_KEYBOARD]);
     assert(hid_gatt_channel_for(18)->subscribed[HID_REPORT_KEYBOARD]);

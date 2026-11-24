@@ -10,8 +10,9 @@ use crate::setup::{
 };
 use crate::switch_shortcut::{SwitchBinding, SwitchShortcutStore};
 use esp32_kvm_host_actor::{
-    CaptureControl, ConnectError, ForgetError, HostActor, HostState, InventoryError, PairingError,
-    PairingStatus, SetOneKeyMapper, SetupSnapshot as ActorSnapshot, connect_system,
+    CaptureControl, ConnectError, ForgetError, GuestLabelError, HostActor, HostState,
+    InventoryError, PairingError, PairingStatus, SetOneKeyMapper, SetupSnapshot as ActorSnapshot,
+    connect_system,
 };
 use esp32_kvm_input_core::Action;
 use esp32_kvm_input_core::MappingProfile;
@@ -36,6 +37,8 @@ const COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 const INVENTORY_TIMEOUT: Duration = Duration::from_millis(900);
 const FORGET_TIMEOUT: Duration = Duration::from_millis(2500);
 const KEEP_AWAKE_INTERVAL: Duration = Duration::from_secs(30);
+const CAPTURE_QUEUE_CAPACITY: usize = 4096;
+const WORKER_TICK: Duration = Duration::from_millis(2);
 
 /// The native setup adapter: one worker owns and drives the confirmed serial stream.
 pub struct ActorBackend {
@@ -64,9 +67,14 @@ enum CommandKind {
     SetMapping {
         bond_token: [u8; 16],
         profile: MappingProfile,
+        display_name: String,
     },
     SetSwitchShortcut {
         binding: SwitchBinding,
+    },
+    SetEnabled {
+        token: [u8; 16],
+        enabled: bool,
     },
     Quit,
 }
@@ -109,14 +117,14 @@ impl ActorBackend {
             Arc<dyn CaptureControl + Send + Sync>,
             Receiver<CaptureEvent>,
             bool,
-        ) = match CaptureService::start(64) {
+        ) = match CaptureService::start(CAPTURE_QUEUE_CAPACITY) {
             Ok((service, receiver)) => (Arc::new(service), receiver, true),
             Err(error) => {
                 layout
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .capture_failed(format!("Native capture worker could not start: {error}"));
-                let (gate, receiver) = CaptureGate::new(64);
+                let (gate, receiver) = CaptureGate::new(CAPTURE_QUEUE_CAPACITY);
                 (Arc::new(DisabledCapture { gate }), receiver, false)
             }
         };
@@ -207,15 +215,25 @@ impl SetupBackend for ActorBackend {
             .map_err(|error| error.to_string())
     }
 
-    fn install_mapping(&self, bond_token: [u8; 16], profile: MappingProfile) -> Result<(), String> {
+    fn install_mapping(
+        &self,
+        bond_token: [u8; 16],
+        profile: MappingProfile,
+        display_name: &str,
+    ) -> Result<(), String> {
         let result = self.request(CommandKind::SetMapping {
             bond_token,
             profile,
+            display_name: display_name.into(),
         });
         if result.is_err() {
             self.capture.disarm();
         }
         result
+    }
+
+    fn install_enabled(&self, token: [u8; 16], enabled: bool) -> Result<(), String> {
+        self.request(CommandKind::SetEnabled { token, enabled })
     }
 
     fn refresh_inventory(&self) -> Result<BackendSnapshot, String> {
@@ -270,7 +288,50 @@ fn empty_snapshot(device: DeviceState) -> BackendSnapshot {
     }
 }
 
+/// Appends one timestamped line to the file named by KVM_APP_TRACE, when set.
+/// Lets an end-to-end run observe routing without reading the window.
+fn trace(line: &str) {
+    static FILE: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let file = FILE.get_or_init(|| {
+        let path = std::env::var_os("KVM_APP_TRACE")?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(Mutex::new)
+    });
+    if let Some(file) = file
+        && let Ok(mut file) = file.lock()
+    {
+        use std::io::Write;
+        let wall_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let _ = writeln!(file, "{wall_ms} {line}");
+    }
+}
+
+fn trace_snapshot(snapshot: &BackendSnapshot) {
+    static LAST: Mutex<String> = Mutex::new(String::new());
+    let line = serde_json::json!({
+        "device": snapshot.device,
+        "route": snapshot.route,
+        "connected": snapshot.connected_tokens,
+        "ready": snapshot.ready_tokens,
+    })
+    .to_string();
+    if let Ok(mut last) = LAST.lock()
+        && *last != line
+    {
+        trace(&format!("snapshot {line}"));
+        *last = line;
+    }
+}
+
 fn publish(shared: &Mutex<BackendSnapshot>, next: BackendSnapshot) {
+    trace_snapshot(&next);
     if let Ok(mut value) = shared.lock() {
         *value = next;
     }
@@ -333,7 +394,7 @@ fn map_snapshot(value: ActorSnapshot, monotonic_ms: u64, wall_ms: u64) -> Backen
     let ready_tokens = value
         .slots
         .iter()
-        .filter(|slot| active && slot.ready && slot.subscribed)
+        .filter(|slot| active && slot.ready && slot.subscribed && !slot.disabled)
         .map(|slot| token_hex(&slot.bond_token))
         .collect();
     let deadline_ms = value
@@ -401,6 +462,15 @@ fn inventory_error(error: InventoryError) -> String {
     }
 }
 
+fn label_error(error: GuestLabelError) -> String {
+    match error {
+        GuestLabelError::Unsupported => "Firmware does not support device display names.".into(),
+        GuestLabelError::InvalidArgument => "The device display name is invalid.".into(),
+        GuestLabelError::Busy => "Device is finishing another control request.".into(),
+        GuestLabelError::Host(fault) => format!("Device display name was not stored: {fault:?}"),
+    }
+}
+
 fn forget_error(error: ForgetError) -> String {
     match error {
         ForgetError::Busy => "Device is finishing another control request.".into(),
@@ -418,7 +488,7 @@ fn ready_slot(snapshot: &ActorSnapshot, token: &[u8; 16]) -> Option<u8> {
     snapshot
         .slots
         .iter()
-        .find(|slot| &slot.bond_token == token && slot.ready && slot.subscribed)
+        .find(|slot| &slot.bond_token == token && slot.ready && slot.subscribed && !slot.disabled)
         .map(|slot| slot.slot)
 }
 
@@ -543,17 +613,31 @@ fn worker(
 ) {
     let started = Instant::now();
     let mut actor: Option<HostActor<Box<dyn serialport::SerialPort>>> = None;
-    let mut mappings = BTreeMap::<[u8; 16], MappingProfile>::new();
+    let mut mappings = BTreeMap::<[u8; 16], (MappingProfile, String)>::new();
+    let mut disabled_guests = std::collections::BTreeSet::<[u8; 16]>::new();
     let mut next_scan = Instant::now();
     let mut next_topology_scan = Instant::now();
     let mut keep_awake_since = None;
     loop {
-        match receiver.recv_timeout(Duration::from_millis(20)) {
+        match receiver.recv_timeout(WORKER_TICK) {
             Ok(command) => {
                 let publish_after = matches!(
                     &command.kind,
                     CommandKind::RefreshInventory | CommandKind::Forget { .. }
                 );
+                let kind_name = match &command.kind {
+                    CommandKind::Select { .. } => "select",
+                    CommandKind::Local => "local",
+                    CommandKind::Begin => "pair_begin",
+                    CommandKind::Cancel => "pair_cancel",
+                    CommandKind::Confirm { .. } => "pair_confirm",
+                    CommandKind::RefreshInventory => "refresh",
+                    CommandKind::Forget { .. } => "forget",
+                    CommandKind::SetMapping { .. } => "set_mapping",
+                    CommandKind::SetSwitchShortcut { .. } => "set_shortcut",
+                    CommandKind::SetEnabled { .. } => "set_enabled",
+                    CommandKind::Quit => "quit",
+                };
                 if matches!(command.kind, CommandKind::Quit) {
                     capture.disarm();
                     if let Some(current) = actor.as_mut() {
@@ -575,18 +659,43 @@ fn worker(
                 } else if let CommandKind::SetMapping {
                     bond_token,
                     profile,
+                    display_name,
                 } = command.kind
                 {
                     let applied = if let Some(current) = actor.as_mut() {
-                        current
-                            .set_guest_profile(bond_token, profile.clone())
-                            .map_err(|error| format!("Invalid native mapping: {error:?}"))
+                        match current.set_guest_profile(bond_token, profile.clone()) {
+                            Ok(()) => current
+                                .set_guest_label(
+                                    bond_token,
+                                    &display_name,
+                                    started.elapsed().as_millis() as u64,
+                                )
+                                .map_err(label_error),
+                            Err(error) => Err(format!("Invalid native mapping: {error:?}")),
+                        }
                     } else {
                         Ok(())
                     };
                     applied.map(|()| {
-                        mappings.insert(bond_token, profile);
+                        mappings.insert(bond_token, (profile, display_name));
                     })
+                } else if let CommandKind::SetEnabled { token, enabled } = command.kind {
+                    if enabled {
+                        disabled_guests.remove(&token);
+                    } else {
+                        disabled_guests.insert(token);
+                    }
+                    if let Some(current) = actor.as_mut() {
+                        current.set_guest_enabled(token, enabled);
+                        // Older firmware cannot hide a guest on its screen; routing is
+                        // already blocked on the host, so an unsupported reply is fine.
+                        let _ = current.announce_guest_enabled(
+                            token,
+                            enabled,
+                            started.elapsed().as_millis() as u64,
+                        );
+                    }
+                    Ok(())
                 } else if let CommandKind::SetSwitchShortcut { binding } = command.kind {
                     let config = binding.validate();
                     if actor
@@ -654,6 +763,7 @@ fn worker(
                         }
                         CommandKind::SetMapping { .. } => unreachable!(),
                         CommandKind::SetSwitchShortcut { .. } => unreachable!(),
+                        CommandKind::SetEnabled { .. } => unreachable!(),
                         CommandKind::Quit => unreachable!(),
                     }
                 } else if matches!(command.kind, CommandKind::Local) {
@@ -672,6 +782,7 @@ fn worker(
                         map_snapshot(current.setup_snapshot(), now_ms, wall_ms),
                     );
                 }
+                trace(&format!("command {kind_name} -> {outcome:?}"));
                 let _ = command.reply.send(outcome);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -733,6 +844,7 @@ fn worker(
                                 port: (*port).to_owned(),
                             }),
                         );
+                        reconcile_system_transition(capture.as_ref());
                         publish(&shared, empty_snapshot(DeviceState::Handshaking));
                         match connect_system(
                             EXPECTED_BOARD,
@@ -743,8 +855,23 @@ fn worker(
                             started.elapsed().as_millis() as u64,
                         ) {
                             Ok(mut connected) => {
-                                if mappings.iter().all(|(token, profile)| {
+                                for token in &disabled_guests {
+                                    connected.set_guest_enabled(*token, false);
+                                    let _ = connected.announce_guest_enabled(
+                                        *token,
+                                        false,
+                                        started.elapsed().as_millis() as u64,
+                                    );
+                                }
+                                if mappings.iter().all(|(token, (profile, display_name))| {
                                     connected.set_guest_profile(*token, profile.clone()).is_ok()
+                                        && connected
+                                            .set_guest_label(
+                                                *token,
+                                                display_name,
+                                                started.elapsed().as_millis() as u64,
+                                            )
+                                            .is_ok()
                                 }) {
                                     actor = Some(connected);
                                 } else {
@@ -762,6 +889,16 @@ fn worker(
                 },
             }
         }
+    }
+}
+
+/// Windows raises a sticky SystemTransition fault on suspend, lock, or shutdown.
+/// A fresh verified session is the required reconciliation, so clear only that
+/// fault before reconnecting; real capture failures stay sticky.
+fn reconcile_system_transition(capture: &dyn CaptureControl) {
+    if capture.fault() == Some(esp32_kvm_platform_windows::CaptureFault::SystemTransition) {
+        capture.disarm();
+        let _ = capture.clear_fault();
     }
 }
 
@@ -843,7 +980,7 @@ fn edge_gate(
         ready_slots: snapshot
             .slots
             .iter()
-            .filter(|slot| slot.ready && slot.subscribed)
+            .filter(|slot| slot.ready && slot.subscribed && !slot.disabled)
             .map(|slot| (token_hex(&slot.bond_token), slot.slot))
             .collect(),
     }
@@ -863,6 +1000,20 @@ fn connect_error(error: ConnectError) -> DeviceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnect_clears_only_the_system_transition_fault() {
+        use esp32_kvm_platform_windows::CaptureFault;
+        let (gate, _events) = CaptureGate::new(8);
+        gate.system_transition();
+        assert_eq!(gate.fault(), Some(CaptureFault::SystemTransition));
+        reconcile_system_transition(&gate);
+        assert_eq!(gate.fault(), None);
+
+        gate.mark_fault(CaptureFault::RawInputFailure);
+        reconcile_system_transition(&gate);
+        assert_eq!(gate.fault(), Some(CaptureFault::RawInputFailure));
+    }
     use esp32_kvm_host_actor::{
         HostState, PairingStatus, SetupSnapshot as ActorSnapshot, SlotSnapshot,
     };
@@ -884,6 +1035,8 @@ mod tests {
                 bond_token: [0xab; 16],
                 ready: true,
                 subscribed: true,
+                disabled: false,
+                notifications_delivered: 0,
             }],
             retained_bonds: Some(vec![[0xcd; 16]]),
             retained_bonds_observed_ms: Some(0),

@@ -39,11 +39,21 @@ impl Write for ScriptedPort {
 }
 
 fn caps(board: &str, session: u64, min_minor: u8, max_minor: u8) -> Vec<u8> {
+    caps_at_generation(board, session, min_minor, max_minor, 0)
+}
+
+fn caps_at_generation(
+    board: &str,
+    session: u64,
+    min_minor: u8,
+    max_minor: u8,
+    generation: u32,
+) -> Vec<u8> {
     let mut p = vec![0xa8, 1, 0x61, b'1', 2, 0x60 + board.len() as u8];
     p.extend_from_slice(board.as_bytes());
     p.extend_from_slice(&[3, min_minor, 4, max_minor, 5, 1, 6, 1, 7, 0, 8, 0x1b]);
     p.extend_from_slice(&session.to_be_bytes());
-    Frame::new(MessageKind::Caps, session, 7, 0, p)
+    Frame::new(MessageKind::Caps, session, 7, generation, p)
         .encode()
         .unwrap()
 }
@@ -125,7 +135,19 @@ fn stale_frame_before_caps_allows_one_bounded_hello_retry() {
     let device = probe_stream(&mut stream, "esp32-kvm", "host-test").unwrap();
     assert_eq!(device.session_id, session);
     let sent = decoded_frames(&stream.written);
-    assert_eq!(sent.len(), 3);
+    assert_eq!(sent.len(), 2);
+}
+
+#[test]
+fn reconnect_accepts_caps_with_the_firmwares_current_route_generation() {
+    let session = 0x1_0000_0000;
+    let mut input = caps_at_generation("esp32-kvm-s3", session, 0, 3, 7);
+    input.extend_from_slice(&caps_at_generation("esp32-kvm-s3", session, 0, 3, 8));
+    input.extend_from_slice(&ack(session));
+    let mut stream = ScriptedPort::new(input);
+    let confirmed = probe_stream(&mut stream, "esp32-kvm-s3", "desktop").unwrap();
+    assert_eq!(confirmed.session_id, session);
+    assert_eq!(confirmed.negotiated_minor, 3);
 }
 
 #[test]

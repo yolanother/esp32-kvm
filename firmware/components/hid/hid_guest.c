@@ -38,6 +38,13 @@ static void *pairing_event_context;
 static bool started;
 static struct ble_npl_event disconnect_events[HID_GATT_MAX_CONNECTIONS];
 static struct ble_npl_callout pairing_timeout;
+static struct ble_npl_callout advertising_retry;
+static size_t reconnect_phase;
+
+#define HID_ADVERTISING_RETRY_MS 250u
+#define HID_RECONNECT_PHASE_MS 500u
+
+static void schedule_advertising_retry(void);
 
 static void disconnect_on_host(struct ble_npl_event *event)
 {
@@ -75,7 +82,12 @@ static void expire_window(void)
 static void pairing_timeout_on_host(struct ble_npl_event *event)
 {
     (void)event;
+    bool was_open = pairing.window_active;
     expire_window();
+    if (was_open && !pairing.window_active) {
+        (void)ble_gap_adv_stop();
+        schedule_advertising_retry();
+    }
 }
 
 static hid_peer_t peer_identity(const ble_addr_t *address)
@@ -101,14 +113,72 @@ static int reject_store_overflow(struct ble_store_status_event *event, void *arg
 }
 
 static int gap_event(struct ble_gap_event *event, void *argument);
+static void advertise(void);
+
+static void advertising_retry_on_host(struct ble_npl_event *event)
+{
+    (void)event;
+    advertise();
+}
+
+static void schedule_advertising_retry(void)
+{
+    if (ble_npl_callout_reset(&advertising_retry,
+            ble_npl_time_ms_to_ticks32(HID_ADVERTISING_RETRY_MS)) != BLE_NPL_OK)
+        ESP_LOGE(tag, "Could not schedule HID advertising retry");
+}
+
+static bool peer_is_connected(hid_peer_t peer)
+{
+    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+        hid_channel_t *channel = hid_gatt_channel_at(slot);
+        struct ble_gap_conn_desc description;
+        if (channel->connected &&
+            ble_gap_conn_find(channel->connection_handle, &description) == 0 &&
+            description.peer_id_addr.type == peer.type &&
+            memcmp(description.peer_id_addr.val, peer.address, sizeof(peer.address)) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Each boot or disconnect starts one short directed sweep over the retained
+   peers. Once it is exhausted the device stays on continuous undirected
+   advertising: a central that reconnects with a private address never matches a
+   directed target, so a repeating sweep would leave it a fraction of the time. */
+static void restart_reconnect_sweep(void)
+{
+    reconnect_phase = 0;
+}
+
+static bool next_reconnect_peer(ble_addr_t *address)
+{
+    if (!address || pairing.window_active || pairing.bond_count == 0) return false;
+    while (reconnect_phase < pairing.bond_count) {
+        hid_peer_t peer = pairing.bonds[reconnect_phase++].peer;
+        if (!peer_is_connected(peer)) {
+            *address = ble_identity(peer);
+            return true;
+        }
+    }
+    return false;
+}
 
 static void advertise(void)
 {
     static const ble_uuid16_t service[] = {BLE_UUID16_INIT(0x1812)};
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    static const char name[] = "ESP32 KVM KB Test";
+#else
     static const char name[] = "ESP32 KVM";
+#endif
     struct ble_hs_adv_fields fields = {0};
     struct ble_gap_adv_params parameters = {0};
-    if (hid_gatt_connection_count() >= HID_GATT_MAX_CONNECTIONS) return;
+    ble_addr_t reconnect_address;
+    if (hid_gatt_connection_count() >= HID_GATT_MAX_CONNECTIONS) {
+        ble_npl_callout_stop(&advertising_retry);
+        return;
+    }
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name = (uint8_t *)name;
     fields.name_len = sizeof(name) - 1;
@@ -120,21 +190,31 @@ static void advertise(void)
     fields.appearance_is_present = 1;
     if (ble_gap_adv_set_fields(&fields) != 0) {
         ESP_LOGE(tag, "HID advertising fields rejected");
+        schedule_advertising_retry();
         return;
     }
-    parameters.conn_mode = BLE_GAP_CONN_MODE_UND;
-    parameters.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    bool directed = next_reconnect_peer(&reconnect_address);
+    parameters.conn_mode = directed ? BLE_GAP_CONN_MODE_DIR : BLE_GAP_CONN_MODE_UND;
+    parameters.disc_mode = directed ? BLE_GAP_DISC_MODE_NON : BLE_GAP_DISC_MODE_GEN;
     /* Apple recommends an exact 20 ms interval for prompt HID discovery. */
     parameters.itvl_min = 32;
     parameters.itvl_max = 32;
-    int result = ble_gap_adv_start(own_address_type, NULL, BLE_HS_FOREVER,
+    uint32_t duration = directed ? HID_RECONNECT_PHASE_MS : BLE_HS_FOREVER;
+    int result = ble_gap_adv_start(own_address_type,
+                                   directed ? &reconnect_address : NULL, duration,
                                    &parameters, gap_event, NULL);
-    if (result != 0) ESP_LOGE(tag, "HID advertising failed: %d", result);
+    if (result == 0 || result == BLE_HS_EALREADY) {
+        ble_npl_callout_stop(&advertising_retry);
+        return;
+    }
+    ESP_LOGW(tag, "HID advertising deferred after transient error: %d", result);
+    schedule_advertising_retry();
 }
 
 static void on_reset(int reason)
 {
     (void)reason;
+    ble_npl_callout_stop(&advertising_retry);
     for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
         hid_channel_t *channel = hid_gatt_channel_at(slot);
         if (channel->connected) hid_channel_disconnected(channel);
@@ -144,12 +224,45 @@ static void on_reset(int reason)
 
 static void on_sync(void)
 {
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    /* Use a separate static identity for the diagnostic profile. macOS keeps
+       GATT data by peripheral identity even after the Bluetooth UI forgets a
+       device, so changing only the name cannot force fresh HID discovery. */
+    static const uint8_t diagnostic_address[6] = {
+        0x51, 0x32, 0x84, 0x76, 0x5a, 0xe1
+    };
+    if (ble_hs_id_set_rnd(diagnostic_address) != 0) {
+        ESP_LOGE(tag, "Could not set diagnostic BLE identity");
+        return;
+    }
+    own_address_type = BLE_OWN_ADDR_RANDOM;
+#else
     if (ble_hs_util_ensure_addr(0) != 0 ||
         ble_hs_id_infer_auto(0, &own_address_type) != 0) {
         ESP_LOGE(tag, "No stable BLE identity available");
         return;
     }
+#endif
+    /* The HID report set changed while paired development Macs retained their
+       bonds. Mark the full database changed on every boot so bonded centrals
+       invalidate cached report handles before input notifications resume. */
+    ble_svc_gatt_changed(0x0001, 0xffff);
+    restart_reconnect_sweep();
     advertise();
+}
+
+/* Encryption and CCCD writes can be reported for a link before this callback has
+   seen its CONNECT event (a bonded Mac secures the link immediately). Register
+   the live link on first sight so those events are not discarded; CONNECT then
+   finds it already present. Events for a link NimBLE already removed are ignored. */
+static hid_channel_t *live_channel(uint16_t connection_handle)
+{
+    hid_channel_t *channel = hid_gatt_channel_for(connection_handle);
+    struct ble_gap_conn_desc description;
+    if (channel || ble_gap_conn_find(connection_handle, &description) != 0) return channel;
+    if (!hid_gatt_on_connect(connection_handle)) return NULL;
+    ESP_LOGW(tag, "BLE event preceded CONNECT; registered handle %u", connection_handle);
+    return hid_gatt_channel_for(connection_handle);
 }
 
 static int gap_event(struct ble_gap_event *event, void *argument)
@@ -167,11 +280,22 @@ static int gap_event(struct ble_gap_event *event, void *argument)
            identity is not trustworthy until link security has completed; the
            ENC_CHANGE path checks the authenticated bond before exposing a slot. */
         ESP_LOGI(tag, "BLE link opened; authenticating handle %u", event->connect.conn_handle);
-        if (!hid_gatt_on_connect(event->connect.conn_handle)) {
+        if (!hid_gatt_channel_for(event->connect.conn_handle) &&
+            !hid_gatt_on_connect(event->connect.conn_handle)) {
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
-        int security_result = ble_gap_security_initiate(event->connect.conn_handle);
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+        /* Match a normal HID peripheral: let the central start security when
+         * reading encrypted report references. Request it only as a fallback
+         * when the central subscribes to input before securing the link. */
+        advertise();
+#else
+        /* A bonded central that already secured the link needs no Security Request;
+           an unanswered one would time out after 30 s and drop a working link. */
+        hid_channel_t *opened = hid_gatt_channel_for(event->connect.conn_handle);
+        int security_result = opened && opened->encrypted ?
+                              0 : ble_gap_security_initiate(event->connect.conn_handle);
         /* The central may have begun SMP first.  An existing procedure is
            still allowed to finish through ENC_CHANGE; only a real failure
            invalidates the link. */
@@ -179,6 +303,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             ESP_LOGW(tag, "BLE security start failed: %d", security_result);
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         } else advertise();
+#endif
         return 0;
     }
     case BLE_GAP_EVENT_DISCONNECT: {
@@ -202,10 +327,18 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             pairing.challenge_approved = false;
             pairing.challenge_id = 0;
         }
+        restart_reconnect_sweep();
         advertise();
         return 0;
     }
     case BLE_GAP_EVENT_ENC_CHANGE: {
+        hid_channel_t *known = live_channel(event->enc_change.conn_handle);
+        if (event->enc_change.status != 0 && known && known->encrypted) {
+            /* A late procedure failure must not drop a link that is already secure. */
+            ESP_LOGW(tag, "Ignoring security status %d on authenticated handle %u",
+                     event->enc_change.status, event->enc_change.conn_handle);
+            return 0;
+        }
         struct ble_gap_conn_desc description;
         bool secure = event->enc_change.status == 0 &&
                       ble_gap_conn_find(event->enc_change.conn_handle, &description) == 0 &&
@@ -245,15 +378,33 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         } else ESP_LOGI(tag, "BLE authenticated handle %u", event->enc_change.conn_handle);
         return 0;
     }
-    case BLE_GAP_EVENT_SUBSCRIBE:
+    case BLE_GAP_EVENT_SUBSCRIBE: {
 #ifdef CONFIG_KVM_HID_GATT_TRACE
         ESP_LOGI(tag, "HID subscribe conn=%u handle=%u notify=%u",
                  event->subscribe.conn_handle, event->subscribe.attr_handle,
                  event->subscribe.cur_notify);
 #endif
+        (void)live_channel(event->subscribe.conn_handle);
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+        hid_channel_t *channel = hid_gatt_channel_for(event->subscribe.conn_handle);
+        bool had_keyboard_subscription = channel &&
+            (channel->subscribed[HID_REPORT_KEYBOARD] || channel->subscribed[HID_REPORT_BOOT_KEYBOARD]);
+#endif
         hid_gatt_on_subscribe(event->subscribe.conn_handle,
                               event->subscribe.attr_handle, event->subscribe.cur_notify);
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+        if (event->subscribe.cur_notify && channel && !channel->encrypted && !had_keyboard_subscription &&
+            (channel->subscribed[HID_REPORT_KEYBOARD] ||
+             channel->subscribed[HID_REPORT_BOOT_KEYBOARD])) {
+            int result = ble_gap_security_initiate(event->subscribe.conn_handle);
+            if (result != 0 && result != BLE_HS_EALREADY) {
+                ESP_LOGW(tag, "HID subscription security failed: %d", result);
+                ble_gap_terminate(event->subscribe.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
+        }
+#endif
         return 0;
+    }
     case BLE_GAP_EVENT_NOTIFY_TX: {
 #ifdef CONFIG_KVM_HID_GATT_TRACE
         ESP_LOGI(tag, "HID notify conn=%u handle=%u status=%d",
@@ -261,10 +412,14 @@ static int gap_event(struct ble_gap_event *event, void *argument)
                  event->notify_tx.status);
 #endif
         hid_channel_t *channel = hid_gatt_channel_for(event->notify_tx.conn_handle);
-        if (event->notify_tx.status != 0 && channel) {
-            channel->armed = false;
-            channel->needs_disconnect = true;
-            ble_gap_terminate(channel->connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (channel) {
+            if (event->notify_tx.status == 0) {
+                channel->notify_tx_successes++;
+            } else {
+                channel->armed = false;
+                channel->needs_disconnect = true;
+                ble_gap_terminate(channel->connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
         }
         return 0;
     }
@@ -384,7 +539,11 @@ esp_err_t hid_guest_start(void)
     ble_svc_gatt_init();
     result = hid_gatt_register();
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    result = ble_svc_gap_device_name_set("ESP32 KVM KB Test");
+#else
     result = ble_svc_gap_device_name_set("ESP32 KVM");
+#endif
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
     result = ble_svc_gap_device_appearance_set(0x03c1);
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
@@ -395,6 +554,8 @@ esp_err_t hid_guest_start(void)
         ble_npl_event_init(&disconnect_events[slot - 1], disconnect_on_host, NULL);
     ble_npl_callout_init(&pairing_timeout, nimble_port_get_dflt_eventq(),
                          pairing_timeout_on_host, NULL);
+    ble_npl_callout_init(&advertising_retry, nimble_port_get_dflt_eventq(),
+                         advertising_retry_on_host, NULL);
     nimble_port_freertos_init(host_task);
     started = true;
     return ESP_OK;
@@ -424,6 +585,8 @@ esp_err_t hid_guest_pairing_open(void)
         return ESP_FAIL;
     }
     publish(HID_GUEST_PAIRING_OPENED, 0, 0, NULL);
+    (void)ble_gap_adv_stop();
+    schedule_advertising_retry();
     return ESP_OK;
 }
 
@@ -435,6 +598,8 @@ void hid_guest_pairing_cancel(void)
     ble_npl_callout_stop(&pairing_timeout);
     if (pending) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
     publish(HID_GUEST_PAIRING_CLOSED, 0, 0, NULL);
+    (void)ble_gap_adv_stop();
+    schedule_advertising_retry();
 }
 
 esp_err_t hid_guest_pairing_confirm(uint32_t challenge_id, bool approved)
@@ -496,12 +661,8 @@ bool hid_guest_snapshot_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONN
         hid_guest_slot_snapshot_t *item = &output[slot - 1];
         memcpy(item->token, token.bytes, sizeof(item->token));
         item->ready = true;
-        item->subscribed = channel->protocol_mode == 0 ?
-                           channel->subscribed[HID_REPORT_BOOT_KEYBOARD] &&
-                           channel->subscribed[HID_REPORT_BOOT_MOUSE] :
-                           channel->subscribed[HID_REPORT_KEYBOARD] &&
-                           channel->subscribed[HID_REPORT_MOUSE] &&
-                           channel->subscribed[HID_REPORT_CONSUMER];
+        item->subscribed = hid_channel_ready(channel);
+        item->notify_tx_successes = channel->notify_tx_successes;
     }
     return true;
 }

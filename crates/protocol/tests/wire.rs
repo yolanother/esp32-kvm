@@ -311,3 +311,67 @@ fn unplug_discards_partial_frame_and_crc_error_recovers() {
         Some(Ok(frame))
     );
 }
+
+#[test]
+fn guest_enabled_command_is_fixed_size_with_nonzero_token_and_boolean_flag() {
+    let mut payload = vec![7; 16];
+    payload.push(0);
+    for flag in [0, 1] {
+        payload[16] = flag;
+        let encoded = Frame::new(MessageKind::SetGuestEnabled, 5, 9, 0, payload.clone())
+            .encode()
+            .unwrap();
+        let mut decoder = FrameDecoder::new();
+        let mut decoded = None;
+        for byte in &encoded {
+            if let Some(result) = decoder.push(*byte) {
+                decoded = Some(result.unwrap());
+            }
+        }
+        let decoded = decoded.unwrap();
+        assert_eq!(decoded.kind, MessageKind::SetGuestEnabled);
+        assert_eq!(decoded.payload, payload);
+    }
+    payload[16] = 2;
+    assert_eq!(
+        Frame::new(MessageKind::SetGuestEnabled, 5, 9, 0, payload.clone()).encode(),
+        Err(ProtocolError::Payload)
+    );
+    assert_eq!(
+        Frame::new(MessageKind::SetGuestEnabled, 5, 9, 0, vec![0; 17]).encode(),
+        Err(ProtocolError::Payload)
+    );
+    assert_eq!(
+        Frame::new(MessageKind::SetGuestEnabled, 5, 9, 0, vec![1; 16]).encode(),
+        Err(ProtocolError::Payload)
+    );
+}
+
+#[test]
+fn status_slot_notification_counter_accepts_full_u32_range() {
+    // Firmware reports a running u32 notification count in slot key 5; a long
+    // guest session must not push it outside the validator's accepted range.
+    for counter in [0u32, 65_535, 65_536, 33_753_909, u32::MAX] {
+        let mut payload = vec![0xa6, 1, 0, 2, 0, 3, 0x81, 0xa5, 1, 1, 2, 0x50];
+        payload.extend_from_slice(&[0x11; 16]);
+        payload.extend_from_slice(&[3, 0xf5, 4, 0xf5, 5]);
+        match counter {
+            0..=23 => payload.push(counter as u8),
+            24..=255 => payload.extend_from_slice(&[0x18, counter as u8]),
+            256..=65_535 => {
+                payload.push(0x19);
+                payload.extend_from_slice(&(counter as u16).to_be_bytes());
+            }
+            _ => {
+                payload.push(0x1a);
+                payload.extend_from_slice(&counter.to_be_bytes());
+            }
+        }
+        payload.extend_from_slice(&[4, 0, 5, 0, 6, 0xa1, 1, 0]);
+        let frame = Frame::new(MessageKind::Status, 5, 1, 0, payload);
+        let encoded = frame.encode().unwrap();
+        let decoded =
+            Frame::decode_decoded(&cobs_decode(&encoded[..encoded.len() - 1]).unwrap());
+        assert_eq!(decoded, Ok(frame), "counter {counter}");
+    }
+}

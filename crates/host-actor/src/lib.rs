@@ -32,7 +32,7 @@ use esp32_kvm_protocol::{BondInventory, Frame, FrameDecoder, MessageKind, Protoc
 use esp32_kvm_usb_transport::{
     ConfirmedDevice, ProbeError, available_usb_ports, candidate_ports, probe_stream,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::sync::{
     Arc,
@@ -97,6 +97,10 @@ pub trait CaptureControl {
     fn set_hotkeys(&self, _config: HotkeyConfig) -> bool {
         false
     }
+    /// Clears a diagnosed fault while disarmed; false when disarmed state is not proven.
+    fn clear_fault(&self) -> bool {
+        false
+    }
 }
 
 impl CaptureControl for CaptureGate {
@@ -114,6 +118,9 @@ impl CaptureControl for CaptureGate {
     }
     fn physical_all_up(&self) -> bool {
         CaptureGate::physical_all_up(self)
+    }
+    fn clear_fault(&self) -> bool {
+        CaptureGate::clear_fault(self)
     }
 }
 
@@ -140,6 +147,9 @@ impl CaptureControl for CaptureService {
     fn set_hotkeys(&self, config: HotkeyConfig) -> bool {
         CaptureService::set_hotkeys(self, config)
     }
+    fn clear_fault(&self) -> bool {
+        CaptureService::clear_fault(self)
+    }
 }
 
 impl<T: CaptureControl + ?Sized> CaptureControl for Arc<T> {
@@ -163,6 +173,9 @@ impl<T: CaptureControl + ?Sized> CaptureControl for Arc<T> {
     }
     fn set_hotkeys(&self, config: HotkeyConfig) -> bool {
         (**self).set_hotkeys(config)
+    }
+    fn clear_fault(&self) -> bool {
+        (**self).clear_fault()
     }
 }
 
@@ -236,6 +249,10 @@ pub struct SlotSnapshot {
     pub ready: bool,
     /// Whether its HID notifications are subscribed.
     pub subscribed: bool,
+    /// Whether the user temporarily excluded this guest from routing.
+    pub disabled: bool,
+    /// Notifications whose BLE controller transmission completed on this live link.
+    pub notifications_delivered: u32,
 }
 
 /// Setup state available from the verified session and latest STATUS.
@@ -314,6 +331,19 @@ pub enum InventoryError {
     Host(HostFault),
 }
 
+/// A guest label could not be persisted by the connected device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuestLabelError {
+    /// The device did not negotiate the minor-three label command.
+    Unsupported,
+    /// The token or UTF-8 label is outside the wire limits.
+    InvalidArgument,
+    /// Another acknowledged control operation is in flight.
+    Busy,
+    /// The verified session failed before the label was acknowledged.
+    Host(HostFault),
+}
+
 #[derive(Clone)]
 struct Pending {
     frame: Frame,
@@ -352,6 +382,7 @@ pub struct HostActor<S: Read + Write> {
     keys: BTreeMap<(u32, bool), SourceKey>,
     mapping: MappingEngine,
     profiles: BTreeMap<[u8; 16], MappingProfile>,
+    disabled: BTreeSet<[u8; 16]>,
     buttons: u8,
     wheel_residual: i32,
     pan_residual: i32,
@@ -413,6 +444,7 @@ impl<S: Read + Write> HostActor<S> {
             keys: BTreeMap::new(),
             mapping: MappingEngine::new(MappingProfile::default()).expect("empty profile is valid"),
             profiles: BTreeMap::new(),
+            disabled: BTreeSet::new(),
             buttons: 0,
             wheel_residual: 0,
             pan_residual: 0,
@@ -432,7 +464,10 @@ impl<S: Read + Write> HostActor<S> {
             Some(State::Local) if self.pairing => HostState::Pairing,
             Some(State::Local) => HostState::Local,
             Some(State::Switching) => HostState::Switching,
-            Some(State::Guest(slot)) => HostState::Guest(slot),
+            Some(State::Guest(slot)) if self.capture.generation() == self.confirmed_generation => {
+                HostState::Guest(slot)
+            }
+            Some(State::Guest(_)) => HostState::Switching,
         }
     }
 
@@ -466,6 +501,115 @@ impl<S: Read + Write> HostActor<S> {
         Ok(())
     }
 
+    /// Temporarily removes a guest from cycling, direct selection and edge routing,
+    /// or restores it. A disabled guest that is controlling returns control locally
+    /// on the next STATUS, exactly as if its link had dropped.
+    pub fn set_guest_enabled(&mut self, bond_token: [u8; 16], enabled: bool) {
+        if enabled {
+            self.disabled.remove(&bond_token);
+        } else {
+            self.disabled.insert(bond_token);
+        }
+    }
+
+    /// Stores a short UTF-8 display label against an opaque guest bond token.
+    pub fn set_guest_label(
+        &mut self,
+        bond_token: [u8; 16],
+        label: &str,
+        now_ms: u64,
+    ) -> Result<(), GuestLabelError> {
+        if self.device.negotiated_minor < 3 {
+            return Err(GuestLabelError::Unsupported);
+        }
+        if bond_token == [0; 16]
+            || label.is_empty()
+            || label.len() > esp32_kvm_protocol::MAX_GUEST_LABEL_BYTES
+            || label.chars().any(char::is_control)
+        {
+            return Err(GuestLabelError::InvalidArgument);
+        }
+        self.await_first_status(now_ms)?;
+        if self.pending.is_some() {
+            return Err(GuestLabelError::Busy);
+        }
+        let mut payload = Vec::with_capacity(17 + label.len());
+        payload.extend_from_slice(&bond_token);
+        payload.push(label.len() as u8);
+        payload.extend_from_slice(label.as_bytes());
+        self.issue_aux(MessageKind::SetGuestLabel, payload, now_ms)
+            .map_err(|_| GuestLabelError::Host(HostFault::Transport))?;
+        self.await_aux(now_ms)
+    }
+
+    /// Asks a minor-4 device to hide or show a guest on its screen and Next
+    /// button. Older firmware reports `Unsupported`, which callers may ignore.
+    pub fn announce_guest_enabled(
+        &mut self,
+        bond_token: [u8; 16],
+        enabled: bool,
+        now_ms: u64,
+    ) -> Result<(), GuestLabelError> {
+        if self.device.negotiated_minor < 4 {
+            return Err(GuestLabelError::Unsupported);
+        }
+        if bond_token == [0; 16] {
+            return Err(GuestLabelError::InvalidArgument);
+        }
+        self.await_first_status(now_ms)?;
+        if self.pending.is_some() {
+            return Err(GuestLabelError::Busy);
+        }
+        let mut payload = Vec::with_capacity(17);
+        payload.extend_from_slice(&bond_token);
+        payload.push(u8::from(enabled));
+        self.issue_aux(MessageKind::SetGuestEnabled, payload, now_ms)
+            .map_err(|_| GuestLabelError::Host(HostFault::Transport))?;
+        self.await_aux(now_ms)
+    }
+
+    /// Waits for the first STATUS, which adopts the device's current route generation.
+    /// The device never resets its generation between sessions, so a command stamped
+    /// with the initial zero would be ACKed with a different generation and rejected.
+    fn await_first_status(&mut self, now_ms: u64) -> Result<(), GuestLabelError> {
+        let started = Instant::now();
+        while self.router.is_none() {
+            let elapsed = started.elapsed().as_millis() as u64;
+            if elapsed >= PEER_TIMEOUT_MS {
+                self.fail(HostFault::Timeout);
+                return Err(GuestLabelError::Host(HostFault::Timeout));
+            }
+            self.poll(now_ms.saturating_add(elapsed));
+            if let Some(fault) = self.fault {
+                return Err(GuestLabelError::Host(fault));
+            }
+            if self.router.is_none() {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
+
+    /// Waits for the one outstanding auxiliary command's exact ACK.
+    fn await_aux(&mut self, now_ms: u64) -> Result<(), GuestLabelError> {
+        let started = Instant::now();
+        while self.pending.is_some() {
+            let elapsed = started.elapsed().as_millis() as u64;
+            if elapsed >= PEER_TIMEOUT_MS {
+                self.fail(HostFault::Timeout);
+                return Err(GuestLabelError::Host(HostFault::Timeout));
+            }
+            self.poll(now_ms.saturating_add(elapsed));
+            if let Some(fault) = self.fault {
+                return Err(GuestLabelError::Host(fault));
+            }
+            if self.pending.is_some() {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the latest setup data without opening another serial connection.
     pub fn setup_snapshot(&self) -> SetupSnapshot {
         SetupSnapshot {
@@ -475,7 +619,14 @@ impl<S: Read + Write> HostActor<S> {
             firmware_version: Some(self.device.firmware_version.clone()),
             pairing_status: self.pairing_status,
             state: self.state(),
-            slots: self.slots.clone(),
+            slots: self
+                .slots
+                .iter()
+                .map(|slot| SlotSnapshot {
+                    disabled: self.disabled.contains(&slot.bond_token),
+                    ..slot.clone()
+                })
+                .collect(),
             retained_bonds: self.retained_bonds.clone(),
             retained_bonds_observed_ms: self.inventory_observed_ms,
             pairing_deadline_ms: self.pairing_deadline_ms,
@@ -648,7 +799,9 @@ impl<S: Read + Write> HostActor<S> {
 
     /// Drains a bounded batch from the capture hook and advances serial I/O.
     pub fn drive(&mut self, receiver: &Receiver<CaptureEvent>, now_ms: u64) {
-        for _ in 0..64 {
+        // High-polling-rate mice can produce hundreds of packets between
+        // scheduler slices. Drain a bounded burst before polling serial.
+        for _ in 0..2048 {
             match receiver.try_recv() {
                 Ok(event) => self.on_capture(event, now_ms),
                 Err(TryRecvError::Empty) => break,
@@ -673,6 +826,8 @@ impl<S: Read + Write> HostActor<S> {
                     | MessageKind::PairReply
                     | MessageKind::PairCancel
                     | MessageKind::ForgetBond
+                    | MessageKind::SetGuestLabel
+                    | MessageKind::SetGuestEnabled
             )
         }) {
             return;
@@ -736,6 +891,9 @@ impl<S: Read + Write> HostActor<S> {
                 down,
                 repeat,
             } => {
+                trace_line(&format!(
+                    "key vk={virtual_key:#x} scan={scan_code:#x} ext={extended} down={down} repeat={repeat}"
+                ));
                 if !repeat && self.update_key(virtual_key, scan_code, extended, down) {
                     self.input_trace.key_events_accepted += 1;
                     self.send_key_state();
@@ -892,7 +1050,12 @@ impl<S: Read + Write> HostActor<S> {
                 }
             }
         }
-        if matches!(self.state(), HostState::Guest(_)) && self.capture.generation() == 0 {
+        if self
+            .router
+            .as_ref()
+            .is_some_and(|router| matches!(router.state(), State::Guest(_)))
+            && self.capture.generation() == 0
+        {
             self.observe_all_up();
         }
     }
@@ -1031,7 +1194,12 @@ impl<S: Read + Write> HostActor<S> {
                     let ready = status
                         .slots
                         .iter()
-                        .any(|seen| seen.slot == slot && seen.ready && seen.subscribed);
+                        .any(|seen| {
+                            seen.slot == slot
+                                && seen.ready
+                                && seen.subscribed
+                                && !self.disabled.contains(&seen.bond_token)
+                        });
                     next = router.set_ready(slot, ready).or(next);
                 }
             }
@@ -1087,7 +1255,9 @@ impl<S: Read + Write> HostActor<S> {
                 MessageKind::PairBegin
                 | MessageKind::PairReply
                 | MessageKind::PairCancel
-                | MessageKind::ForgetBond,
+                | MessageKind::ForgetBond
+                | MessageKind::SetGuestLabel
+                | MessageKind::SetGuestEnabled,
             ) => None,
             _ => {
                 self.fail(HostFault::Protocol);
@@ -1191,7 +1361,10 @@ impl<S: Read + Write> HostActor<S> {
     fn arm_capture_if_ready(&mut self) {
         if !self.all_up
             || !self.capture.physical_all_up()
-            || !matches!(self.state(), HostState::Guest(_))
+            || !self
+                .router
+                .as_ref()
+                .is_some_and(|router| matches!(router.state(), State::Guest(_)))
         {
             return;
         }
@@ -1222,16 +1395,17 @@ impl<S: Read + Write> HostActor<S> {
     }
 
     fn load_profile_for_active_guest(&mut self) {
-        let profile = if let HostState::Guest(slot) = self.state() {
-            self.slots
-                .iter()
-                .find(|seen| seen.slot == slot)
-                .and_then(|seen| self.profiles.get(&seen.bond_token))
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            MappingProfile::default()
-        };
+        let profile =
+            if let Some(State::Guest(slot)) = self.router.as_ref().map(RequestActor::state) {
+                self.slots
+                    .iter()
+                    .find(|seen| seen.slot == slot)
+                    .and_then(|seen| self.profiles.get(&seen.bond_token))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                MappingProfile::default()
+            };
         // Every profile was validated before storage, and clear_input ran at route start.
         self.mapping
             .set_profile(profile)
@@ -1273,6 +1447,7 @@ impl<S: Read + Write> HostActor<S> {
 
     fn send_key_state(&mut self) {
         let payload = self.mapping.report().bytes().to_vec();
+        trace_line(&format!("key_state {:02x?}", payload));
         let frame = self.make_frame(MessageKind::KeyState, self.confirmed_generation, payload);
         if self.write_frame(&frame).is_err() {
             self.fail(HostFault::Transport);
@@ -1317,7 +1492,10 @@ impl<S: Read + Write> HostActor<S> {
         self.pan_residual = 0;
     }
 
+    #[track_caller]
     fn fail(&mut self, fault: HostFault) {
+        let site = std::panic::Location::caller();
+        trace_line(&format!("fault {fault:?} at {}:{}", site.file(), site.line()));
         self.capture.disarm();
         self.clear_input();
         self.all_up = false;
@@ -1447,7 +1625,7 @@ impl Status {
             c.expect(4)?;
             let subscribed = c.bool()?;
             c.expect(5)?;
-            let _interval = c.uint()?;
+            let notifications_delivered = c.uint()?;
             if slot == 0
                 || slot > 3
                 || slot <= previous_slot
@@ -1465,6 +1643,10 @@ impl Status {
                 bond_token,
                 ready: is_ready,
                 subscribed,
+                disabled: false,
+                notifications_delivered: notifications_delivered
+                    .try_into()
+                    .map_err(|_| ProtocolError::Payload)?,
             });
         }
         c.expect(4)?;
@@ -1615,5 +1797,18 @@ fn encode_cbor_u32(value: u32, output: &mut Vec<u8>) {
             output.push(0x1a);
             output.extend_from_slice(&value.to_be_bytes());
         }
+    }
+}
+
+/// Appends one line to the file named by KVM_APP_TRACE; a no-op when it is unset.
+fn trace_line(line: &str) {
+    if let Some(path) = std::env::var_os("KVM_APP_TRACE")
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
     }
 }

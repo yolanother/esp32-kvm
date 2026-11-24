@@ -617,6 +617,37 @@ fn release_switch_arm_requires_exact_ack_and_all_up() {
 }
 
 #[test]
+fn disabled_guest_is_never_selected_until_reenabled() {
+    let (mut actor, wire, _gate) = setup();
+    wire.feed(status(0, true));
+    actor.poll(1);
+    actor.set_guest_enabled([1; 16], false);
+    wire.feed(status(0, true));
+    actor.poll(2);
+    assert!(actor.setup_snapshot().slots[0].disabled);
+    // A request for an unavailable guest only asserts local control; it never switches.
+    actor.request(Action::Direct(1), 3);
+    let release = wire.sent().last().unwrap().clone();
+    assert_eq!(release.kind, MessageKind::ReleaseAll);
+    actor.observe_all_up();
+    wire.feed(ack(&release, 1));
+    actor.poll(4);
+    assert_eq!(actor.state(), HostState::Local);
+    assert!(wire.sent().iter().all(|frame| frame.kind != MessageKind::Switch));
+
+    actor.set_guest_enabled([1; 16], true);
+    wire.feed(status(1, true));
+    actor.poll(5);
+    assert!(!actor.setup_snapshot().slots[0].disabled);
+    actor.request(Action::Direct(1), 6);
+    let release = wire.sent().last().unwrap().clone();
+    actor.observe_all_up();
+    wire.feed(ack(&release, 2));
+    actor.poll(7);
+    assert_eq!(wire.sent().last().unwrap().kind, MessageKind::Switch);
+}
+
+#[test]
 fn stale_ack_is_ignored_but_wrong_current_ack_fails_local() {
     let (mut actor, wire, gate) = setup();
     wire.feed(status(0, true));

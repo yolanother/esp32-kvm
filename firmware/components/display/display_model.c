@@ -18,6 +18,19 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
     memset(v, 0, sizeof(*v));
     if (!s) return;
     v->touch_available = s->touch_available;
+    COPY_TEXT(v->card_labels[0], "This PC");
+    v->card_visible_mask = 1u;
+    v->card_ready_mask = 1u;
+    v->selected_card = s->selected_slot <= 3 ? s->selected_slot : 0;
+    v->show_guest_settings = s->paired_guests > 0 && s->touch_available;
+    for (uint8_t i = 0; i < 3; ++i) {
+        if (!(s->occupied_mask & (1u << i))) continue;
+        v->card_visible_mask |= (uint8_t)(1u << (i + 1u));
+        if (s->ready_mask & (1u << i)) v->card_ready_mask |= (uint8_t)(1u << (i + 1u));
+        if (s->guest_names[i][0]) COPY_TEXT(v->card_labels[i + 1u], s->guest_names[i]);
+        else snprintf(v->card_labels[i + 1u], sizeof(v->card_labels[i + 1u]),
+                      "Guest %u", i + 1u);
+    }
     bool pairing_expired = (s->pairing_state == KVM_DISPLAY_PAIRING_WAITING ||
                             s->pairing_state == KVM_DISPLAY_PAIRING_CHALLENGE) &&
                            s->pairing_deadline_ms <= now_ms;
@@ -95,13 +108,13 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         COPY_TEXT(v->footer, "Use host to select");
     } else {
         v->screen = KVM_DISPLAY_ACTIVE;
-        COPY_TEXT(v->title, "CURRENT TARGET");
+        COPY_TEXT(v->title, "KEYBOARD CONTROL");
         COPY_TEXT(v->primary, kvm_display_target_label(s));
         if (s->ready_slots)
             snprintf(v->detail, sizeof(v->detail), "%u guest%s connected",
                      s->ready_slots, s->ready_slots == 1 ? "" : "s");
         else COPY_TEXT(v->detail, "No guest connected");
-        COPY_TEXT(v->footer, "USB online | control via host");
+        COPY_TEXT(v->footer, "Selected target is highlighted");
     }
 }
 
@@ -141,15 +154,18 @@ bool kvm_display_pair_touch_action(const kvm_display_status_t *s,
                                    kvm_display_pair_action_t *action)
 {
     if (!s || !action || !s->touch_available || s->fault || s->armed ||
-        s->updating || s->recovery_required || x < 12u || x >= 228u ||
-        y < 160u || y >= 206u) return false;
+        s->updating || s->recovery_required) return false;
     switch (s->pairing_state) {
     case KVM_DISPLAY_PAIRING_CLOSED:
     case KVM_DISPLAY_PAIRING_REJECTED:
     case KVM_DISPLAY_PAIRING_TIMEOUT:
+        if (s->paired_guests) {
+            if (x < 190u || x >= 232u || y < 194u || y >= 236u) return false;
+        } else if (x < 12u || x >= 228u || y < 160u || y >= 206u) return false;
         *action = KVM_DISPLAY_PAIR_BEGIN; return true;
     case KVM_DISPLAY_PAIRING_WAITING:
-        if (!s->pairing_local_owner || x >= 115u) return false;
+        if (!s->pairing_local_owner || x < 12u || x >= 115u ||
+            y < 160u || y >= 206u) return false;
         *action = KVM_DISPLAY_PAIR_CANCEL; return true;
     case KVM_DISPLAY_PAIRING_CHALLENGE:
         return false;

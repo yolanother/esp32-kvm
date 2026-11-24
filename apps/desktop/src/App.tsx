@@ -11,8 +11,8 @@ import ProfileEditor from "./ProfileEditor";
 import MappingPresets from "./MappingPresets";
 import LayoutEditor from "./LayoutEditor";
 import { mappingLabel } from "./mapping-presets";
-import { getCycleShortcut, keepAwakeEnabled, returnToHost, selectGuest, setCycleShortcut, setKeepAwake, setupSnapshot, unavailableSnapshot } from "./setup-api";
-import { defaultSwitchBinding, formatSwitchBinding, switchTriggerOptions, validateSwitchBinding, type SwitchBinding } from "./switch-shortcut-model";
+import { getCycleShortcut, keepAwakeEnabled, returnToHost, selectGuest, setCycleShortcut, setGuestEnabled, setKeepAwake, setupSnapshot, unavailableSnapshot } from "./setup-api";
+import { defaultSwitchBinding, formatSwitchBinding, switchBindingFromKeyEvent, validateSwitchBinding, type SwitchBinding } from "./switch-shortcut-model";
 import { type SetupSnapshot } from "./setup-model";
 import { describeRoute, overlayForTransition, systemChoices, type SwitchAnnouncement } from "./dashboard-model";
 
@@ -37,16 +37,16 @@ function PageIntro({ title, description, headingRef }: { title: string; descript
 }
 
 /** Systems destination with truthful local state and optional sample guest cards. */
-function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEdit, onSelect, keepAwake, keepAwakePending, onKeepAwake }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: () => void; onReturn: () => void; onEdit: (bondToken: string) => void; onSelect: (bondToken: string) => void; keepAwake: boolean; keepAwakePending: boolean; onKeepAwake: (enabled: boolean) => void }): JSX.Element {
+function SystemsPage({ preview, headingRef, snapshot, onAddGuest, onReturn, onEdit, onSelect, onToggleEnabled, keepAwake, keepAwakePending, onKeepAwake }: { preview: boolean; headingRef: React.RefObject<HTMLHeadingElement | null>; snapshot: SetupSnapshot; onAddGuest: (adoptToken?: string) => void; onReturn: () => void; onEdit: (bondToken: string) => void; onToggleEnabled: (bondToken: string, enabled: boolean) => void; onSelect: (bondToken: string) => void; keepAwake: boolean; keepAwakePending: boolean; onKeepAwake: (enabled: boolean) => void }): JSX.Element {
   const route = describeRoute(snapshot);
   const choices = systemChoices(snapshot);
   return <>
     <PageIntro title="Systems" description="Choose where your keyboard and mouse go after setup." headingRef={headingRef} />
-    <div className="toolbar"><StatusPill tone={route.tone}>{snapshot.route.kind === "guest" ? "Guest controlling" : snapshot.route.kind === "switching" ? "Switch pending" : "Local control"}</StatusPill><span className="muted">{snapshot.device.kind === "verified" ? `${snapshot.readyTokens.length} guest${snapshot.readyTokens.length === 1 ? "" : "s"} ready of ${snapshot.device.maxConnections} live slot${snapshot.device.maxConnections === 1 ? "" : "s"}` : "Device not verified"}</span><button type="button" onClick={onAddGuest}>Add guest</button></div>
+    <div className="toolbar"><StatusPill tone={route.tone}>{snapshot.route.kind === "guest" ? "Guest controlling" : snapshot.route.kind === "switching" ? "Switch pending" : "Local control"}</StatusPill><span className="muted">{snapshot.device.kind === "verified" ? `${snapshot.readyTokens.length} guest${snapshot.readyTokens.length === 1 ? "" : "s"} ready of ${snapshot.device.maxConnections} live slot${snapshot.device.maxConnections === 1 ? "" : "s"}` : "Device not verified"}</span><button type="button" onClick={() => onAddGuest()}>Add guest</button></div>
     <section className="card route-card" aria-label="Active input destination"><span className="eyebrow">ACTIVE TARGET</span><h2>{route.title}</h2><p>{route.detail}</p><div className="setup-actions"><button type="button" onClick={onReturn} disabled={snapshot.route.kind === "local" || snapshot.route.kind === "failed"}>Return to this computer</button></div></section>
     <div className="card-grid">
-      <article className={`card${snapshot.route.kind === "local" ? " card--local" : ""}`}><div className="card-heading"><h2>This computer</h2><StatusPill tone={snapshot.route.kind === "local" ? "accent" : "neutral"}>{snapshot.route.kind === "local" ? "Controlling" : "Local host"}</StatusPill></div><p>Windows host keyboard and mouse.</p><div className="card-tail"><span className="small muted">Return target</span><span className="small muted">Actor handles local return</span></div></article>
-      {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : choices.length ? choices.map((choice) => { const guest = snapshot.profiles.find((item) => item.bondToken === choice.bondToken)!; return <article className={`card${choice.state === "Controlling" ? " card--local" : ""}`} key={choice.bondToken}><div className="card-heading"><h2>{choice.name}</h2><StatusPill tone={choice.state === "Offline" || choice.state === "Connected" ? "warning" : "accent"}>{choice.state}</StatusPill></div><p>{guest.os} · {mappingLabel(guest.profile)}</p><div className="card-tail"><button type="button" onClick={() => onEdit(choice.bondToken)}>Edit profile</button><button type="button" disabled={!choice.selectEnabled} onClick={() => onSelect(choice.bondToken)}>Select guest</button></div></article>; }) : <article className="card card--empty"><h2>No guest profiles yet</h2><p>Connect the device, then save an already paired guest or pair a new one.</p><StatusPill tone="warning">No saved guest</StatusPill></article>}
+      <article className={`card${snapshot.route.kind === "local" ? " card--local" : ""}`}><div className="card-heading"><h2>This computer</h2><StatusPill tone={snapshot.route.kind === "local" ? "accent" : "neutral"}>{snapshot.route.kind === "local" ? "Controlling" : "Local host"}</StatusPill></div><p>Windows host keyboard and mouse.</p><div className="card-tail"><span className="small muted">Host destination</span><button type="button" disabled={preview || snapshot.route.kind === "local" || snapshot.route.kind === "failed" || snapshot.route.kind === "switching"} onClick={onReturn}>Use this computer</button></div></article>
+      {preview ? exampleGuests.map((guest) => <article className="card" key={guest.name}><div className="card-heading"><h2>{guest.name}</h2><StatusPill>Example only</StatusPill></div><p>{guest.os} · {guest.profile}</p><div className="card-tail"><KeyChord keys={guest.shortcut} /><span className="small muted">Selection unavailable</span></div></article>) : choices.length ? choices.map((choice) => { const guest = snapshot.profiles.find((item) => item.bondToken === choice.bondToken); return <article className={`card${choice.state === "Controlling" ? " card--local" : ""}`} key={choice.bondToken}><div className="card-heading"><h2>{choice.name}</h2><StatusPill tone={choice.state === "Offline" || choice.state === "Connected" || choice.state === "Disabled" ? "warning" : "accent"}>{choice.state}</StatusPill></div><p>{guest ? `${guest.os} · ${mappingLabel(guest.profile)}` : "Firmware-reported guest · Unchanged keys"}</p><div className="card-tail"><button type="button" onClick={() => guest ? onEdit(choice.bondToken) : onAddGuest(choice.bondToken)}>{guest ? "Edit profile" : "Name guest"}</button>{guest && choice.state !== "Controlling" && <button type="button" onClick={() => onToggleEnabled(choice.bondToken, !choice.enabled)}>{choice.enabled ? "Disable" : "Enable"}</button>}<button type="button" disabled={!choice.selectEnabled} onClick={() => onSelect(choice.bondToken)}>Use this guest</button></div></article>; }) : <article className="card card--empty"><h2>No guests found</h2><p>Connect an already paired guest or add a new one.</p><StatusPill tone="warning">No guest reported</StatusPill></article>}
     </div>
     {preview && <PreviewNotice />}
     <div className="card"><label className="preview-toggle"><input type="checkbox" checked={keepAwake} disabled={keepAwakePending} onChange={(event) => onKeepAwake(event.target.checked)} />Keep guest awake with a mouse bump</label><p className="small muted">While a guest is controlling, send a cancelling pair of tiny pointer moves every 30 seconds when all physical keys and buttons are released. This setting resets when the app exits.</p></div>
@@ -60,6 +60,8 @@ function ShortcutsPage({ headingRef, preview, routeIsLocal }: { headingRef: Reac
   const [draft, setDraft] = useState<SwitchBinding>(defaultSwitchBinding);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [recording, setRecording] = useState(false);
+  const [recordingStatus, setRecordingStatus] = useState("");
   useEffect(() => {
     if (preview) { setSaved(defaultSwitchBinding); setDraft(defaultSwitchBinding); return; }
     let active = true;
@@ -68,9 +70,46 @@ function ShortcutsPage({ headingRef, preview, routeIsLocal }: { headingRef: Reac
     }).catch((failure) => { if (active) setError(String(failure)); });
     return () => { active = false; };
   }, [preview]);
-  function changeModifier(bit: number): void {
-    setDraft((current) => ({ ...current, modifiers: current.modifiers ^ bit }));
-  }
+  useEffect(() => {
+    if (!recording) return;
+    function record(event: globalThis.KeyboardEvent): void {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        setRecording(false);
+        setRecordingStatus("Recording cancelled.");
+        return;
+      }
+      const candidate = switchBindingFromKeyEvent(event);
+      if (!candidate) {
+        setRecordingStatus("Modifier held. Press a letter, number, or function key while continuing to hold it.");
+        return;
+      }
+      const invalid = validateSwitchBinding(candidate);
+      if (invalid) {
+        setError(invalid);
+        setRecordingStatus("That shortcut cannot be used. Try another combination, or press Escape to cancel.");
+        return;
+      }
+      setDraft(candidate);
+      setRecording(false);
+      setError("");
+      setBusy(true);
+      setRecordingStatus(`${formatSwitchBinding(candidate)} recorded. Applying it now…`);
+      void setCycleShortcut(candidate)
+        .then(() => {
+          setSaved(candidate);
+          setRecordingStatus(`${formatSwitchBinding(candidate)} is active. Press it to switch to the next ready device.`);
+        })
+        .catch((failure) => {
+          setError(String(failure));
+          setRecordingStatus(`${formatSwitchBinding(candidate)} was recorded but could not be applied.`);
+        })
+        .finally(() => setBusy(false));
+    }
+    window.addEventListener("keydown", record, { capture: true });
+    return () => window.removeEventListener("keydown", record, { capture: true });
+  }, [recording]);
   function save(): void {
     const invalid = validateSwitchBinding(draft);
     if (invalid) { setError(invalid); return; }
@@ -79,15 +118,19 @@ function ShortcutsPage({ headingRef, preview, routeIsLocal }: { headingRef: Reac
   }
   const validation = validateSwitchBinding(draft);
   return <>
-    <PageIntro title="Shortcuts" description="Choose a physical shortcut to cycle between ready devices and this computer." headingRef={headingRef} />
+    <PageIntro title="Shortcuts" description="Record a physical shortcut to cycle between ready devices and this computer." headingRef={headingRef} />
     <div className="card"><h2>Switch to next device</h2><p>Current: {saved ? <KeyChord keys={formatSwitchBinding(saved).split("+")} /> : "Waiting for native shortcut settings"}</p><p className="small muted">The cycle includes ready guests and this computer. The default is Ctrl+Alt+F12. Changes are saved on this Windows host.</p>
-      <fieldset><legend>Required modifiers</legend>{([[1, "Ctrl"], [2, "Alt"], [4, "Shift"], [8, "Win"]] as const).map(([bit, label]) => <label className="preview-toggle" key={bit}><input type="checkbox" checked={(draft.modifiers & bit) !== 0} onChange={() => changeModifier(bit)} />{label}</label>)}</fieldset>
-      <label>Physical trigger key<select value={draft.trigger} onChange={(event) => setDraft((current) => ({ ...current, trigger: event.target.value }))}>{switchTriggerOptions.map((option) => <option key={option.code} value={option.code}>{option.label}</option>)}</select></label>
-      <p className="small muted">Proposed: {formatSwitchBinding(draft)}. Choose at least one modifier; return and direct-select combinations stay reserved.</p>
+      <div className={`shortcut-recorder${recording ? " shortcut-recorder--active" : ""}`}>
+        <div><span className="small muted">Recorded shortcut</span><div className="shortcut-recorder__chord"><KeyChord keys={formatSwitchBinding(draft).split("+")} /></div></div>
+        <button type="button" className="shortcut-recorder__button" aria-pressed={recording} disabled={preview || busy || !routeIsLocal} onClick={() => { setRecording((active) => !active); setError(""); setRecordingStatus(recording ? "Recording cancelled." : "Recording started. Hold at least one modifier, then press a letter, number, or function key. Press Escape to cancel."); }}>{recording ? "Cancel recording" : "Record hotkey"}</button>
+      </div>
+      <p className="small muted">Hold at least one modifier, then press a letter, number, or F1–F12. Return and direct-select combinations stay reserved.</p>
+      {recording && <p className="notice shortcut-recorder__status" role="status"><strong>Listening</strong><span>Press the shortcut now. Press Escape to cancel.</span></p>}
+      {!recording && recordingStatus && <p className="small shortcut-recorder__message" role="status">{recordingStatus}</p>}
       {validation && <p className="notice notice--warning" role="alert">{validation}</p>}
       {error && <p className="notice notice--warning" role="alert">{error}</p>}
       {!routeIsLocal && <p className="small muted">Return to this computer before saving a shortcut.</p>}
-      <div className="setup-actions"><button type="button" onClick={() => setDraft(defaultSwitchBinding)}>Use default in editor</button><button type="button" onClick={save} disabled={preview || busy || !routeIsLocal || !!validation || !saved}>Save switch shortcut</button></div>
+      <div className="setup-actions"><button type="button" onClick={() => { setRecording(false); setDraft(defaultSwitchBinding); setError(""); setRecordingStatus("Default shortcut selected. Save it to apply the change."); }}>Use default</button><button type="button" onClick={save} disabled={preview || busy || recording || !routeIsLocal || !!validation || !saved}>Save switch shortcut</button></div>
     </div>
     <div className="card table-card"><h2>Return to this computer</h2><div className="table-scroll"><table><thead><tr><th scope="col">Action</th><th scope="col">Physical key combination</th></tr></thead><tbody><tr><td>Return to Windows</td><td><KeyChord keys={["Ctrl", "Alt", "F10"]} /></td></tr></tbody></table></div></div>
     <div className="card emergency-card"><h2>Emergency return</h2><p>Hold both physical Ctrl keys for one second. The capture worker releases Windows input immediately, then asks the device to return to local control.</p></div>
@@ -109,6 +152,7 @@ export default function App(): JSX.Element {
   const [page, setPage] = useState<Destination>("systems");
   const [preview, setPreview] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [adoptToken, setAdoptToken] = useState<string | null>(null);
   const [editingToken, setEditingToken] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<SetupSnapshot>(unavailableSnapshot());
   const [snapshotLoaded, setSnapshotLoaded] = useState(false);
@@ -192,6 +236,9 @@ export default function App(): JSX.Element {
   function requestLocal(): void {
     void returnToHost().catch((error) => setAnnouncement({ title: "Control request failed", message: `Local return request failed: ${String(error)}. Check the device connection.`, persistent: true }));
   }
+  function toggleGuestEnabled(bondToken: string, enabled: boolean): void {
+    void setGuestEnabled(bondToken, enabled).then(() => setupSnapshot().then(setSnapshot)).catch((error) => setAnnouncement({ title: "Guest change failed", message: `Could not ${enabled ? "enable" : "disable"} this guest: ${String(error)}`, persistent: true }));
+  }
   function requestGuest(bondToken: string): void {
     void selectGuest(bondToken).catch((error) => setAnnouncement({ title: "Control request failed", message: `Guest selection failed: ${String(error)}`, persistent: true }));
   }
@@ -212,7 +259,7 @@ export default function App(): JSX.Element {
       <div className="workspace">
         <header className="topbar"><span>Your devices. One keyboard.</span><div className="topbar-right"><label className="preview-toggle"><input type="checkbox" checked={preview} onChange={(event) => setPreview(event.target.checked)} />Show design examples</label><StatusPill tone={snapshot.device.kind === "verified" ? "accent" : "warning"}>{snapshot.device.kind === "verified" ? "Device verified" : "No verified device"}</StatusPill></div></header>
         <div className="connection-status" role="status" aria-live="polite">{route.title}. {route.detail}</div>
-        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} onClose={() => { setSetupOpen(false); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={() => setSetupOpen(true)} onReturn={requestLocal} onEdit={setEditingToken} onSelect={requestGuest} keepAwake={keepAwake} keepAwakePending={keepAwakePending} onKeepAwake={changeKeepAwake} />}{page === "layout" && <LayoutEditor profiles={snapshot.profiles} profilesReady={snapshotLoaded} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} preview={preview} routeIsLocal={snapshot.route.kind === "local"} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
+        <main id="main-content" className="content" tabIndex={-1}>{setupOpen ? <SetupWizard preview={preview} adoptToken={adoptToken} onClose={() => { setSetupOpen(false); setAdoptToken(null); void setupSnapshot().then(setSnapshot); }} /> : editingGuest ? <ProfileEditor key={editingGuest.bondToken} guest={editingGuest} snapshot={snapshot} onClose={closeEditor} onChanged={() => { closeEditor(); void setupSnapshot().then(setSnapshot); }} /> : <>{page === "systems" && <SystemsPage preview={preview} headingRef={headingRef} snapshot={snapshot} onAddGuest={(token) => { setAdoptToken(token ?? null); setSetupOpen(true); }} onReturn={requestLocal} onEdit={setEditingToken} onSelect={requestGuest} onToggleEnabled={toggleGuestEnabled} keepAwake={keepAwake} keepAwakePending={keepAwakePending} onKeepAwake={changeKeepAwake} />}{page === "layout" && <LayoutEditor profiles={snapshot.profiles} profilesReady={snapshotLoaded} headingRef={headingRef} />}{page === "mappings" && <MappingPresets snapshot={snapshot} headingRef={headingRef} onChanged={() => { void setupSnapshot().then(setSnapshot); }} />}{page === "shortcuts" && <ShortcutsPage headingRef={headingRef} preview={preview} routeIsLocal={snapshot.route.kind === "local"} />}{page === "device" && <DevicePage headingRef={headingRef} snapshot={snapshot} onSetup={() => setSetupOpen(true)} />}</>}</main>
         <footer className="footer"><span>{snapshot.route.kind === "guest" ? "Guest route confirmed" : "Local control"} · Return with <KeyChord keys={["Ctrl", "Alt", "F10"]} /></span><span>Emergency: hold both Ctrl keys for one second</span></footer>
       </div>
     </div>

@@ -4,6 +4,7 @@
 #define TEST_BLE_HS_H
 #include <stddef.h>
 #include "os/os_mbuf.h"
+#include "host/ble_gatt.h"
 struct ble_store_status_event;
 struct os_mbuf *ble_hs_mbuf_from_flat(const void *data, size_t length);
 #define BLE_SM_IO_CAP_NO_IO 3
@@ -11,7 +12,10 @@ struct os_mbuf *ble_hs_mbuf_from_flat(const void *data, size_t length);
 #define BLE_SM_PAIR_KEY_DIST_ENC 1
 #define BLE_SM_PAIR_KEY_DIST_ID 2
 #define BLE_HS_EALREADY 22
+#define BLE_OWN_ADDR_RANDOM 1
+int ble_hs_id_set_rnd(const uint8_t *address);
 struct ble_hs_cfg {
+    void (*gatts_register_cb)(struct ble_gatt_register_ctxt *, void *);
     void (*reset_cb)(int);
     void (*sync_cb)(void);
     int (*store_status_cb)(struct ble_store_status_event *, void *);

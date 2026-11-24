@@ -18,13 +18,15 @@
 #define BLE_HS_ADV_F_DISC_GEN 1
 #define BLE_HS_ADV_F_BREDR_UNSUP 4
 #define BLE_GAP_CONN_MODE_UND 1
+#define BLE_GAP_CONN_MODE_DIR 2
+#define BLE_GAP_DISC_MODE_NON 0
 #define BLE_GAP_DISC_MODE_GEN 1
 #define BLE_HS_FOREVER 0xffffffffu
 #define BLE_ERR_REM_USER_CONN_TERM 0x13
 typedef struct { uint16_t value; } ble_uuid16_t;
 typedef struct { uint8_t type; uint8_t val[6]; } ble_addr_t;
 #define BLE_UUID16_INIT(value) {value}
-struct ble_gap_adv_params { uint8_t conn_mode, disc_mode; uint16_t itvl_min, itvl_max; };
+struct ble_gap_adv_params { uint8_t conn_mode, disc_mode; uint16_t itvl_min, itvl_max; uint8_t high_duty_cycle; };
 struct ble_hs_adv_fields {
     uint8_t flags;
     uint8_t *name;
@@ -57,6 +59,7 @@ int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *fields);
 int ble_gap_adv_start(uint8_t own_address_type, const void *direct_address, uint32_t duration,
                       const struct ble_gap_adv_params *parameters,
                       int (*callback)(struct ble_gap_event *, void *), void *argument);
+int ble_gap_adv_stop(void);
 int ble_gap_terminate(uint16_t connection_handle, uint8_t reason);
 int ble_gap_security_initiate(uint16_t connection_handle);
 int ble_gap_conn_find(uint16_t connection_handle, struct ble_gap_conn_desc *description);

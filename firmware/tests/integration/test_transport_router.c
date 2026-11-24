@@ -28,6 +28,11 @@ static bool pair_reply(void *context, uint32_t id, bool approved)
 { (void)context; pair_replies++; last_challenge = id; last_approval = approved; return true; }
 static bool pair_forget(void *context, const uint8_t token[16])
 { (void)context; forgets++; memcpy(forgotten_token, token, 16); return true; }
+static unsigned enabled_calls;
+static uint8_t enabled_token0;
+static bool enabled_value;
+static bool set_enabled_cb(void *context, const uint8_t token[16], bool enabled)
+{ (void)context; enabled_calls++; enabled_token0 = token[0]; enabled_value = enabled; return true; }
 static bool inventory_available = true;
 static bool pair_inventory(void *context, uint8_t tokens[8][16], uint8_t *count)
 {
@@ -314,5 +319,38 @@ int main(void)
            has_sequence(decoded + 24, status_len - 28, (uint8_t[]){3, 0x83, 0xa5, 1, 1, 2, 0x50, 11}, 8) &&
            has_sequence(decoded + 24, status_len - 28, (uint8_t[]){0xa5, 1, 2, 2, 0x50, 22}, 6) &&
            has_sequence(decoded + 24, status_len - 28, (uint8_t[]){0xa5, 1, 3, 2, 0x50, 33}, 6));
+
+    /* Minor 4: hiding a guest is a RAM-only display flag, refused on older sessions. */
+    uint8_t enable_payload[17] = {0};
+    enable_payload[0] = 33; enable_payload[16] = 0;
+    kvm_transport_core_bind_pairing(&three_core,
+        (kvm_transport_pairing_ops_t){.enabled = set_enabled_cb}, NULL);
+    send_frame(&three_core, KVM_MSG_SET_GUEST_ENABLED, 9, 63, three_router.generation,
+               enable_payload, sizeof(enable_payload));
+    assert(enabled_calls == 0); /* Minor 2 session: unsupported, no side effect. */
+    const uint8_t hello4[] = {4, 0, 0, 0, 0, 0};
+    send_frame(&three_core, KVM_MSG_HELLO, 0, 64, 0, hello4, sizeof(hello4));
+    send_frame(&three_core, KVM_MSG_SESSION_OPEN, 9, 65, 0, open, sizeof(open));
+    send_frame(&three_core, KVM_MSG_SET_GUEST_ENABLED, 9, 66, three_router.generation,
+               enable_payload, sizeof(enable_payload));
+    size_t enabled_len = decode(decoded);
+    assert(enabled_len == KVM_PROTOCOL_HEADER_LEN + 10 + 4 && decoded[3] == KVM_MSG_ACK);
+    assert(enabled_calls == 1 && enabled_token0 == 33 && !enabled_value);
+    enable_payload[16] = 1;
+    send_frame(&three_core, KVM_MSG_SET_GUEST_ENABLED, 9, 67, three_router.generation,
+               enable_payload, sizeof(enable_payload));
+    assert(enabled_calls == 2 && enabled_value);
+    enable_payload[16] = 2; /* Not a boolean. */
+    send_frame(&three_core, KVM_MSG_SET_GUEST_ENABLED, 9, 68, three_router.generation,
+               enable_payload, sizeof(enable_payload));
+    assert(decode(decoded) && decoded[3] == KVM_MSG_NACK && enabled_calls == 2);
+    enable_payload[16] = 0; enable_payload[0] = 0; /* Zero token. */
+    send_frame(&three_core, KVM_MSG_SET_GUEST_ENABLED, 9, 69, three_router.generation,
+               enable_payload, sizeof(enable_payload));
+    assert(decode(decoded) && decoded[3] == KVM_MSG_NACK && enabled_calls == 2);
+    enable_payload[0] = 33;
+    send_frame(&three_core, KVM_MSG_SET_GUEST_ENABLED, 9, 70, three_router.generation - 1,
+               enable_payload, sizeof(enable_payload)); /* Stale generation. */
+    assert(decode(decoded) && decoded[3] == KVM_MSG_NACK && enabled_calls == 2);
     return 0;
 }

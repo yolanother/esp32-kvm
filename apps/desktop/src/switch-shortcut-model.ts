@@ -15,6 +15,32 @@ export const switchTriggerOptions = [
   ..."0123456789".split("").map((digit) => ({ code: `Digit${digit}`, label: digit })),
 ];
 
+/** Keyboard state needed to turn a physical key press into a switch binding. */
+export interface SwitchKeyEvent {
+  code: string;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+  metaKey: boolean;
+}
+
+const modifierCodes = new Set([
+  "ControlLeft", "ControlRight", "AltLeft", "AltRight",
+  "ShiftLeft", "ShiftRight", "MetaLeft", "MetaRight",
+]);
+
+/** Returns a binding once a non-modifier key is pressed, or null while modifiers are held. */
+export function switchBindingFromKeyEvent(event: SwitchKeyEvent): SwitchBinding | null {
+  if (modifierCodes.has(event.code)) return null;
+  return {
+    trigger: event.code,
+    modifiers: (event.ctrlKey ? 1 : 0)
+      | (event.altKey ? 2 : 0)
+      | (event.shiftKey ? 4 : 0)
+      | (event.metaKey ? 8 : 0),
+  };
+}
+
 /** Explains invalid or reserved bindings before asking the native service to save. */
 export function validateSwitchBinding(binding: SwitchBinding): string | null {
   if (!Number.isInteger(binding.modifiers) || binding.modifiers < 1 || binding.modifiers > 15) return "Choose at least one modifier.";

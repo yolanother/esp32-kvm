@@ -19,6 +19,7 @@ typedef struct {
     uint8_t token[HID_PAIRING_TOKEN_LEN];
     bool ready;
     bool subscribed;
+    uint32_t notify_tx_successes;
 } hid_guest_slot_snapshot_t;
 
 /** Pairing event types delivered to a future host status transport. */

@@ -306,3 +306,32 @@ fn confirmed_nonzero_firmware_generation_seeds_next_transaction() {
         })
     );
 }
+
+#[test]
+fn right_shift_counts_as_shift_when_flagged_extended() {
+    let config = HotkeyConfig::defaults()
+        .with_next(
+            Key {
+                scan: 0x58,
+                extended: false,
+            },
+            Modifiers::CTRL.union(Modifiers::SHIFT),
+        )
+        .unwrap();
+    let mut matcher = HotkeyMatcher::new(config);
+    let ctrl = Key {
+        scan: 0x1d,
+        extended: false,
+    };
+    let right_shift = Key {
+        scan: 0x36,
+        extended: true,
+    };
+    let f12 = Key {
+        scan: 0x58,
+        extended: false,
+    };
+    matcher.on_key(ctrl, true, false, 0);
+    matcher.on_key(right_shift, true, false, 1);
+    assert_eq!(matcher.on_key(f12, true, false, 2).action, Some(Action::Next));
+}

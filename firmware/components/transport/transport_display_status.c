@@ -29,6 +29,7 @@ void kvm_transport_display_status(const kvm_transport_core_t *core,
     for (uint8_t slot = 1; slot <= KVM_ROUTER_MAX_SLOTS; ++slot) {
         const kvm_transport_slot_t *item = &core->slots[slot - 1];
         if (!has_token(item->token)) continue;
+        status->occupied_mask |= (uint8_t)(1u << (slot - 1u));
         status->guest_slots = slot;
         bool ready = item->ready && item->subscribed;
         if (ready) {

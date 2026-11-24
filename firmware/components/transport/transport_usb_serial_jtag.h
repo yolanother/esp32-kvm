@@ -7,6 +7,12 @@
 
 #include "esp_err.h"
 #include "display_model.h"
+#include <stddef.h>
+
+/** Opt-in trace commands always release routing and close the host session. */
+void kvm_transport_diagnostics_init(void);
+bool kvm_transport_diagnostics_requested(const uint8_t *bytes, size_t length);
+void kvm_transport_diagnostics_dump(void);
 
 /** Installs fixed USB CDC and starts the disarmed router worker. */
 esp_err_t kvm_transport_usb_serial_jtag_start(void);
@@ -14,5 +20,7 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void);
 void kvm_transport_button_event(kvm_display_event_t event);
 /** Queues an exact local touch request without blocking the LVGL thread. */
 void kvm_transport_pairing_touch(kvm_display_pair_request_t request);
+/** Queues a local/guest card selection for host arbitration. */
+void kvm_transport_target_touch(uint8_t slot);
 
 #endif /* ESP32_KVM_TRANSPORT_USB_SERIAL_JTAG_H */

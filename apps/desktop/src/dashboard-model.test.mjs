@@ -36,9 +36,13 @@ test("a connected peer without HID subscription stays distinct from ready", () =
   assert.equal(waiting[0].selectEnabled, false);
 });
 
-test("only a ready saved guest can be selected from an idle verified route", () => {
+test("every firmware guest gets a card and ready guests can be selected from an idle verified route", () => {
   const local = { ...base, route: { kind: "local" }, mappingPendingTokens: [] };
   assert.equal(systemChoices(local)[0].selectEnabled, true);
+  const second = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+  const liveOnly = systemChoices({ ...local, bondTokens: [token, second], connectedTokens: [token, second], readyTokens: [token, second] });
+  assert.equal(liveOnly.length, 2);
+  assert.deepEqual(liveOnly[1], { bondToken: second, name: "Guest 2", profileSaved: false, enabled: true, state: "Ready", selectEnabled: true });
   assert.equal(systemChoices({ ...local, readyTokens: [] })[0].selectEnabled, false);
   assert.equal(systemChoices({ ...local, mappingPendingTokens: [token] })[0].selectEnabled, false);
   assert.equal(systemChoices({ ...local, route: { kind: "switching" } })[0].selectEnabled, false);
@@ -58,4 +62,17 @@ test("switch overlay appears only after a real route change and persists on loss
   const offline = overlayForTransition(guest, { ...base, route: { kind: "local" }, readyTokens: [] });
   assert.equal(offline?.persistent, true);
   assert.match(offline?.message ?? "", /offline/i);
+});
+
+test("a disabled guest is labelled and cannot be selected until re-enabled", () => {
+  const disabled = { ...base, route: { kind: "local" }, profiles: [{ ...base.profiles[0], enabled: false }] };
+  const [choice] = systemChoices(disabled);
+  assert.equal(choice.state, "Disabled");
+  assert.equal(choice.enabled, false);
+  assert.equal(choice.selectEnabled, false);
+  const [restored] = systemChoices({ ...disabled, profiles: [{ ...base.profiles[0], enabled: true }] });
+  assert.equal(restored.state, "Ready");
+  assert.equal(restored.selectEnabled, true);
+  const [legacy] = systemChoices({ ...base, route: { kind: "local" } });
+  assert.equal(legacy.enabled, true);
 });

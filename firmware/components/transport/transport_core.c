@@ -202,7 +202,7 @@ static void send_status(kvm_transport_core_t *core, uint32_t seq)
         at += 16;
         p[at++] = 3; p[at++] = is_ready ? 0xf5 : 0xf4;
         p[at++] = 4; p[at++] = subscribed ? 0xf5 : 0xf4;
-        p[at++] = 5; p[at++] = 0;
+        p[at++] = 5; at += cbor_uint(p + at, core->slots[slot].notify_tx_successes);
     }
     p[at++] = 4; p[at++] = r && r->fault ? 1 : 0;
     p[at++] = 5; at += cbor_uint(p + at, r ? r->generation : 0);
@@ -317,6 +317,13 @@ static bool utf8_valid(const uint8_t *p, size_t length)
         for (unsigned j = 0; j < more; j++) if ((p[i++] & 0xc0u) != 0x80u) return false;
     }
     return true;
+}
+
+static bool token_nonzero(const uint8_t token[16])
+{
+    uint8_t any = 0;
+    for (size_t i = 0; i < 16; ++i) any |= token[i];
+    return any != 0;
 }
 
 static bool session_open_payload(const uint8_t *p, size_t length)
@@ -481,6 +488,28 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
                 core->last_forget_generation = generation;
                 memcpy(core->last_forget_token, token, 16);
             }
+            r->last_result_generation = r->generation;
+            send_result(core, kind, seq, result);
+        } else if (kind == KVM_MSG_SET_GUEST_LABEL) {
+            if (core->minor < 3) result = (kvm_router_result_t)8; /* UNSUPPORTED */
+            else if (generation != r->generation || payload_length < 18 ||
+                     payload_length != (size_t)17 + payload[16] || payload[16] > 24 ||
+                     !payload[16] || !token_nonzero(payload) ||
+                     !utf8_valid(payload + 17, payload[16]) || !core->pairing_ops.label)
+                result = KVM_ROUTER_BAD_PAYLOAD;
+            else result = core->pairing_ops.label(core->pairing_context, payload,
+                                                   (const char *)payload + 17, payload[16]) ?
+                          KVM_ROUTER_OK : KVM_ROUTER_BUSY;
+            r->last_result_generation = r->generation;
+            send_result(core, kind, seq, result);
+        } else if (kind == KVM_MSG_SET_GUEST_ENABLED) {
+            if (core->minor < 4) result = (kvm_router_result_t)8; /* UNSUPPORTED */
+            else if (generation != r->generation || payload_length != 17 ||
+                     !token_nonzero(payload) || payload[16] > 1 || !core->pairing_ops.enabled)
+                result = KVM_ROUTER_BAD_PAYLOAD;
+            else result = core->pairing_ops.enabled(core->pairing_context, payload,
+                                                     payload[16] != 0) ?
+                          KVM_ROUTER_OK : KVM_ROUTER_BUSY;
             r->last_result_generation = r->generation;
             send_result(core, kind, seq, result);
         } else if (kind == KVM_MSG_KEY_STATE && payload_length == 8) {

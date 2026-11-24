@@ -31,9 +31,11 @@ enum attribute {
     ATTR_MOUSE_REFERENCE,
     ATTR_CONSUMER_REFERENCE,
     ATTR_LED_REFERENCE,
-    ATTR_BATTERY_REFERENCE,
     ATTR_BATTERY_LEVEL,
-    ATTR_PNP_ID
+    ATTR_PNP_ID,
+    ATTR_MODEL_NAME,
+    ATTR_MANUFACTURER,
+    ATTR_BATTERY_FORMAT
 };
 
 static hid_channel_t channels[HID_GATT_MAX_CONNECTIONS];
@@ -48,38 +50,32 @@ static int access_attribute(uint16_t connection_handle, uint16_t attribute_handl
                             struct ble_gatt_access_ctxt *context, void *argument);
 
 static struct ble_gatt_dsc_def keyboard_reference[] = {
-    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
+    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ | BLE_ATT_F_READ_ENC,
      .access_cb = access_attribute, .arg = (void *)ATTR_KEYBOARD_REFERENCE},
     {0}
 };
 #ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
 static struct ble_gatt_dsc_def mouse_reference[] = {
-    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
+    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ | BLE_ATT_F_READ_ENC,
      .access_cb = access_attribute, .arg = (void *)ATTR_MOUSE_REFERENCE},
     {0}
 };
 static struct ble_gatt_dsc_def consumer_reference[] = {
-    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
+    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ | BLE_ATT_F_READ_ENC,
      .access_cb = access_attribute, .arg = (void *)ATTR_CONSUMER_REFERENCE},
     {0}
 };
 #endif
 static struct ble_gatt_dsc_def led_reference[] = {
-    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ,
+    {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ | BLE_ATT_F_READ_ENC,
      .access_cb = access_attribute, .arg = (void *)ATTR_LED_REFERENCE},
     {0}
 };
-static struct ble_gatt_dsc_def report_map_reference[] = {
-    {.uuid = BLE_UUID16_DECLARE(0x2907), .att_flags = BLE_ATT_F_READ,
-     .access_cb = access_attribute, .arg = (void *)ATTR_BATTERY_REFERENCE},
-    {0}
-};
-
 static const struct ble_gatt_chr_def characteristics[] = {
     {.uuid = BLE_UUID16_DECLARE(0x2a4a), .access_cb = access_attribute,
      .arg = (void *)ATTR_HID_INFO, .flags = BLE_GATT_CHR_F_READ},
     {.uuid = BLE_UUID16_DECLARE(0x2a4b), .access_cb = access_attribute,
-     .arg = (void *)ATTR_REPORT_MAP, .descriptors = report_map_reference,
+     .arg = (void *)ATTR_REPORT_MAP,
      .flags = BLE_GATT_CHR_F_READ},
     {.uuid = BLE_UUID16_DECLARE(0x2a4c), .access_cb = access_attribute,
      .arg = (void *)ATTR_CONTROL_POINT,
@@ -124,28 +120,34 @@ static const struct ble_gatt_chr_def characteristics[] = {
     {0}
 };
 
+static struct ble_gatt_dsc_def battery_format_descriptor[] = {
+    {.uuid = BLE_UUID16_DECLARE(0x2904), .att_flags = BLE_ATT_F_READ,
+     .access_cb = access_attribute, .arg = (void *)ATTR_BATTERY_FORMAT},
+    {0}
+};
+
 static const struct ble_gatt_chr_def battery_characteristics[] = {
     {.uuid = BLE_UUID16_DECLARE(0x2a19), .access_cb = access_attribute,
-     .arg = (void *)ATTR_BATTERY_LEVEL,
-     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
-              | BLE_GATT_CHR_F_READ_ENC
-#endif
-    },
+     .arg = (void *)ATTR_BATTERY_LEVEL, .descriptors = battery_format_descriptor,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY},
     {0}
 };
 
 static const struct ble_gatt_chr_def device_information_characteristics[] = {
     {.uuid = BLE_UUID16_DECLARE(0x2a50), .access_cb = access_attribute,
      .arg = (void *)ATTR_PNP_ID, .flags = BLE_GATT_CHR_F_READ},
+    {.uuid = BLE_UUID16_DECLARE(0x2a24), .access_cb = access_attribute,
+     .arg = (void *)ATTR_MODEL_NAME, .flags = BLE_GATT_CHR_F_READ},
+    {.uuid = BLE_UUID16_DECLARE(0x2a29), .access_cb = access_attribute,
+     .arg = (void *)ATTR_MANUFACTURER, .flags = BLE_GATT_CHR_F_READ},
     {0}
 };
 
-static const struct ble_gatt_svc_def services[];
-static const struct ble_gatt_svc_def *battery_include[] = {&services[1], NULL};
+/* Battery is a separate service. There is no battery report in the HID map,
+ * so do not advertise an External Report Reference or include it as a report. */
 static const struct ble_gatt_svc_def services[] = {
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x1812),
-     .includes = battery_include, .characteristics = characteristics},
+     .characteristics = characteristics},
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x180f),
      .characteristics = battery_characteristics},
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x180a),
@@ -161,12 +163,12 @@ static int append(struct ble_gatt_access_ctxt *context, const uint8_t *bytes, si
 static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *context,
                           enum attribute attribute)
 {
-    static const uint8_t info[] = {0x11, 0x01, 0x00, 0x02};
+    static const uint8_t info[] = {0x11, 0x01, 0x00, 0x03};
     static const uint8_t keyboard_ref[] = {HID_REPORT_KEYBOARD, 1};
     static const uint8_t mouse_ref[] = {HID_REPORT_MOUSE, 1};
     static const uint8_t consumer_ref[] = {HID_REPORT_CONSUMER, 1};
     static const uint8_t led_ref[] = {HID_REPORT_KEYBOARD, 2};
-    static const uint8_t battery_ref[] = {0x19, 0x2a};
+    static const uint8_t battery_format[] = {0x04, 0x00, 0xad, 0x27, 0x01, 0x00, 0x00};
     /* The USB-powered board has no battery to drain; report available power. */
     static const uint8_t usb_power_level = 100;
     /* Development board's USB-IF VID:PID, already reported by its native USB
@@ -202,9 +204,11 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     case ATTR_MOUSE_REFERENCE: return append(context, mouse_ref, sizeof(mouse_ref));
     case ATTR_CONSUMER_REFERENCE: return append(context, consumer_ref, sizeof(consumer_ref));
     case ATTR_LED_REFERENCE: return append(context, led_ref, sizeof(led_ref));
-    case ATTR_BATTERY_REFERENCE: return append(context, battery_ref, sizeof(battery_ref));
+    case ATTR_BATTERY_FORMAT: return append(context, battery_format, sizeof(battery_format));
     case ATTR_BATTERY_LEVEL: return append(context, &usb_power_level, 1);
     case ATTR_PNP_ID: return append(context, pnp_id, sizeof(pnp_id));
+    case ATTR_MODEL_NAME: return append(context, (const uint8_t *)"ESP32 KVM S3", 12);
+    case ATTR_MANUFACTURER: return append(context, (const uint8_t *)"ESP32 KVM", 9);
     default: return BLE_ATT_ERR_UNLIKELY;
     }
 }
@@ -212,12 +216,18 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
 static int write_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *context,
                            enum attribute attribute)
 {
+    if (attribute != ATTR_CONTROL_POINT && attribute != ATTR_PROTOCOL_MODE &&
+        attribute != ATTR_KEYBOARD_OUTPUT && attribute != ATTR_BOOT_KEYBOARD_OUTPUT)
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     uint8_t value;
     if (OS_MBUF_PKTLEN(context->om) != 1 ||
         os_mbuf_copydata(context->om, 0, 1, &value) != 0) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     switch (attribute) {
     case ATTR_CONTROL_POINT:
-        if (value == 0) return hid_channel_release(channel) ? 0 : BLE_ATT_ERR_UNLIKELY;
+        /* Suspend can arrive during discovery, before any input subscription.
+         * An idle keyboard has no held input to release in that case. */
+        if (value == 0) return !channel->armed || hid_channel_release(channel) ?
+                               0 : BLE_ATT_ERR_UNLIKELY;
         if (value == 1) return 0; /* exit suspend remains disarmed */
         return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
     case ATTR_PROTOCOL_MODE:
@@ -235,15 +245,16 @@ static int access_attribute(uint16_t connection_handle, uint16_t attribute_handl
     enum attribute attribute = (enum attribute)(uintptr_t)argument;
     hid_channel_t *channel = hid_gatt_channel_for(connection_handle);
     int result;
-    if (attribute != ATTR_HID_INFO && attribute != ATTR_REPORT_MAP &&
-        attribute != ATTR_KEYBOARD_REFERENCE && attribute != ATTR_MOUSE_REFERENCE &&
-        attribute != ATTR_CONSUMER_REFERENCE && attribute != ATTR_LED_REFERENCE &&
-        attribute != ATTR_BATTERY_REFERENCE &&
-        attribute != ATTR_BATTERY_LEVEL && attribute != ATTR_PNP_ID &&
-        (!channel || !channel->encrypted))
+    bool public_attribute = attribute == ATTR_HID_INFO || attribute == ATTR_REPORT_MAP ||
+        attribute == ATTR_BATTERY_LEVEL || attribute == ATTR_BATTERY_FORMAT ||
+        attribute == ATTR_PNP_ID || attribute == ATTR_MODEL_NAME || attribute == ATTR_MANUFACTURER;
+    bool read = context->op == BLE_GATT_ACCESS_OP_READ_CHR ||
+                context->op == BLE_GATT_ACCESS_OP_READ_DSC;
+    if (public_attribute)
+        result = read ? read_attribute(channel, context, attribute) : BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    else if (!channel || !channel->encrypted)
         result = BLE_ATT_ERR_INSUFFICIENT_ENC;
-    else if (context->op == BLE_GATT_ACCESS_OP_READ_CHR ||
-             context->op == BLE_GATT_ACCESS_OP_READ_DSC)
+    else if (read)
         result = read_attribute(channel, context, attribute);
     else if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR)
         result = write_attribute(channel, context, attribute);
@@ -271,6 +282,13 @@ static int send_report(void *unused, uint16_t connection_handle, uint8_t report_
                             report_id == HID_REPORT_BOOT_KEYBOARD ? boot_keyboard_handle :
                             boot_mouse_handle;
     if (value_handle == 0) return -1;
+#if defined(CONFIG_KVM_HID_GATT_TRACE) && defined(CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC)
+    if (length == HID_KEYBOARD_REPORT_LEN) {
+        ESP_LOGI("esp32-kvm-gatt", "input conn=%u handle=%u bytes=%02x%02x%02x%02x%02x%02x%02x%02x",
+                 connection_handle, value_handle, bytes[0], bytes[1], bytes[2], bytes[3],
+                 bytes[4], bytes[5], bytes[6], bytes[7]);
+    }
+#endif
     struct os_mbuf *packet = ble_hs_mbuf_from_flat(bytes, length);
     if (packet == NULL) return -1;
     return ble_gatts_notify_custom(connection_handle, value_handle, packet);

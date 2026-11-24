@@ -17,6 +17,9 @@
 #define BLE_GATT_ACCESS_OP_WRITE_CHR 1
 #define BLE_GATT_ACCESS_OP_READ_DSC 2
 #define BLE_GATT_ACCESS_OP_WRITE_DSC 3
+#define BLE_GATT_REGISTER_OP_CHR 2
+#define BLE_GATT_REGISTER_OP_DSC 3
+static inline uint16_t ble_uuid_u16(const void *uuid) { return (uint16_t)(uintptr_t)uuid; }
 struct ble_gatt_access_ctxt { uint8_t op; struct os_mbuf *om; uint16_t offset; };
 typedef int ble_gatt_access_fn(uint16_t, uint16_t, struct ble_gatt_access_ctxt *, void *);
 struct ble_gatt_dsc_def {
@@ -31,6 +34,19 @@ struct ble_gatt_chr_def {
 struct ble_gatt_svc_def {
     uint8_t type; const void *uuid; const struct ble_gatt_svc_def **includes;
     const struct ble_gatt_chr_def *characteristics;
+};
+struct ble_gatt_register_ctxt {
+    uint8_t op;
+    struct {
+        const struct ble_gatt_svc_def *svc_def;
+        const struct ble_gatt_chr_def *chr_def;
+        uint16_t val_handle;
+    } chr;
+    struct {
+        const struct ble_gatt_svc_def *svc_def;
+        const struct ble_gatt_dsc_def *dsc_def;
+        uint16_t handle;
+    } dsc;
 };
 int ble_gatts_count_cfg(const struct ble_gatt_svc_def *services);
 int ble_gatts_add_svcs(const struct ble_gatt_svc_def *services);

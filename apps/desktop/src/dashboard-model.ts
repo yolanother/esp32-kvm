@@ -14,7 +14,10 @@ export interface RouteDescription {
 export interface SystemChoice {
   bondToken: string;
   name: string;
-  state: "Controlling" | "Ready" | "Connected" | "Offline";
+  profileSaved: boolean;
+  state: "Controlling" | "Ready" | "Connected" | "Offline" | "Disabled";
+  /** Saved guests can be switched off so they are skipped until re-enabled. */
+  enabled: boolean;
   selectEnabled: boolean;
 }
 
@@ -41,15 +44,28 @@ export function describeRoute(snapshot: SetupSnapshot): RouteDescription {
   }
 }
 
-/** Lists saved guests and exposes selection only for a ready, idle route. */
+/** Lists every firmware-reported or saved guest and exposes ready idle routes. */
 export function systemChoices(snapshot: SetupSnapshot): SystemChoice[] {
-  return snapshot.profiles.map((guest) => ({
-    bondToken: guest.bondToken,
-    name: guest.name,
-    state: ({ active: "Controlling", ready: "Ready", connected: "Connected", offline: "Offline" } as const)[liveGuestState(guest.bondToken, snapshot)],
-    selectEnabled: snapshot.device.kind === "verified" && snapshot.route.kind === "local" &&
-      snapshot.readyTokens.includes(guest.bondToken) && !snapshot.mappingPendingTokens.includes(guest.bondToken),
-  }));
+  const activeToken = snapshot.route.kind === "guest" ? [snapshot.route.bondToken] : [];
+  const tokens = [...new Set([
+    ...snapshot.bondTokens,
+    ...snapshot.connectedTokens,
+    ...snapshot.readyTokens,
+    ...activeToken,
+    ...snapshot.profiles.map((profile) => profile.bondToken),
+  ])];
+  return tokens.map((bondToken, index) => {
+    const profile = snapshot.profiles.find((guest) => guest.bondToken === bondToken);
+    return {
+    bondToken,
+    name: profile?.name ?? `Guest ${index + 1}`,
+    profileSaved: profile !== undefined,
+    enabled: profile?.enabled !== false,
+    state: profile?.enabled === false && liveGuestState(bondToken, snapshot) !== "active" ? "Disabled" : ({ active: "Controlling", ready: "Ready", connected: "Connected", offline: "Offline" } as const)[liveGuestState(bondToken, snapshot)],
+    selectEnabled: profile?.enabled !== false && snapshot.device.kind === "verified" && snapshot.route.kind === "local" &&
+      snapshot.readyTokens.includes(bondToken) && !snapshot.mappingPendingTokens.includes(bondToken),
+    };
+  });
 }
 
 function routeKey(route: RouteState): string {

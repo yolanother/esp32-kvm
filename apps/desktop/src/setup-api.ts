@@ -44,6 +44,9 @@ export function testGuestControls(bondToken: string): Promise<void> {
 export function returnToHost(): Promise<void> { return invoke("dashboard_return_local"); }
 /** Requests a saved, HID-ready guest; native code resolves its current slot. */
 export function selectGuest(bondToken: string): Promise<void> { return invoke("dashboard_select_guest", { bondToken }); }
+
+/** Temporarily removes a named guest from switching, or restores it. */
+export function setGuestEnabled(bondToken: string, enabled: boolean): Promise<void> { return invoke("setup_set_guest_enabled", { bondToken, enabled }); }
 /** Reads the opt-in pointer bump setting for this desktop session. */
 export function keepAwakeEnabled(): Promise<boolean> { return invoke("dashboard_keep_awake_enabled"); }
 /** Changes whether the actor may send idle pointer bumps to its active guest. */

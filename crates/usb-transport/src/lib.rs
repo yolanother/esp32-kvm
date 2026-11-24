@@ -176,23 +176,24 @@ pub fn probe_stream<S: Read + Write + ?Sized>(
     }
     let hello = Frame::new(MessageKind::Hello, 0, 0, 0, vec![0, 0, 0, 0, 0, 0]);
     let deadline = Instant::now() + PROBE_TIMEOUT;
-    let mut caps_frame = None;
-    for attempt in 0..2 {
-        send(stream, &hello)?;
+    send(stream, &hello)?;
+    // ROM startup text has no frame delimiter and can prefix the first CAPS.
+    // Once its delimiter restores framing, request CAPS once more; merely
+    // discarding that corrupted response leaves the real device waiting.
+    let mut retried = false;
+    let caps_frame = loop {
         match receive(stream, deadline) {
-            Ok(frame) if frame.kind != MessageKind::Caps && attempt == 0 => continue,
-            Ok(frame) => {
-                caps_frame = Some(frame);
-                break;
+            Ok(frame) if frame.kind == MessageKind::Caps => break frame,
+            Ok(_) => continue,
+            Err(ProbeError::Protocol(_)) => {
+                if !retried {
+                    send(stream, &hello)?;
+                    retried = true;
+                }
             }
-            Err(ProbeError::Protocol(_)) if attempt == 0 => continue,
             Err(error) => return Err(error),
         }
-    }
-    let caps_frame = caps_frame.ok_or(ProbeError::Timeout)?;
-    if caps_frame.kind != MessageKind::Caps {
-        return Err(ProbeError::UnexpectedResponse);
-    }
+    };
     let mut caps = parse_caps(&caps_frame)?;
     if caps.board_id != expected_board_id {
         return Err(ProbeError::BoardMismatch);
@@ -213,10 +214,7 @@ pub fn probe_stream<S: Read + Write + ?Sized>(
                 vec![negotiated_minor as u8, 0, 0, 0, 0, 0],
             ),
         )?;
-        let upgraded = receive(stream, deadline)?;
-        if upgraded.kind != MessageKind::Caps {
-            return Err(ProbeError::UnexpectedResponse);
-        }
+        let upgraded = receive_matching(stream, deadline, |frame| frame.kind == MessageKind::Caps)?;
         let next = parse_caps(&upgraded)?;
         if next.board_id != caps.board_id
             || next.session_id != caps.session_id
@@ -237,14 +235,13 @@ pub fn probe_stream<S: Read + Write + ?Sized>(
         stream,
         &Frame::new(MessageKind::SessionOpen, caps.session_id, 1, 0, payload),
     )?;
-    let ack = receive(stream, deadline)?;
-    if ack.kind != MessageKind::Ack
-        || ack.session_id != caps.session_id
-        || ack.payload[0] != MessageKind::SessionOpen as u8
-        || u32::from_le_bytes(ack.payload[1..5].try_into().unwrap()) != 1
-    {
-        return Err(ProbeError::UnexpectedResponse);
-    }
+    let ack = receive_matching(stream, deadline, |frame| {
+        frame.kind == MessageKind::Ack
+            && frame.session_id == caps.session_id
+            && frame.payload[0] == MessageKind::SessionOpen as u8
+            && u32::from_le_bytes(frame.payload[1..5].try_into().unwrap()) == 1
+    })?;
+    debug_assert_eq!(ack.kind, MessageKind::Ack);
     Ok(ConfirmedDevice {
         board_id: caps.board_id,
         session_id: caps.session_id,
@@ -284,6 +281,27 @@ fn receive<S: Read + ?Sized>(stream: &mut S, deadline: Instant) -> Result<Frame,
         }
     }
     Err(ProbeError::Timeout)
+}
+
+/// Waits for the response belonging to the current handshake step while
+/// discarding complete frames left in the USB transmit queue by an earlier
+/// desktop process. The deadline remains shared across the whole negotiation.
+fn receive_matching<S, F>(
+    stream: &mut S,
+    deadline: Instant,
+    mut matches: F,
+) -> Result<Frame, ProbeError>
+where
+    S: Read + ?Sized,
+    F: FnMut(&Frame) -> bool,
+{
+    loop {
+        match receive(stream, deadline) {
+            Ok(frame) if matches(&frame) => return Ok(frame),
+            Ok(_) | Err(ProbeError::Protocol(_)) => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn map_io(e: io::Error) -> ProbeError {

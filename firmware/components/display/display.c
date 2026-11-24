@@ -29,6 +29,7 @@
 
 static kvm_display_event_fn event_callback;
 static kvm_display_pair_fn pair_callback;
+static kvm_display_target_fn target_callback;
 static kvm_display_status_t latest_status;
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool started;
@@ -42,8 +43,12 @@ static lv_obj_t *primary_label;
 static lv_obj_t *detail_label;
 static lv_obj_t *footer_label;
 static lv_obj_t *row_labels[3];
+static lv_obj_t *target_cards[4];
+static lv_obj_t *target_icons[4];
+static lv_obj_t *target_names[4];
 static lv_obj_t *left_action;
 static lv_obj_t *right_action;
+static lv_obj_t *guest_settings_action;
 
 static void touch_interrupt(esp_lcd_touch_handle_t touch)
 {
@@ -120,6 +125,53 @@ static lv_obj_t *make_label(lv_obj_t *screen, int16_t y, uint32_t color)
     return label;
 }
 
+static void make_target_card(lv_obj_t *screen, unsigned index)
+{
+    static const int16_t x[4] = {12, 124, 12, 124};
+    static const int16_t y[4] = {42, 42, 120, 120};
+    target_cards[index] = lv_obj_create(screen);
+    lv_obj_set_size(target_cards[index], 104, 70);
+    lv_obj_align(target_cards[index], LV_ALIGN_TOP_LEFT, x[index], y[index]);
+    lv_obj_set_style_bg_color(target_cards[index], lv_color_hex(0x15242e), 0);
+    lv_obj_set_style_border_color(target_cards[index], lv_color_hex(0x405560), 0);
+    lv_obj_set_style_border_width(target_cards[index], 1, 0);
+    lv_obj_set_style_radius(target_cards[index], 9, 0);
+    lv_obj_set_style_pad_all(target_cards[index], 7, 0);
+    target_icons[index] = lv_label_create(target_cards[index]);
+    char icon[3] = {'G', (char)('0' + index), '\0'};
+    if (index == 0) { icon[0] = 'P'; icon[1] = 'C'; }
+    lv_label_set_text(target_icons[index], icon);
+    lv_obj_set_style_text_color(target_icons[index], lv_color_hex(0x75e2c3), 0);
+    lv_obj_align(target_icons[index], LV_ALIGN_TOP_MID, 0, 0);
+    target_names[index] = lv_label_create(target_cards[index]);
+    lv_obj_set_width(target_names[index], 88);
+    lv_label_set_long_mode(target_names[index], LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_style_text_align(target_names[index], LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(target_names[index], lv_color_hex(0xeef5f7), 0);
+    lv_obj_align(target_names[index], LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(target_cards[index], LV_OBJ_FLAG_HIDDEN);
+}
+
+static void update_target_card(unsigned index, const kvm_display_view_t *view)
+{
+    lv_obj_t *card = target_cards[index];
+    if (view->screen != KVM_DISPLAY_ACTIVE || !(view->card_visible_mask & (1u << index))) {
+        lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_HIDDEN);
+    bool selected = view->selected_card == index;
+    bool ready = view->card_ready_mask & (1u << index);
+    lv_obj_set_style_bg_color(card, lv_color_hex(selected ? 0x1d4948 : 0x15242e), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(selected ? 0x75e2c3 : 0x405560), 0);
+    lv_obj_set_style_border_width(card, selected ? 3 : 1, 0);
+    lv_obj_set_style_text_color(target_icons[index],
+        lv_color_hex(ready ? 0x75e2c3 : 0x6f7f87), 0);
+    lv_obj_set_style_text_color(target_names[index],
+        lv_color_hex(ready ? 0xeef5f7 : 0x82939b), 0);
+    lv_label_set_text(target_names[index], view->card_labels[index]);
+}
+
 static void button_worker(void *context)
 {
     (void)context;
@@ -193,10 +245,15 @@ static esp_err_t init_panel(void)
     footer_label = make_label(screen, 210, 0x75e2c3);
     for (unsigned i = 0; i < 3; ++i)
         row_labels[i] = make_label(screen, 64 + 44 * i, 0xeef5f7);
+    for (unsigned i = 0; i < 4; ++i) make_target_card(screen, i);
     left_action = make_action(screen, 12, 103);
     right_action = make_action(screen, 125, 103);
+    guest_settings_action = make_action(screen, 190, 42);
+    lv_obj_set_size(guest_settings_action, 42, 42);
+    lv_obj_align(guest_settings_action, LV_ALIGN_TOP_LEFT, 190, 194);
     lv_obj_add_flag(left_action, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(right_action, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(guest_settings_action, LV_OBJ_FLAG_HIDDEN);
     lvgl_port_unlock();
     touch_started = pair_callback && init_touch();
     panel_started = true;
@@ -226,36 +283,54 @@ static void display_worker(void *context)
             lv_label_set_text(primary_label, view.primary);
             lv_label_set_text(detail_label, view.detail);
             lv_label_set_text(footer_label, view.footer);
-            for (unsigned i = 0; i < 3; ++i)
+            bool cards = view.screen == KVM_DISPLAY_ACTIVE;
+            if (cards) {
+                lv_obj_add_flag(primary_label, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_remove_flag(primary_label, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
+            }
+            for (unsigned i = 0; i < 3; ++i) {
                 lv_label_set_text(row_labels[i], view.rows[i]);
+                if (cards) lv_obj_add_flag(row_labels[i], LV_OBJ_FLAG_HIDDEN);
+                else lv_obj_remove_flag(row_labels[i], LV_OBJ_FLAG_HIDDEN);
+            }
+            for (unsigned i = 0; i < 4; ++i) update_target_card(i, &view);
             if (touch_started && !next.recovery_required && !next.updating &&
                 !next.fault && !next.armed) {
                 switch (next.pairing_state) {
                 case KVM_DISPLAY_PAIRING_CLOSED:
                 case KVM_DISPLAY_PAIRING_REJECTED:
                 case KVM_DISPLAY_PAIRING_TIMEOUT:
-                    set_action(left_action, next.ready_slots ? "ADD GUEST" : "START PAIRING");
+                    set_action(left_action, next.paired_guests ? NULL : "START PAIRING");
                     set_action(right_action, NULL);
+                    set_action(guest_settings_action,
+                               next.paired_guests ? LV_SYMBOL_SETTINGS : NULL);
                     lv_obj_set_width(left_action, 216);
                     break;
                 case KVM_DISPLAY_PAIRING_WAITING:
                     lv_obj_set_width(left_action, 103);
                     set_action(left_action, next.pairing_local_owner ? "CANCEL" : NULL);
                     set_action(right_action, NULL);
+                    set_action(guest_settings_action, NULL);
                     break;
                 case KVM_DISPLAY_PAIRING_CHALLENGE:
                     lv_obj_set_width(left_action, 103);
                     set_action(left_action, NULL);
                     set_action(right_action, NULL);
+                    set_action(guest_settings_action, NULL);
                     break;
                 default:
                     set_action(left_action, NULL);
                     set_action(right_action, NULL);
+                    set_action(guest_settings_action, NULL);
                     break;
                 }
             } else {
                 set_action(left_action, NULL);
                 set_action(right_action, NULL);
+                set_action(guest_settings_action, NULL);
             }
             shown = view;
             lvgl_port_unlock();
@@ -270,12 +345,28 @@ static void display_worker(void *context)
                 kvm_display_pair_action_t action;
                 kvm_display_pair_request_t request;
                 uint64_t touch_ms = (uint64_t)esp_timer_get_time() / 1000;
+                bool accepted = false;
                 if ((!last_touch_ms || touch_ms - last_touch_ms >= 750u) &&
+                    view.screen == KVM_DISPLAY_ACTIVE && target_callback) {
+                    int card = -1;
+                    if (point.x >= 12 && point.x < 116 && point.y >= 42 && point.y < 112) card = 0;
+                    else if (point.x >= 124 && point.x < 228 && point.y >= 42 && point.y < 112) card = 1;
+                    else if (point.x >= 12 && point.x < 116 && point.y >= 120 && point.y < 190) card = 2;
+                    else if (point.x >= 124 && point.x < 228 && point.y >= 120 && point.y < 190) card = 3;
+                    if (card >= 0 && (view.card_visible_mask & (1u << card)) &&
+                        (view.card_ready_mask & (1u << card))) {
+                        target_callback((uint8_t)card);
+                        accepted = true;
+                    }
+                }
+                if (!accepted && (!last_touch_ms || touch_ms - last_touch_ms >= 750u) &&
                     kvm_display_pair_touch_action(&next, point.x, point.y, &action) &&
-                    kvm_display_pair_request(&next, touch_ms, action, &request) &&
-                    pair_callback) {
-                    last_touch_ms = touch_ms;
+                    kvm_display_pair_request(&next, touch_ms, action, &request) && pair_callback) {
                     pair_callback(request);
+                    accepted = true;
+                }
+                if (accepted) {
+                    last_touch_ms = touch_ms;
                 }
             }
         }
@@ -283,11 +374,12 @@ static void display_worker(void *context)
 }
 
 esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn,
-                            kvm_display_pair_fn pair_fn)
+                            kvm_display_pair_fn pair_fn, kvm_display_target_fn target_fn)
 {
     if (started) return ESP_ERR_INVALID_STATE;
     event_callback = event_fn;
     pair_callback = pair_fn;
+    target_callback = target_fn;
     gpio_config_t boot_cfg = {
         .pin_bit_mask = 1ULL << BOOT_GPIO, .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
