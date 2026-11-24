@@ -14,11 +14,22 @@ typedef struct {
     hid_bond_t bonds[DOUBTECH_HID_MAX_BONDS];
 } stored_table_t;
 
+static char bond_namespace[DOUBTECH_HID_BOND_NAMESPACE_MAX_CHARS + 1] = DOUBTECH_HID_LEGACY_BOND_NAMESPACE;
+
+esp_err_t hid_pairing_store_set_namespace(const char *name)
+{
+    if (name == NULL) name = DOUBTECH_HID_LEGACY_BOND_NAMESPACE;
+    size_t length = strlen(name);
+    if (length == 0 || length > DOUBTECH_HID_BOND_NAMESPACE_MAX_CHARS) return ESP_ERR_INVALID_ARG;
+    memcpy(bond_namespace, name, length + 1);
+    return ESP_OK;
+}
+
 esp_err_t hid_pairing_store_load(hid_pairing_t *state)
 {
     nvs_handle_t handle;
     hid_pairing_init(state);
-    esp_err_t result = nvs_open("kvm_bonds", NVS_READONLY, &handle);
+    esp_err_t result = nvs_open(bond_namespace, NVS_READONLY, &handle);
     if (result == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
     if (result != ESP_OK) return result;
     stored_table_t table = {0};
@@ -39,7 +50,7 @@ esp_err_t hid_pairing_store_load(hid_pairing_t *state)
 esp_err_t hid_pairing_store_save(const hid_pairing_t *state)
 {
     nvs_handle_t handle;
-    esp_err_t result = nvs_open("kvm_bonds", NVS_READWRITE, &handle);
+    esp_err_t result = nvs_open(bond_namespace, NVS_READWRITE, &handle);
     if (result != ESP_OK) return result;
     stored_table_t table = {.magic = TABLE_MAGIC, .version = TABLE_VERSION,
                             .count = (uint32_t)state->bond_count};

@@ -37,6 +37,7 @@ static hid_pairing_t pairing;
 static doubtech_hid_pairing_event_fn pairing_events;
 static void *pairing_event_context;
 static bool started;
+static char device_name[DOUBTECH_HID_NAME_MAX_BYTES + 1];
 static struct ble_npl_event disconnect_events[DOUBTECH_HID_MAX_CONNECTIONS];
 static struct ble_npl_callout pairing_timeout;
 static struct ble_npl_callout advertising_retry;
@@ -168,11 +169,6 @@ static bool next_reconnect_peer(ble_addr_t *address)
 static void advertise(void)
 {
     static const ble_uuid16_t service[] = {BLE_UUID16_INIT(0x1812)};
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
-    static const char name[] = "ESP32 KVM KB Test";
-#else
-    static const char name[] = "ESP32 KVM";
-#endif
     struct ble_hs_adv_fields fields = {0};
     struct ble_gap_adv_params parameters = {0};
     ble_addr_t reconnect_address;
@@ -181,8 +177,8 @@ static void advertise(void)
         return;
     }
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.name = (uint8_t *)name;
-    fields.name_len = sizeof(name) - 1;
+    fields.name = (uint8_t *)device_name;
+    fields.name_len = (uint8_t)strlen(device_name);
     fields.name_is_complete = 1;
     fields.uuids16 = service;
     fields.num_uuids16 = 1;
@@ -518,10 +514,32 @@ static void host_task(void *argument)
     nimble_port_freertos_deinit();
 }
 
-esp_err_t doubtech_hid_start(void)
+static bool valid_length(const char *text, size_t maximum)
+{
+    size_t length = strlen(text);
+    return length >= 1 && length <= maximum;
+}
+
+esp_err_t doubtech_hid_start(const doubtech_hid_config_t *config)
 {
     if (started) return ESP_ERR_INVALID_STATE;
-    esp_err_t result = nvs_flash_init();
+    const char *name = config && config->device_name ? config->device_name : "BLE HID";
+    const char *manufacturer = config && config->manufacturer ? config->manufacturer : "DoubTech";
+    const char *model = config && config->model ? config->model : "BLE HID";
+    const char *bond_namespace = config ? config->bond_namespace : NULL;
+    if (!valid_length(name, DOUBTECH_HID_NAME_MAX_BYTES) ||
+        !valid_length(manufacturer, DOUBTECH_HID_DIS_STRING_MAX_BYTES) ||
+        !valid_length(model, DOUBTECH_HID_DIS_STRING_MAX_BYTES) ||
+        (bond_namespace && !valid_length(bond_namespace, DOUBTECH_HID_BOND_NAMESPACE_MAX_CHARS)))
+        return ESP_ERR_INVALID_ARG;
+#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+    name = "DoubTech KB Test";
+#endif
+    memcpy(device_name, name, strlen(name) + 1);
+    hid_gatt_set_device_info(manufacturer, model);
+    esp_err_t result = hid_pairing_store_set_namespace(bond_namespace);
+    if (result != ESP_OK) return result;
+    result = nvs_flash_init();
     if (result != ESP_OK) return result; /* Never erase stored bonds implicitly. */
     result = hid_pairing_store_load(&pairing);
     if (result != ESP_OK) return result;
@@ -540,11 +558,7 @@ esp_err_t doubtech_hid_start(void)
     ble_svc_gatt_init();
     result = hid_gatt_register();
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
-    result = ble_svc_gap_device_name_set("ESP32 KVM KB Test");
-#else
-    result = ble_svc_gap_device_name_set("ESP32 KVM");
-#endif
+    result = ble_svc_gap_device_name_set(device_name);
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
     result = ble_svc_gap_device_appearance_set(0x03c1);
     if (result != ESP_OK) { nimble_port_deinit(); return result; }

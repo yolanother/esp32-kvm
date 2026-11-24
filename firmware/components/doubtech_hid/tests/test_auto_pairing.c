@@ -10,7 +10,7 @@ int main(void)
 {
     active_peer.type = 1;
     active_peer.val[0] = 42;
-    assert(doubtech_hid_start() == 0);
+    assert(doubtech_hid_start(&legacy_config) == 0);
     doubtech_hid_pairing_set_events(event_sink, NULL);
     ble_hs_cfg.sync_cb();
 

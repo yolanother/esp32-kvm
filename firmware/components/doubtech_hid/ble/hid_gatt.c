@@ -5,6 +5,7 @@
  * targets exactly its channel's BLE connection handle. */
 #include "hid_gatt.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "host/ble_att.h"
@@ -160,6 +161,15 @@ static int append(struct ble_gatt_access_ctxt *context, const uint8_t *bytes, si
     return os_mbuf_append(context->om, bytes, length) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+static char manufacturer_name[DOUBTECH_HID_DIS_STRING_MAX_BYTES + 1] = "DoubTech";
+static char model_name[DOUBTECH_HID_DIS_STRING_MAX_BYTES + 1] = "BLE HID";
+
+void hid_gatt_set_device_info(const char *manufacturer, const char *model)
+{
+    snprintf(manufacturer_name, sizeof(manufacturer_name), "%s", manufacturer);
+    snprintf(model_name, sizeof(model_name), "%s", model);
+}
+
 static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *context,
                           enum attribute attribute)
 {
@@ -207,8 +217,9 @@ static int read_attribute(hid_channel_t *channel, struct ble_gatt_access_ctxt *c
     case ATTR_BATTERY_FORMAT: return append(context, battery_format, sizeof(battery_format));
     case ATTR_BATTERY_LEVEL: return append(context, &usb_power_level, 1);
     case ATTR_PNP_ID: return append(context, pnp_id, sizeof(pnp_id));
-    case ATTR_MODEL_NAME: return append(context, (const uint8_t *)"ESP32 KVM S3", 12);
-    case ATTR_MANUFACTURER: return append(context, (const uint8_t *)"ESP32 KVM", 9);
+    case ATTR_MODEL_NAME: return append(context, (const uint8_t *)model_name, strlen(model_name));
+    case ATTR_MANUFACTURER:
+        return append(context, (const uint8_t *)manufacturer_name, strlen(manufacturer_name));
     default: return BLE_ATT_ERR_UNLIKELY;
     }
 }

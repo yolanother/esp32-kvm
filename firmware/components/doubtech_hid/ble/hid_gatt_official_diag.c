@@ -4,6 +4,7 @@
  * from the macOS compatibility test. */
 #include "hid_gatt.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "host/ble_gatt.h"
@@ -44,6 +45,15 @@ static int read_pnp_id(uint16_t connection, uint16_t handle,
     return result == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+static char manufacturer_name[DOUBTECH_HID_DIS_STRING_MAX_BYTES + 1] = "DoubTech";
+static char model_name[DOUBTECH_HID_DIS_STRING_MAX_BYTES + 1] = "BLE HID";
+
+void hid_gatt_set_device_info(const char *manufacturer, const char *model)
+{
+    snprintf(manufacturer_name, sizeof(manufacturer_name), "%s", manufacturer);
+    snprintf(model_name, sizeof(model_name), "%s", model);
+}
+
 static int read_device_info(uint16_t connection, uint16_t handle,
                              struct ble_gatt_access_ctxt *context, void *argument)
 {
@@ -51,7 +61,7 @@ static int read_device_info(uint16_t connection, uint16_t handle,
     if (uuid == 0x2a50) return read_pnp_id(connection, handle, context, NULL);
     if (context->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
-    const char *value = uuid == 0x2a24 ? "ESP32 KVM S3" : "ESP32 KVM";
+    const char *value = uuid == 0x2a24 ? model_name : manufacturer_name;
     return os_mbuf_append(context->om, value, strlen(value)) == 0 ?
            0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }

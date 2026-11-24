@@ -99,6 +99,19 @@ int main(void)
     assert(registered[2].type == BLE_GATT_SVC_TYPE_PRIMARY);
     assert((uintptr_t)registered[2].uuid == 0x180a);
     assert(registered[3].type == 0);
+    static const char *const dis_expected[] = {"BLE HID", "DoubTech"};
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        if (pass) hid_gatt_set_device_info("Acme", "Model 7");
+        for (const struct ble_gatt_chr_def *chr = registered[2].characteristics; chr->uuid; chr++) {
+            uintptr_t uuid = (uintptr_t)chr->uuid;
+            if (uuid != 0x2a24 && uuid != 0x2a29) continue;
+            struct os_mbuf text = {0};
+            struct ble_gatt_access_ctxt read = {.op = BLE_GATT_ACCESS_OP_READ_CHR, .om = &text};
+            assert(chr->access_cb(17, 0, &read, chr->arg) == 0);
+            const char *want = pass ? (uuid == 0x2a24 ? "Model 7" : "Acme") : dis_expected[uuid == 0x2a29];
+            assert(text.len == strlen(want) && memcmp(text.data, want, text.len) == 0);
+        }
+    }
     assert((uintptr_t)characteristic(8)->uuid == 0x2a22);
     assert((uintptr_t)characteristic(9)->uuid == 0x2a32);
     assert((uintptr_t)characteristic(10)->uuid == 0x2a33);

@@ -23,6 +23,10 @@
 #define DOUBTECH_HID_TOKEN_LEN 16
 /** Length of one keyboard input report; must equal the internal HID_KEYBOARD_REPORT_LEN. */
 #define DOUBTECH_HID_KEYBOARD_REPORT_LEN 8
+/** Longest advertised and GAP device name in bytes (not characters). */
+#define DOUBTECH_HID_NAME_MAX_BYTES 20
+/** Longest Device Information manufacturer or model string in bytes. */
+#define DOUBTECH_HID_DIS_STRING_MAX_BYTES 32
 
 struct hid_pairing;
 
@@ -63,8 +67,19 @@ typedef struct {
 /** Receives short status events on the NimBLE host thread. */
 typedef void (*doubtech_hid_pairing_event_fn)(const doubtech_hid_pairing_event_t *event, void *context);
 
-/** Initializes NVS/NimBLE, registers HID, and starts the BLE host task. */
-esp_err_t doubtech_hid_start(void);
+/** Advertised identity and bond storage; a NULL field selects the library default
+ * (name "BLE HID", manufacturer "DoubTech", model "BLE HID", NVS namespace
+ * "kvm_bonds"). Strings are copied during start and need not outlive it. */
+typedef struct {
+    const char *device_name;    /**< 1 to DOUBTECH_HID_NAME_MAX_BYTES bytes. */
+    const char *manufacturer;   /**< 1 to DOUBTECH_HID_DIS_STRING_MAX_BYTES bytes. */
+    const char *model;          /**< 1 to DOUBTECH_HID_DIS_STRING_MAX_BYTES bytes. */
+    const char *bond_namespace; /**< 1 to 15 characters of NVS namespace. */
+} doubtech_hid_config_t;
+
+/** Initializes NVS/NimBLE, registers HID, and starts the BLE host task. Returns
+ * ESP_ERR_INVALID_ARG, before touching NVS or NimBLE, for an invalid config. */
+esp_err_t doubtech_hid_start(const doubtech_hid_config_t *config);
 /** Sets a nonblocking status sink before the BLE service starts. */
 void doubtech_hid_pairing_set_events(doubtech_hid_pairing_event_fn callback, void *context);
 /** Opens pairing for 60 seconds; caller must run on the NimBLE host thread. */

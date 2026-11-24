@@ -9,11 +9,14 @@
 #include "display_labels.h"
 #include "transport_usb_serial_jtag.h"
 
+/* Keeps the on-air identity and bond table of the shipped firmware. */
+static const doubtech_hid_config_t hid_config = {"ESP32 KVM", "ESP32 KVM", "ESP32 KVM S3", NULL};
+
 /** Starts services; any startup error leaves the routing gate disarmed. */
 void app_main(void)
 {
     kvm_transport_diagnostics_init();
-    esp_err_t hid_result = doubtech_hid_start();
+    esp_err_t hid_result = doubtech_hid_start(&hid_config);
     if (hid_result != ESP_OK) ESP_LOGE("esp32-kvm", "HID startup failed: %d", hid_result);
     esp_err_t labels_result = kvm_display_labels_init();
     if (labels_result != ESP_OK) ESP_LOGE("esp32-kvm", "Display label storage failed: %d", labels_result);

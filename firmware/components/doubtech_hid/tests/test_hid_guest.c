@@ -3,6 +3,7 @@
  * token persistence, bounded current-token lookup, disconnect clearing,
  * retained inventory, and deliberate removal with mocked NimBLE and NVS. */
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 #include "doubtech_hid.h"
 #include "hid_gatt.h"
@@ -32,6 +33,11 @@ static bool fail_next_commit;
 static int security_result;
 static unsigned security_requests;
 static unsigned deleted_peers;
+static unsigned nvs_opens, adv_field_sets, gatt_registrations;
+static char adv_name[32], gap_name[32], dis_manufacturer[64], dis_model[64];
+static size_t adv_name_len;
+static bool check_gap_name = true;
+static const doubtech_hid_config_t legacy_config = {"ESP32 KVM", "ESP32 KVM", "ESP32 KVM S3", NULL};
 
 static void event_sink(const doubtech_hid_pairing_event_t *event, void *context)
 { (void)context; last_event = *event; }
@@ -48,7 +54,7 @@ static int send_report(void *context, uint16_t handle, uint8_t report,
 }
 int nvs_flash_init(void) { return 0; }
 int nvs_open(const char *name, int mode, nvs_handle_t *handle)
-{ (void)mode; assert(strcmp(name, "kvm_bonds") == 0); *handle = 1; return 0; }
+{ (void)mode; assert(strcmp(name, "kvm_bonds") == 0); nvs_opens++; *handle = 1; return 0; }
 int nvs_get_blob(nvs_handle_t handle, const char *key, void *value, size_t *length)
 { (void)handle; (void)key; if (!saved_size) return ESP_ERR_NVS_NOT_FOUND;
   assert(*length >= saved_size); memcpy(value, saved, saved_size); *length = saved_size; return 0; }
@@ -102,10 +108,13 @@ void nimble_port_freertos_deinit(void) { }
 void ble_svc_gap_init(void) { }
 void ble_svc_gatt_init(void) { }
 #ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
-int ble_svc_gap_device_name_set(const char *name) { return strcmp(name, "ESP32 KVM KB Test"); }
+#define EXPECTED_GAP_NAME "DoubTech KB Test"
 #else
-int ble_svc_gap_device_name_set(const char *name) { return strcmp(name, "ESP32 KVM"); }
+#define EXPECTED_GAP_NAME "ESP32 KVM"
 #endif
+int ble_svc_gap_device_name_set(const char *name)
+{ snprintf(gap_name, sizeof(gap_name), "%s", name);
+  return check_gap_name ? strcmp(name, EXPECTED_GAP_NAME) : 0; }
 int ble_svc_gap_device_appearance_set(uint16_t appearance) { return appearance == 0x03c1 ? 0 : -1; }
 void ble_store_config_init(void) { }
 int ble_hs_util_ensure_addr(int privacy) { return privacy; }
@@ -118,7 +127,9 @@ int ble_sm_inject_io(uint16_t handle, struct ble_sm_io *io)
 { assert((handle == 17 || handle == 18) && io->action == BLE_SM_IOACT_NUMCMP && io->numcmp_accept);
   confirmations++; return 0; }
 int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *fields)
-{ assert(fields->num_uuids16 == 1 && fields->uuids16[0].value == 0x1812); return 0; }
+{ assert(fields->num_uuids16 == 1 && fields->uuids16[0].value == 0x1812);
+  adv_field_sets++; adv_name_len = fields->name_len;
+  snprintf(adv_name, sizeof(adv_name), "%.*s", (int)fields->name_len, (const char *)fields->name); return 0; }
 int ble_gap_adv_start(uint8_t type, const void *address, uint32_t duration,
                      const struct ble_gap_adv_params *parameters,
                      int (*callback)(struct ble_gap_event *, void *), void *argument)
@@ -135,8 +146,11 @@ int ble_gap_conn_find(uint16_t handle, struct ble_gap_conn_desc *description)
 { description->conn_handle = handle; description->peer_id_addr = active_peer;
   description->sec_state.encrypted = 1; description->sec_state.bonded = 1;
   description->sec_state.authenticated = 1; return 0; }
+void hid_gatt_set_device_info(const char *manufacturer, const char *model)
+{ snprintf(dis_manufacturer, sizeof(dis_manufacturer), "%s", manufacturer);
+  snprintf(dis_model, sizeof(dis_model), "%s", model); }
 int hid_gatt_register(void)
-{ hid_channel_init(&channel, NULL, NULL); for (size_t i = 0; i < 2; ++i) hid_channel_init(&other_channels[i], NULL, NULL); return 0; }
+{ gatt_registrations++; hid_channel_init(&channel, NULL, NULL); for (size_t i = 0; i < 2; ++i) hid_channel_init(&other_channels[i], NULL, NULL); return 0; }
 hid_channel_t *hid_gatt_channel(void) { return &channel; }
 hid_channel_t *hid_gatt_channel_at(uint8_t slot)
 { return slot == 1 ? &channel : slot >= 2 && slot <= DOUBTECH_HID_MAX_CONNECTIONS ? &other_channels[slot - 2] : NULL; }
@@ -157,7 +171,7 @@ void hid_gatt_on_subscribe(uint16_t handle, uint16_t value_handle, bool enabled)
 int main(void)
 {
     active_peer.type = 1; active_peer.val[0] = 42;
-    assert(doubtech_hid_start() == 0);
+    assert(doubtech_hid_start(&legacy_config) == 0);
     assert(ble_hs_cfg.sm_mitm == 1 && ble_hs_cfg.sm_sc == 1);
     assert(ble_hs_cfg.sm_io_cap == BLE_SM_IO_CAP_DISP_YES_NO);
     assert(ble_hs_cfg.store_status_cb(NULL, NULL) != 0);

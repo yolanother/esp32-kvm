@@ -13,6 +13,9 @@
 
 /** Registers the HID service before the NimBLE GATT server starts. */
 int hid_gatt_register(void);
+/** Copies the Device Information manufacturer and model strings (each at most
+ * DOUBTECH_HID_DIS_STRING_MAX_BYTES bytes); call before hid_gatt_register. */
+void hid_gatt_set_device_info(const char *manufacturer, const char *model);
 /** Returns the first routing channel for the existing slot-one bridge. */
 hid_channel_t *hid_gatt_channel(void);
 /** Returns a one-based channel slot, including an inert disconnected slot. */
