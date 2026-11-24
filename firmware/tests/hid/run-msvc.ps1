@@ -2,7 +2,7 @@
 # Builds and runs the portable HID report and NimBLE-adapter contract tests on
 # Windows with installed MSVC and Windows SDK headers, without device access.
 $ErrorActionPreference = 'Stop'
-$testNames = if ($args.Count) { $args } else { @('test_hid_report', 'test_hid_gatt', 'test_hid_guest', 'test_hid_keyboard_diag', 'test_hid_keyboard_gatt', 'test_hid_discovery', 'test_hid_official_diag') }
+$testNames = if ($args.Count) { $args } else { @('test_hid_report', 'test_hid_gatt', 'test_hid_guest', 'test_hid_keyboard_diag', 'test_hid_keyboard_gatt', 'test_hid_discovery', 'test_hid_official_diag', 'test_auto_pairing') }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
 $msvcRoot = 'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC'
 $kitRoot = 'C:/Program Files (x86)/Windows Kits/10'
