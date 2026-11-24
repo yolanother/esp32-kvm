@@ -42,7 +42,10 @@ firmware/components/doubtech_hid/
   `core`, `ble`). The component `REQUIRES bt nvs_flash esp_timer`.
 - `core/` has no NimBLE or ESP-IDF includes, so the report gate and the pairing policy
   run in the PC tests exactly as they run on the board. `hid_report.c` reads
-  `CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC` only to select a smaller report map.
+  `CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC` to select a smaller report map and also
+  to change readiness (keyboard subscription only), the all-up baseline (keyboard only),
+  mouse and consumer acceptance (only the all-zero state, as a no-op) and the
+  protocol-mode and LED gating (no encryption check at the channel level).
 - `ble/hid_gatt.c` defines the three GATT services and keeps one `hid_channel_t` per link.
   It never starts advertising and never arms output; the owner (`hid_guest.c`) feeds it
   link events.
@@ -172,7 +175,7 @@ glue is in `ble/hid_guest.c`.
   existing keys.
 - A new peer is admitted only if, after encryption, the link is encrypted, bonded and
   authenticated, the window is still open, a slot in the table is free and the
-  application-side approval for exactly that connection exists. The library then
+  approval for exactly that connection exists (the library gives it automatically, on the device side, right after publishing the challenge; the person confirms on the guest). The library then
   creates a random 16-byte token with `esp_random`, writes the table to NVS first and
   publishes `DOUBTECH_HID_BONDED`. If the save fails, the new NimBLE keys are deleted and
   the link is terminated.

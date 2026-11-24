@@ -238,10 +238,17 @@ Call it only after `doubtech_hid_start` returned `ESP_OK`: it does not check
 
 ### `esp_err_t doubtech_hid_pairing_confirm(uint32_t challenge_id, bool approved)`
 
-Answers the pending numeric comparison for exactly `challenge_id`. A guest-initiated
-comparison is approved by the library itself, immediately after it publishes the
-challenge, so an application normally never needs this for guest-initiated pairing;
-it is for a comparison the application wants to decide itself.
+Answers the pending numeric comparison for exactly `challenge_id`. There is no
+application-decided comparison today. Every numeric comparison arrives as a NimBLE
+passkey action; the library publishes `DOUBTECH_HID_PAIRING_CHALLENGE` and then, in the
+same callback, calls this function itself with `approved` true (`hid_guest.c`), which
+clears the pending challenge. A later call, from any thread, therefore finds no pending
+challenge and returns `ESP_ERR_INVALID_STATE` (`tests/test_hid_guest.c` asserts this).
+Calling it synchronously from inside the CHALLENGE event callback is harmful: it
+consumes the challenge first, so the library's own confirmation then fails, and the
+library publishes `DOUBTECH_HID_PAIRING_REJECTED` and terminates the link. The one effect
+an application can have is to reject by calling it with `approved` false from within the
+CHALLENGE callback, which terminates the link.
 
 Returns `ESP_OK` when the answer was handed to NimBLE (a rejection also returns
 `ESP_OK` after it terminates the link and publishes `DOUBTECH_HID_PAIRING_REJECTED`);
@@ -395,7 +402,10 @@ completed in time.
 ### `bool doubtech_hid_request_pair_reply(uint32_t challenge_id, bool approved)`
 
 Runs `doubtech_hid_pairing_confirm` for exactly that challenge ID; `true` when it
-returned `ESP_OK`.
+returned `ESP_OK`. Because the library already confirmed every challenge when it published
+it, a reply sent after a `DOUBTECH_HID_PAIRING_CHALLENGE` event finds no pending challenge
+and this returns `false` in practice (see `doubtech_hid_pairing_confirm`). It does not let
+an application decide a pairing.
 
 ### `bool doubtech_hid_request_current_bond_token(uint8_t output[DOUBTECH_HID_TOKEN_LEN])`
 
