@@ -5,9 +5,17 @@ three-link source model and its remaining wire/physical gates are recorded in
 [Three-link HID source capacity](three-guest-source-capacity.md). The host still
 advertises and routes one live slot.
 
+The component is now the reusable `doubtech_hid` library (`firmware/components/doubtech_hid`,
+public header `include/doubtech_hid.h`). Function names below were updated from the old prefixed names (the `hid_guest` prefix) to the
+`doubtech_hid_` prefix. The current design, API and integration steps are in
+[docs/Designs/doubtech-hid](../doubtech-hid/README.md). Statements below about a single
+connection, Just Works bring-up pairing, unsupported Boot Protocol and the one-link
+`sdkconfig` values are history; the current code supports three links, numeric-comparison
+pairing and Boot Protocol, and `firmware/sdkconfig.defaults` holds the current settings.
+
 ## Scope and wire layout
 
-The `firmware/components/hid` component registers one HID-over-GATT service (`0x1812`) with one composite report map. It owns report values and one connection's output gate. Its optional `hid_guest_start()` initializes NVS and NimBLE, advertises one GAP identity and initiates encrypted bonding for a single guest. Firmware `main` does not call it until board recovery and toolchain validation. This M0/M1 leaf supports one connected guest; extending it to three requires connection-indexed channels and measured controller capacity.
+The `firmware/components/doubtech_hid` component registers one HID-over-GATT service (`0x1812`) with one composite report map. It owns report values and one connection's output gate. Its optional `doubtech_hid_start()` initializes NVS and NimBLE, advertises one GAP identity and initiates encrypted bonding for a single guest. Firmware `main` does not call it until board recovery and toolchain validation. This M0/M1 leaf supports one connected guest; extending it to three requires connection-indexed channels and measured controller capacity.
 
 | Report | ID | GATT Report Reference | Value bytes | Meaning |
 |---|---:|---|---:|---|
@@ -22,7 +30,7 @@ Protocol Mode (`0x2a4e`) accepts report protocol value `1`. Boot protocol value 
 
 ## Safe integration sequence
 
-1. After board recovery verification, enable ESP-IDF NimBLE in the shared firmware configuration and explicitly call `hid_guest_start()` from the firmware owner. It initializes NVS without erasing it, configures a fixed GAP name, registers the composite HID service and starts advertising. One connection is admitted; an unexpected second connection is terminated.
+1. After board recovery verification, enable ESP-IDF NimBLE in the shared firmware configuration and explicitly call `doubtech_hid_start()` from the firmware owner. It initializes NVS without erasing it, configures a fixed GAP name, registers the composite HID service and starts advertising. One connection is admitted; an unexpected second connection is terminated.
 2. The guest startup event callback initiates BLE security on connect, checks for both encryption and a bond on `BLE_GAP_EVENT_ENC_CHANGE`, tracks CCCD subscription events by connection and value handle, and disarms on disconnect. It refuses repeat pairing instead of silently deleting a bond.
 3. Treat `hid_gatt_channel()->armed` as firmware output gate state. The routing actor calls `hid_channel_arm` only after the target is READY, the old route has released, and route generation is current. Arm sends three zero input reports first. If any notification cannot be enqueued, arm fails and remains disarmed.
 4. Before switching, suspending, updating or returning local, call `hid_channel_release`. It disarms before attempting zero keyboard, mouse and consumer notifications. If this or an active send fails, the channel sets `needs_disconnect`; terminate the BLE link and keep it disarmed. A new encrypted, subscribed connection must receive the all-up baseline before arm.
@@ -30,7 +38,7 @@ Protocol Mode (`0x2a4e`) accepts report protocol value `1`. Boot protocol value 
 
 The one-channel implementation rejects a second simultaneous connection, and losing encryption or any input subscription immediately disarms. Its bring-up pairing requests LE Secure Connections with Just Works and no MITM verification; the SDK configuration may still allow legacy pairing. The later BLE policy task must add user-approved pairing windows, admission filtering, and passkey/numeric-comparison UX before production use. The root firmware integration owns heartbeat safety and route generation checks.
 
-For ESP-IDF 5.5.1 on ESP32-S3, the shared `firmware/sdkconfig.defaults` needs these settings before the firmware owner invokes `hid_guest_start()`:
+For ESP-IDF 5.5.1 on ESP32-S3, the shared `firmware/sdkconfig.defaults` needs these settings before the firmware owner invokes `doubtech_hid_start()`:
 
 ```text
 CONFIG_BT_ENABLED=y
@@ -53,7 +61,7 @@ The HID component declares `REQUIRES bt nvs_flash`. These options come from the 
 
 ## Verification and physical gates
 
-Portable tests: `powershell -ExecutionPolicy Bypass -File firmware/tests/hid/run-msvc.ps1`. The script compiles the descriptor/state, GATT adapter, and optional guest startup tests with `/W4 /WX`, runs all three, and writes only to the ignored `firmware/tests/hid/build/` directory. The GATT and startup tests use narrow NimBLE API stand-ins, so they do not establish SDK binary compatibility or radio behavior.
+Portable tests: `powershell -ExecutionPolicy Bypass -File firmware/components/doubtech_hid/tests/run-msvc.ps1`. The script compiles the descriptor/state, GATT adapter, and optional guest startup tests with `/W4 /WX`, runs all three, and writes only to the ignored `firmware/components/doubtech_hid/tests/build/` directory. The GATT and startup tests use narrow NimBLE API stand-ins, so they do not establish SDK binary compatibility or radio behavior.
 
 Pending before a one-guest claim: install/pin ESP-IDF and build firmware; identify the attached board revision, native USB path and BOOT recovery; verify safe flashing; pair a real Windows and macOS guest; read back the report map and report references; confirm one GAP identity, encrypted access and bond reconnect; verify keyboard LEDs, five mouse buttons, wheel/pan and consumer release; request unsupported boot protocol; interrupt a held key and force disconnect, then verify no held input after reconnect. Record OS versions, SDK version and observed report bytes. Do not treat source tests as hardware pass evidence.
 

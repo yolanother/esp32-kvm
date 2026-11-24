@@ -28,7 +28,7 @@ Windows setup can save a host profile for an already paired guest when verified 
 LOCAL → PREPARING → ACTIVE(slot,generation) → RELEASING → LOCAL. Any fault → LOCAL/paused. Firmware lease expiry → SUSPENDED and zero reports. Pairing/update use SUSPENDED. New sessions always begin disarmed.
 
 ## Repository plan
-apps/desktop (Tauri + UI); crates/input-core; crates/platform-windows; crates/protocol; firmware/main; firmware/components/board, transport, hid, router, display; protocol/schema; tests/vectors; docs/spec; docs/design; optional apps/guest-helper later.
+apps/desktop (Tauri + UI); crates/input-core; crates/platform-windows; crates/protocol; firmware/main; firmware/components/board, transport, doubtech_hid (the reusable BLE HID library, see docs/Designs/doubtech-hid), router, display; protocol/schema; tests/vectors; docs/spec; docs/design; optional apps/guest-helper later.
 Use generated protocol constants with independently checked golden vectors. Shared policy tests exercise routing without hardware.
 
 ## Hardware bring-up checklist

@@ -1,6 +1,6 @@
 # HID pairing and bond identity
 
-The optional HID service remains off until firmware calls `hid_guest_start()`. It
+The optional HID service remains off until firmware calls `doubtech_hid_start()`. It
 advertises one HID identity and supports three isolated connections. Routing
 still starts disarmed. This implementation targets eight stored bonds.
 
@@ -31,7 +31,7 @@ still starts disarmed. This implementation targets eight stored bonds.
 
 ## Identity and storage
 
-NimBLE stores the BLE bond keys in NVS. The `kvm_bonds` NVS namespace stores a
+NimBLE stores the BLE bond keys in NVS. The token table NVS namespace (default `kvm_bonds`, configurable through `doubtech_hid_config_t.bond_namespace`; see [the library docs](../doubtech-hid/README.md)) stores a
 versioned table of resolved peer identities and random nonzero 16-byte tokens.
 The host can use the token as a stable opaque identity for friendly labels;
 the token is not a BLE address or key. An absent table starts empty. A corrupt
@@ -44,19 +44,19 @@ deletes the new NimBLE peer and disconnects. Reboot reloads the token table.
 ## Thread boundary
 
 The HID channel belongs to the NimBLE host task. The USB router can call
-`hid_guest_request_ready`, `hid_guest_request_arm`, `hid_guest_request_release`,
-and the three `hid_guest_request_*` report functions. They serialize through a
+`doubtech_hid_request_ready`, `doubtech_hid_request_arm`, `doubtech_hid_request_release`,
+and the three `doubtech_hid_request_*` report functions. They serialize through a
 single NPL event slot and wait at most 20 ms. A busy slot or timeout returns
 false; timeout queues a disconnect. The router should sample readiness at about
 1 Hz for status and check again before a switch or arm. `request_arm` is the
-authoritative transition. `hid_guest_request_disconnect()` queues a coalesced
+authoritative transition. `doubtech_hid_request_disconnect()` queues a coalesced
 disconnect from another task without waiting for radio teardown. Direct
 `hid_channel_*` access from the USB task is not safe.
 
 ## Verification and physical gates
 
 Run `firmware/tests/pairing/run-msvc.ps1` and
-`firmware/tests/hid/run-msvc.ps1` with PowerShell and MSVC. The host tests cover
+`firmware/components/doubtech_hid/tests/run-msvc.ps1` with PowerShell and MSVC. The host tests cover
   expiry, cancellation, guest numeric consent, capacity, token reload/corruption,
   HID security admission, and the command bridge. They do not verify ESP-IDF linking, NVS
 power-loss behavior, radio timing, or interoperability with Windows, macOS, or

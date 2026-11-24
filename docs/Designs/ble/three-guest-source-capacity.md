@@ -15,4 +15,6 @@ Bond removal compares the target token's retained peer identity with each connec
 3. Subscribe each guest independently and verify encrypted GATT reads, LED writes, keyboard/mouse/consumer notifications, disconnection, and reconnect. Observe that no report reaches an unintended peer, including when a notify or release fails.
 4. Prove switching, lease expiry, local emergency recovery, and opaque token status across three selectable slots. Keep the three-slot build in trial status until these physical checks pass.
 
-Portable source evidence: `firmware/tests/hid/run-msvc.ps1` covers channel admission, CCCD/encryption/report isolation, first-link advertising, and unrelated-peer bond removal. It does not establish radio or guest OS behavior.
+Portable source evidence: `firmware/components/doubtech_hid/tests/run-msvc.ps1` covers channel admission, CCCD/encryption/report isolation, first-link advertising, and unrelated-peer bond removal. It does not establish radio or guest OS behavior.
+
+The library design, API and test strategy are in [docs/Designs/doubtech-hid](../doubtech-hid/README.md).

@@ -18,6 +18,7 @@ The API's registered-design bundle currently omits API-created mockups; use docs
 5. docs/spec/05-validation-and-delivery.md — real-hardware matrix and release gates.
 6. docs/design/DESIGN.md — tokens, components, interaction states and configuration model.
 7. docs/design/screens/S01.md through S09.md and D01-D05.md — full HTML sources.
+8. docs/Designs/doubtech-hid/README.md — the reusable `doubtech_hid` BLE HID library (firmware/components/doubtech_hid): architecture, [api.md](Designs/doubtech-hid/api.md) reference and [integration.md](Designs/doubtech-hid/integration.md) guide. The root README.md has the complete build and install steps.
 
 ## Decisions to carry into implementation
 - Board target is Waveshare ESP32-S3-Touch-LCD-1.54 from the last supplied hardware link. Verify arrived variant/revision/pins during M0.
