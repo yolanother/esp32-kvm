@@ -13,7 +13,7 @@
 #include "display.h"
 #include "display_pairing.h"
 #include "display_labels.h"
-#include "hid_guest.h"
+#include "doubtech_hid.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
 #include "esp_random.h"
@@ -53,34 +53,34 @@ static bool pair_begin(void *context)
     (void)context;
     if (display_pairing.state == KVM_DISPLAY_PAIRING_WAITING ||
         display_pairing.state == KVM_DISPLAY_PAIRING_CHALLENGE) return false;
-    if (!hid_guest_request_pair_begin()) return false;
+    if (!doubtech_hid_request_pair_begin()) return false;
     kvm_display_pairing_started(&display_pairing, false, (uint64_t)esp_timer_get_time() / 1000);
     return true;
 }
 static bool pair_cancel(void *context)
 {
     (void)context;
-    if (display_pairing.local_owner || !hid_guest_request_pair_cancel()) return false;
+    if (display_pairing.local_owner || !doubtech_hid_request_pair_cancel()) return false;
     kvm_display_pairing_clear(&display_pairing);
     return true;
 }
 static bool pair_reply(void *context, uint32_t id, bool approved)
 {
     (void)context;
-    if (display_pairing.local_owner || !hid_guest_request_pair_reply(id, approved)) return false;
+    if (display_pairing.local_owner || !doubtech_hid_request_pair_reply(id, approved)) return false;
     kvm_display_pairing_replied(&display_pairing, approved);
     return true;
 }
 static bool pair_forget(void *context, const uint8_t token[16])
-{ (void)context; return hid_guest_request_forget_bond(token); }
+{ (void)context; return doubtech_hid_request_forget_bond(token); }
 static bool pair_inventory(void *context, uint8_t tokens[8][16], uint8_t *count)
-{ (void)context; return hid_guest_request_retained_bonds(tokens, count); }
+{ (void)context; return doubtech_hid_request_retained_bonds(tokens, count); }
 static bool set_label(void *context, const uint8_t token[16], const char *name, size_t length)
 { (void)context; return kvm_display_label_set(token, name, length); }
 static bool set_enabled(void *context, const uint8_t token[16], bool enabled)
 { (void)context; return kvm_display_guest_hidden_set(token, !enabled); }
 
-static void pairing_event(const hid_guest_pairing_event_t *event, void *context)
+static void pairing_event(const doubtech_hid_pairing_event_t *event, void *context)
 {
     (void)context;
     if (!pairing_queue || xQueueSend(pairing_queue, event, 0) != pdTRUE)
@@ -89,19 +89,19 @@ static void pairing_event(const hid_guest_pairing_event_t *event, void *context)
 
 static bool drain_pairing_events(void)
 {
-    hid_guest_pairing_event_t event;
+    doubtech_hid_pairing_event_t event;
     bool disconnected = false;
     if (atomic_exchange(&pairing_overflow, false)) {
         (void)xQueueReset(pairing_queue);
         disconnected = true;
         if (router.slot || router.armed) kvm_router_emergency_release(&router);
-        (void)hid_guest_request_pair_cancel();
+        (void)doubtech_hid_request_pair_cancel();
         kvm_display_pairing_clear(&display_pairing);
         kvm_transport_core_pairing_event(&core, KVM_PAIRING_REJECTED, 0, 0, 0);
         return disconnected;
     }
     while (xQueueReceive(pairing_queue, &event, 0) == pdTRUE) {
-        if (event.type == HID_GUEST_DISCONNECTED) {
+        if (event.type == DOUBTECH_HID_DISCONNECTED) {
             disconnected = true;
             if (router.slot && (!event.number || event.number == router.slot))
                 kvm_router_emergency_release(&router);
@@ -109,14 +109,14 @@ static bool drain_pairing_events(void)
         }
         kvm_transport_pairing_state_t state;
         switch (event.type) {
-        case HID_GUEST_PAIRING_OPENED: state = KVM_PAIRING_WAITING; break;
-        case HID_GUEST_PAIRING_CHALLENGE: state = KVM_PAIRING_CHALLENGE; break;
-        case HID_GUEST_PAIRING_REJECTED: state = KVM_PAIRING_REJECTED; break;
-        case HID_GUEST_PAIRING_CAPACITY: state = KVM_PAIRING_CAPACITY; break;
-        case HID_GUEST_PAIRING_TIMEOUT: state = KVM_PAIRING_TIMEOUT; break;
+        case DOUBTECH_HID_PAIRING_OPENED: state = KVM_PAIRING_WAITING; break;
+        case DOUBTECH_HID_PAIRING_CHALLENGE: state = KVM_PAIRING_CHALLENGE; break;
+        case DOUBTECH_HID_PAIRING_REJECTED: state = KVM_PAIRING_REJECTED; break;
+        case DOUBTECH_HID_PAIRING_CAPACITY: state = KVM_PAIRING_CAPACITY; break;
+        case DOUBTECH_HID_PAIRING_TIMEOUT: state = KVM_PAIRING_TIMEOUT; break;
         default: state = KVM_PAIRING_CLOSED; break;
         }
-        if (event.type == HID_GUEST_PAIRING_OPENED) {
+        if (event.type == DOUBTECH_HID_PAIRING_OPENED) {
             if (display_pairing.state == KVM_DISPLAY_PAIRING_CLOSED)
                 kvm_display_pairing_started(&display_pairing, false,
                                             (uint64_t)esp_timer_get_time() / 1000);
@@ -150,15 +150,15 @@ static void drain_pairing_touch(uint64_t time_ms)
         if (!kvm_display_pairing_accept(&display_pairing, request, time_ms)) continue;
         switch (request.action) {
         case KVM_DISPLAY_PAIR_BEGIN:
-            if (hid_guest_request_pair_begin())
+            if (doubtech_hid_request_pair_begin())
                 kvm_display_pairing_started(&display_pairing, true, time_ms);
             break;
         case KVM_DISPLAY_PAIR_CANCEL:
-            if (hid_guest_request_pair_cancel()) kvm_display_pairing_clear(&display_pairing);
+            if (doubtech_hid_request_pair_cancel()) kvm_display_pairing_clear(&display_pairing);
             break;
         case KVM_DISPLAY_PAIR_APPROVE:
         case KVM_DISPLAY_PAIR_REJECT:
-            if (hid_guest_request_pair_reply(request.challenge_id,
+            if (doubtech_hid_request_pair_reply(request.challenge_id,
                     request.action == KVM_DISPLAY_PAIR_APPROVE))
                 kvm_display_pairing_replied(&display_pairing,
                     request.action == KVM_DISPLAY_PAIR_APPROVE);
@@ -270,7 +270,7 @@ static void usb_worker(void *context)
         uint32_t button_bits = 0;
         (void)xTaskNotifyWait(0, UINT32_MAX, &button_bits, 0);
         if (button_bits & 2u) {
-            (void)hid_guest_request_pair_cancel();
+            (void)doubtech_hid_request_pair_cancel();
             (void)xQueueReset(pairing_touch_queue);
             kvm_display_pairing_clear(&display_pairing);
             kvm_router_emergency_release(&router);
@@ -286,11 +286,11 @@ static void usb_worker(void *context)
         while (target_touch_queue && xQueueReceive(target_touch_queue, &touched_slot, 0) == pdTRUE)
             (void)kvm_transport_core_device_select_request(&core, touched_slot);
         if (!ready_sampled || time_ms < last_ready_ms || time_ms - last_ready_ms >= 1000) {
-            hid_guest_slot_snapshot_t sampled[HID_GATT_MAX_CONNECTIONS];
-            bool valid = hid_guest_request_slots(sampled);
-            uint8_t retained[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN] = {{0}};
+            doubtech_hid_slot_t sampled[DOUBTECH_HID_MAX_CONNECTIONS];
+            bool valid = doubtech_hid_request_slots(sampled);
+            uint8_t retained[DOUBTECH_HID_MAX_BONDS][DOUBTECH_HID_TOKEN_LEN] = {{0}};
             uint8_t retained_count = 0;
-            if (hid_guest_request_retained_bonds(retained, &retained_count))
+            if (doubtech_hid_request_retained_bonds(retained, &retained_count))
                 paired_guests = retained_count;
             memset(retained, 0, sizeof(retained));
             memset(slots, 0, sizeof(slots));
@@ -315,7 +315,7 @@ static void usb_worker(void *context)
         if (!connected) {
             if (was_connected) {
                 if (!display_pairing.local_owner) {
-                    (void)hid_guest_request_pair_cancel();
+                    (void)doubtech_hid_request_pair_cancel();
                     kvm_display_pairing_clear(&display_pairing);
                 }
                 kvm_transport_core_reset(&core);
@@ -373,7 +373,7 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     };
     esp_err_t result = usb_serial_jtag_driver_install(&config);
     if (result != ESP_OK) return result;
-    pairing_queue = xQueueCreate(8, sizeof(hid_guest_pairing_event_t));
+    pairing_queue = xQueueCreate(8, sizeof(doubtech_hid_pairing_event_t));
     if (!pairing_queue) {
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
@@ -394,10 +394,10 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }
-    hid_guest_pairing_set_events(pairing_event, NULL);
+    doubtech_hid_pairing_set_events(pairing_event, NULL);
     kvm_router_init(&router, kvm_router_hid_output(), NULL);
     if (!kvm_router_set_capacity(&router, KVM_ROUTER_MAX_SLOTS)) {
-        hid_guest_pairing_set_events(NULL, NULL);
+        doubtech_hid_pairing_set_events(NULL, NULL);
         vQueueDelete(pairing_queue);
         vQueueDelete(pairing_touch_queue);
         vQueueDelete(target_touch_queue);
@@ -408,7 +408,7 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
         return ESP_ERR_INVALID_STATE;
     }
     if (xTaskCreate(usb_worker, "kvm_usb_loopback", KVM_USB_TASK_STACK, NULL, 10, &usb_task) != pdPASS) {
-        hid_guest_pairing_set_events(NULL, NULL);
+        doubtech_hid_pairing_set_events(NULL, NULL);
         vQueueDelete(pairing_queue);
         vQueueDelete(pairing_touch_queue);
         vQueueDelete(target_touch_queue);

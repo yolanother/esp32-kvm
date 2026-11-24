@@ -1,12 +1,12 @@
 /* Check the keyboard diagnostic defers security until HID discovery needs it. */
-#define main legacy_hid_guest_test
+#define main legacy_doubtech_hid_test
 #include "test_hid_guest.c"
 #undef main
 int main(void)
 {
     active_peer.type = 1; active_peer.val[0] = 42;
-    assert(hid_guest_start() == 0);
-    hid_guest_pairing_set_events(event_sink, NULL);
+    assert(doubtech_hid_start() == 0);
+    doubtech_hid_pairing_set_events(event_sink, NULL);
     ble_hs_cfg.sync_cb();
     struct ble_gap_event connect = {.type = BLE_GAP_EVENT_CONNECT};
     connect.connect.conn_handle = 17;
@@ -30,12 +30,12 @@ int main(void)
     challenge.passkey.params.action = BLE_SM_IOACT_NUMCMP;
     challenge.passkey.params.numcmp = 123456;
     gap_callback(&challenge, NULL);
-    assert(last_event.type == HID_GUEST_PAIRING_CHALLENGE && confirmations == 1);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_CHALLENGE && confirmations == 1);
     struct ble_gap_event encryption = {.type = BLE_GAP_EVENT_ENC_CHANGE};
     encryption.enc_change.conn_handle = 17;
     gap_callback(&encryption, NULL);
     assert(channel.encrypted && hid_channel_ready(&channel) && saved_size);
-    assert(last_event.type == HID_GUEST_BONDED);
+    assert(last_event.type == DOUBTECH_HID_BONDED);
     subscription.subscribe.attr_handle = 10;
     gap_callback(&subscription, NULL);
     assert(security_requests == 1);

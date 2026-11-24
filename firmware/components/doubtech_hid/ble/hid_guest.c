@@ -6,7 +6,7 @@
  * resolved from the persisted pairing table only after link authentication.
  * Retained inventory copies opaque tokens on the NimBLE host loop. Only the
  * first channel is routed pending a multi-slot host/status contract. */
-#include "hid_guest.h"
+#include "doubtech_hid.h"
 
 #include <string.h>
 
@@ -24,6 +24,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "hid_gatt.h"
+#include "hid_pairing.h"
 #include "hid_pairing_store.h"
 #include "hid_guest_rpc.h"
 
@@ -33,10 +34,10 @@ void ble_store_config_init(void);
 static const char *tag = "esp32-kvm-hid";
 static uint8_t own_address_type;
 static hid_pairing_t pairing;
-static hid_guest_pairing_event_fn pairing_events;
+static doubtech_hid_pairing_event_fn pairing_events;
 static void *pairing_event_context;
 static bool started;
-static struct ble_npl_event disconnect_events[HID_GATT_MAX_CONNECTIONS];
+static struct ble_npl_event disconnect_events[DOUBTECH_HID_MAX_CONNECTIONS];
 static struct ble_npl_callout pairing_timeout;
 static struct ble_npl_callout advertising_retry;
 static size_t reconnect_phase;
@@ -48,22 +49,22 @@ static void schedule_advertising_retry(void);
 
 static void disconnect_on_host(struct ble_npl_event *event)
 {
-    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot)
+    for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot)
         if (event == &disconnect_events[slot - 1]) {
-            (void)hid_guest_disconnect_slot(slot);
+            (void)doubtech_hid_disconnect_slot(slot);
             return;
         }
 }
 
 static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000; }
 
-static void publish(hid_guest_pairing_event_type_t type, uint16_t handle,
+static void publish(doubtech_hid_pairing_event_type_t type, uint16_t handle,
                     uint32_t number, const hid_token_t *token)
 {
     if (!pairing_events) return;
-    hid_guest_pairing_event_t event = {.type = type, .connection_handle = handle,
+    doubtech_hid_pairing_event_t event = {.type = type, .connection_handle = handle,
                                       .number = number, .deadline_ms = pairing.deadline_ms};
-    if (type == HID_GUEST_PAIRING_CHALLENGE) event.challenge_id = pairing.challenge_id;
+    if (type == DOUBTECH_HID_PAIRING_CHALLENGE) event.challenge_id = pairing.challenge_id;
     if (token) event.token = *token;
     pairing_events(&event, pairing_event_context);
 }
@@ -75,7 +76,7 @@ static void expire_window(void)
     uint16_t handle = pairing.challenge_handle;
     if (was_open && !hid_pairing_window_open(&pairing, now_ms())) {
         if (pending) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
-        publish(HID_GUEST_PAIRING_TIMEOUT, 0, 0, NULL);
+        publish(DOUBTECH_HID_PAIRING_TIMEOUT, 0, 0, NULL);
     }
 }
 
@@ -130,7 +131,7 @@ static void schedule_advertising_retry(void)
 
 static bool peer_is_connected(hid_peer_t peer)
 {
-    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+    for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot) {
         hid_channel_t *channel = hid_gatt_channel_at(slot);
         struct ble_gap_conn_desc description;
         if (channel->connected &&
@@ -175,7 +176,7 @@ static void advertise(void)
     struct ble_hs_adv_fields fields = {0};
     struct ble_gap_adv_params parameters = {0};
     ble_addr_t reconnect_address;
-    if (hid_gatt_connection_count() >= HID_GATT_MAX_CONNECTIONS) {
+    if (hid_gatt_connection_count() >= DOUBTECH_HID_MAX_CONNECTIONS) {
         ble_npl_callout_stop(&advertising_retry);
         return;
     }
@@ -215,11 +216,11 @@ static void on_reset(int reason)
 {
     (void)reason;
     ble_npl_callout_stop(&advertising_retry);
-    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+    for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot) {
         hid_channel_t *channel = hid_gatt_channel_at(slot);
         if (channel->connected) hid_channel_disconnected(channel);
     }
-    publish(HID_GUEST_DISCONNECTED, 0, 0, NULL);
+    publish(DOUBTECH_HID_DISCONNECTED, 0, 0, NULL);
 }
 
 static void on_sync(void)
@@ -309,7 +310,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     case BLE_GAP_EVENT_DISCONNECT: {
         ESP_LOGI(tag, "BLE link closed: reason %d", event->disconnect.reason);
         uint8_t disconnected_slot = 0;
-        for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+        for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot) {
             hid_channel_t *channel = hid_gatt_channel_at(slot);
             if (channel->connected &&
                 channel->connection_handle == event->disconnect.conn.conn_handle)
@@ -317,11 +318,11 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         }
         hid_gatt_on_disconnect(event->disconnect.conn.conn_handle);
         if (disconnected_slot)
-            publish(HID_GUEST_DISCONNECTED, event->disconnect.conn.conn_handle,
+            publish(DOUBTECH_HID_DISCONNECTED, event->disconnect.conn.conn_handle,
                     disconnected_slot, NULL);
         if ((pairing.challenge_active || pairing.challenge_approved) &&
             pairing.challenge_handle == event->disconnect.conn.conn_handle)
-            publish(HID_GUEST_PAIRING_REJECTED, event->disconnect.conn.conn_handle, 0, NULL);
+            publish(DOUBTECH_HID_PAIRING_REJECTED, event->disconnect.conn.conn_handle, 0, NULL);
         if (pairing.challenge_handle == event->disconnect.conn.conn_handle) {
             pairing.challenge_active = false;
             pairing.challenge_approved = false;
@@ -349,11 +350,11 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             hid_token_t existing;
             if (!hid_pairing_token(&pairing, peer, &existing)) {
                 expire_window();
-                secure = pairing.window_active && pairing.bond_count < HID_PAIRING_MAX_BONDS &&
+                secure = pairing.window_active && pairing.bond_count < DOUBTECH_HID_MAX_BONDS &&
                          hid_pairing_consume_approval(&pairing, event->enc_change.conn_handle);
                 if (secure) {
                     hid_token_t token;
-                    for (size_t index = 0; index < HID_PAIRING_TOKEN_LEN; index += 4) {
+                    for (size_t index = 0; index < DOUBTECH_HID_TOKEN_LEN; index += 4) {
                         uint32_t random = esp_random();
                         memcpy(&token.bytes[index], &random, sizeof(random));
                     }
@@ -363,7 +364,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
                     if (secure) {
                         pairing = next;
                         ble_npl_callout_stop(&pairing_timeout);
-                        publish(HID_GUEST_BONDED, event->enc_change.conn_handle, 0, &token);
+                        publish(DOUBTECH_HID_BONDED, event->enc_change.conn_handle, 0, &token);
                     } else {
                         ble_addr_t address = description.peer_id_addr;
                         ble_store_util_delete_peer(&address);
@@ -432,8 +433,8 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         uint16_t handle = event->passkey.conn_handle;
         expire_window();
         if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP &&
-            !pairing.window_active && hid_guest_pairing_open() != ESP_OK) {
-            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, NULL);
+            !pairing.window_active && doubtech_hid_pairing_open() != ESP_OK) {
+            publish(DOUBTECH_HID_PAIRING_REJECTED, handle, 0, NULL);
             ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
@@ -444,7 +445,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             ble_gap_conn_find(handle, &description) != 0 ||
             !hid_pairing_begin_challenge(&pairing, peer_identity(&description.peer_id_addr),
                                          handle, challenge_id, event->passkey.params.numcmp, now_ms())) {
-            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, NULL);
+            publish(DOUBTECH_HID_PAIRING_REJECTED, handle, 0, NULL);
             ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
@@ -452,16 +453,16 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         if (ble_npl_callout_reset(&pairing_timeout,
                 ble_npl_time_ms_to_ticks32((uint32_t)remaining_ms)) != BLE_NPL_OK) {
             hid_pairing_cancel(&pairing);
-            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, NULL);
+            publish(DOUBTECH_HID_PAIRING_REJECTED, handle, 0, NULL);
             ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
-        publish(HID_GUEST_PAIRING_CHALLENGE, handle, pairing.challenge_number, NULL);
+        publish(DOUBTECH_HID_PAIRING_CHALLENGE, handle, pairing.challenge_number, NULL);
         /* The guest confirms the displayed code on its own screen. NimBLE may
            complete only after that peer's confirmation and authenticated bonding. */
-        if (hid_guest_pairing_confirm(challenge_id, true) != ESP_OK) {
+        if (doubtech_hid_pairing_confirm(challenge_id, true) != ESP_OK) {
             pairing.challenge_approved = false;
-            publish(HID_GUEST_PAIRING_REJECTED, handle, 0, NULL);
+            publish(DOUBTECH_HID_PAIRING_REJECTED, handle, 0, NULL);
             ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
         }
         return 0;
@@ -479,7 +480,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
                        ble_gap_conn_find(handle, &description) == 0;
         if (allowed) {
             hid_peer_t peer = peer_identity(&description.peer_id_addr);
-            for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+            for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot) {
                 hid_channel_t *other = hid_gatt_channel_at(slot);
                 struct ble_gap_conn_desc other_description;
                 if (!other->connected || other->connection_handle == handle) continue;
@@ -517,7 +518,7 @@ static void host_task(void *argument)
     nimble_port_freertos_deinit();
 }
 
-esp_err_t hid_guest_start(void)
+esp_err_t doubtech_hid_start(void)
 {
     if (started) return ESP_ERR_INVALID_STATE;
     esp_err_t result = nvs_flash_init();
@@ -550,7 +551,7 @@ esp_err_t hid_guest_start(void)
     ble_store_config_init();
     result = hid_guest_rpc_init();
     if (result != ESP_OK) { nimble_port_deinit(); return result; }
-    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot)
+    for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot)
         ble_npl_event_init(&disconnect_events[slot - 1], disconnect_on_host, NULL);
     ble_npl_callout_init(&pairing_timeout, nimble_port_get_dflt_eventq(),
                          pairing_timeout_on_host, NULL);
@@ -561,21 +562,21 @@ esp_err_t hid_guest_start(void)
     return ESP_OK;
 }
 
-void hid_guest_pairing_set_events(hid_guest_pairing_event_fn callback, void *context)
+void doubtech_hid_pairing_set_events(doubtech_hid_pairing_event_fn callback, void *context)
 {
     pairing_events = callback;
     pairing_event_context = context;
 }
 
-esp_err_t hid_guest_pairing_open(void)
+esp_err_t doubtech_hid_pairing_open(void)
 {
     if (!started || !pairing_events) return ESP_ERR_INVALID_STATE;
-    ble_addr_t bonds[HID_PAIRING_MAX_BONDS];
+    ble_addr_t bonds[DOUBTECH_HID_MAX_BONDS];
     int count = 0;
-    if (ble_store_util_bonded_peers(bonds, &count, HID_PAIRING_MAX_BONDS) != 0)
+    if (ble_store_util_bonded_peers(bonds, &count, DOUBTECH_HID_MAX_BONDS) != 0)
         return ESP_ERR_INVALID_STATE;
-    if (count >= HID_PAIRING_MAX_BONDS || pairing.bond_count >= HID_PAIRING_MAX_BONDS) {
-        publish(HID_GUEST_PAIRING_CAPACITY, 0, 0, NULL);
+    if (count >= DOUBTECH_HID_MAX_BONDS || pairing.bond_count >= DOUBTECH_HID_MAX_BONDS) {
+        publish(DOUBTECH_HID_PAIRING_CAPACITY, 0, 0, NULL);
         return ESP_ERR_INVALID_STATE;
     }
     if (!hid_pairing_open(&pairing, now_ms())) return ESP_ERR_INVALID_STATE;
@@ -584,25 +585,25 @@ esp_err_t hid_guest_pairing_open(void)
         hid_pairing_cancel(&pairing);
         return ESP_FAIL;
     }
-    publish(HID_GUEST_PAIRING_OPENED, 0, 0, NULL);
+    publish(DOUBTECH_HID_PAIRING_OPENED, 0, 0, NULL);
     (void)ble_gap_adv_stop();
     schedule_advertising_retry();
     return ESP_OK;
 }
 
-void hid_guest_pairing_cancel(void)
+void doubtech_hid_pairing_cancel(void)
 {
     bool pending = pairing.challenge_active || pairing.challenge_approved;
     uint16_t handle = pairing.challenge_handle;
     hid_pairing_cancel(&pairing);
     ble_npl_callout_stop(&pairing_timeout);
     if (pending) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
-    publish(HID_GUEST_PAIRING_CLOSED, 0, 0, NULL);
+    publish(DOUBTECH_HID_PAIRING_CLOSED, 0, 0, NULL);
     (void)ble_gap_adv_stop();
     schedule_advertising_retry();
 }
 
-esp_err_t hid_guest_pairing_confirm(uint32_t challenge_id, bool approved)
+esp_err_t doubtech_hid_pairing_confirm(uint32_t challenge_id, bool approved)
 {
     expire_window();
     if (!pairing.challenge_active || !challenge_id || pairing.challenge_id != challenge_id)
@@ -612,13 +613,13 @@ esp_err_t hid_guest_pairing_confirm(uint32_t challenge_id, bool approved)
     struct ble_sm_io io = {.action = BLE_SM_IOACT_NUMCMP, .numcmp_accept = accepted};
     if (ble_sm_inject_io(connection_handle, &io) != 0) return ESP_FAIL;
     if (!accepted) {
-        publish(HID_GUEST_PAIRING_REJECTED, connection_handle, 0, NULL);
+        publish(DOUBTECH_HID_PAIRING_REJECTED, connection_handle, 0, NULL);
         ble_gap_terminate(connection_handle, BLE_ERR_REM_USER_CONN_TERM);
     }
     return ESP_OK;
 }
 
-void hid_guest_pairing_snapshot(hid_pairing_t *output)
+void doubtech_hid_pairing_snapshot(hid_pairing_t *output)
 {
     expire_window();
     *output = pairing;
@@ -643,22 +644,22 @@ static bool bond_token_at(uint8_t slot, hid_token_t *output)
                                        peer_identity(&description.peer_id_addr), output);
 }
 
-bool hid_guest_current_bond_token(hid_token_t *output)
+bool doubtech_hid_current_bond_token(hid_token_t *output)
 { return bond_token_at(1, output); }
 
-bool hid_guest_snapshot_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONNECTIONS])
+bool doubtech_hid_snapshot_slots(doubtech_hid_slot_t output[DOUBTECH_HID_MAX_CONNECTIONS])
 {
     if (!output) return false;
-    memset(output, 0, HID_GATT_MAX_CONNECTIONS * sizeof(*output));
+    memset(output, 0, DOUBTECH_HID_MAX_CONNECTIONS * sizeof(*output));
     if (!started) return false;
-    for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+    for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot) {
         hid_channel_t *channel = hid_gatt_channel_at(slot);
         hid_token_t token;
         if (!bond_token_at(slot, &token)) {
-            if (channel->armed) (void)hid_guest_disconnect_slot(slot);
+            if (channel->armed) (void)doubtech_hid_disconnect_slot(slot);
             continue;
         }
-        hid_guest_slot_snapshot_t *item = &output[slot - 1];
+        doubtech_hid_slot_t *item = &output[slot - 1];
         memcpy(item->token, token.bytes, sizeof(item->token));
         item->ready = true;
         item->subscribed = hid_channel_ready(channel);
@@ -667,24 +668,24 @@ bool hid_guest_snapshot_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONN
     return true;
 }
 
-bool hid_guest_retained_bonds(hid_token_t output[HID_PAIRING_MAX_BONDS], size_t *count)
+bool doubtech_hid_retained_bonds(hid_token_t output[DOUBTECH_HID_MAX_BONDS], size_t *count)
 {
     if (!output || !count) return false;
     *count = 0;
-    memset(output, 0, HID_PAIRING_MAX_BONDS * sizeof(*output));
+    memset(output, 0, DOUBTECH_HID_MAX_BONDS * sizeof(*output));
     return started && hid_pairing_inventory(&pairing, output, count);
 }
 
-esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed)
+esp_err_t doubtech_hid_pairing_forget(hid_token_t token, bool confirmed)
 {
     static const hid_token_t zero = {{0}};
-    if (!started || !confirmed || memcmp(token.bytes, zero.bytes, HID_PAIRING_TOKEN_LEN) == 0)
+    if (!started || !confirmed || memcmp(token.bytes, zero.bytes, DOUBTECH_HID_TOKEN_LEN) == 0)
         return ESP_ERR_INVALID_ARG;
     hid_pairing_t next = pairing;
     hid_peer_t peer = {0};
     bool found = false;
     for (size_t index = 0; index < next.bond_count; ++index)
-        if (memcmp(next.bonds[index].token.bytes, token.bytes, HID_PAIRING_TOKEN_LEN) == 0)
+        if (memcmp(next.bonds[index].token.bytes, token.bytes, DOUBTECH_HID_TOKEN_LEN) == 0)
             { peer = next.bonds[index].peer; found = true; break; }
     if (!found || !hid_pairing_forget(&next, token, true)) return ESP_ERR_NOT_FOUND;
     ble_addr_t address = ble_identity(peer);
@@ -692,7 +693,7 @@ esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed)
     esp_err_t result = hid_pairing_store_save(&next);
     if (result == ESP_OK) {
         pairing = next;
-        for (uint8_t slot = 1; slot <= HID_GATT_MAX_CONNECTIONS; ++slot) {
+        for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot) {
             hid_channel_t *channel = hid_gatt_channel_at(slot);
             struct ble_gap_conn_desc description;
             if (!channel->connected) continue;
@@ -714,10 +715,10 @@ esp_err_t hid_guest_pairing_forget(hid_token_t token, bool confirmed)
     return result;
 }
 
-esp_err_t hid_guest_disconnect_current(void)
-{ return hid_guest_disconnect_slot(1); }
+esp_err_t doubtech_hid_disconnect_current(void)
+{ return doubtech_hid_disconnect_slot(1); }
 
-esp_err_t hid_guest_disconnect_slot(uint8_t slot)
+esp_err_t doubtech_hid_disconnect_slot(uint8_t slot)
 {
     hid_channel_t *channel = hid_gatt_channel_at(slot);
     if (!channel) return ESP_ERR_INVALID_ARG;
@@ -728,13 +729,13 @@ esp_err_t hid_guest_disconnect_slot(uint8_t slot)
                              BLE_ERR_REM_USER_CONN_TERM) == 0 ? ESP_OK : ESP_FAIL;
 }
 
-esp_err_t hid_guest_request_disconnect(void)
-{ return hid_guest_request_disconnect_slot(1); }
+esp_err_t doubtech_hid_request_disconnect(void)
+{ return doubtech_hid_request_disconnect_slot(1); }
 
-esp_err_t hid_guest_request_disconnect_slot(uint8_t slot)
+esp_err_t doubtech_hid_request_disconnect_slot(uint8_t slot)
 {
     if (!started) return ESP_ERR_INVALID_STATE;
-    if (!slot || slot > HID_GATT_MAX_CONNECTIONS) return ESP_ERR_INVALID_ARG;
+    if (!slot || slot > DOUBTECH_HID_MAX_CONNECTIONS) return ESP_ERR_INVALID_ARG;
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &disconnect_events[slot - 1]);
     return ESP_OK;
 }

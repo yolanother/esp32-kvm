@@ -46,27 +46,27 @@ int main(void)
     assert(!hid_pairing_add_bond(&state, peer(2), token(1)));
     assert(hid_pairing_token(&state, peer(1), &found));
     hid_token_t expected = token(1);
-    assert(memcmp(found.bytes, expected.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+    assert(memcmp(found.bytes, expected.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     memset(&found, 0xa5, sizeof(found));
     assert(hid_pairing_connected_token(&state, true, true, peer(1), &found));
-    assert(memcmp(found.bytes, expected.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+    assert(memcmp(found.bytes, expected.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     assert(!hid_pairing_connected_token(&state, false, true, peer(1), &found));
-    assert(memcmp(found.bytes, zero.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+    assert(memcmp(found.bytes, zero.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     memset(&found, 0xa5, sizeof(found));
     assert(!hid_pairing_connected_token(&state, true, false, peer(1), &found));
-    assert(memcmp(found.bytes, zero.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+    assert(memcmp(found.bytes, zero.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     memset(&found, 0xa5, sizeof(found));
     assert(!hid_pairing_connected_token(&state, true, true, peer(2), &found));
-    assert(memcmp(found.bytes, zero.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+    assert(memcmp(found.bytes, zero.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     hid_pairing_cancel(&state);
     assert(hid_pairing_admit(&state, peer(1), 80000));
     assert(!hid_pairing_admit(&state, peer(2), 80000));
-    for (unsigned index = 2; index <= HID_PAIRING_MAX_BONDS; ++index)
+    for (unsigned index = 2; index <= DOUBTECH_HID_MAX_BONDS; ++index)
         assert(hid_pairing_add_bond(&state, peer(index), token(index)));
-    hid_token_t retained[HID_PAIRING_MAX_BONDS];
+    hid_token_t retained[DOUBTECH_HID_MAX_BONDS];
     size_t retained_count = 0;
     assert(hid_pairing_inventory(&state, retained, &retained_count));
-    assert(retained_count == HID_PAIRING_MAX_BONDS);
+    assert(retained_count == DOUBTECH_HID_MAX_BONDS);
     for (size_t index = 0; index < retained_count; ++index)
         assert(memcmp(retained[index].bytes, state.bonds[index].token.bytes, 16) == 0);
     assert(!hid_pairing_open(&state, 90000));
@@ -75,7 +75,7 @@ int main(void)
     assert(hid_pairing_token(&state, peer(1), &found));
     assert(hid_pairing_forget(&state, token(1), true));
     assert(hid_pairing_inventory(&state, retained, &retained_count));
-    assert(retained_count == HID_PAIRING_MAX_BONDS - 1);
+    assert(retained_count == DOUBTECH_HID_MAX_BONDS - 1);
     assert(!hid_pairing_admit(&state, peer(1), 90000));
     assert(hid_pairing_open(&state, 90000));
     assert(hid_pairing_begin_challenge(&state, peer(9), 19, 0xabcdef01, 654321, 90000));
@@ -88,6 +88,6 @@ int main(void)
     hid_pairing_t reloaded = state;
     assert(hid_pairing_token(&reloaded, peer(2), &found));
     expected = token(2);
-    assert(memcmp(found.bytes, expected.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+    assert(memcmp(found.bytes, expected.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     return 0;
 }

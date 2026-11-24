@@ -2,7 +2,7 @@
  * Verifies that a guest-initiated numeric comparison becomes a bounded,
  * device-approved challenge while the Mac remains responsible for user consent.
  * Reuses the existing NimBLE host mocks without device access. */
-#define main legacy_hid_guest_test
+#define main legacy_doubtech_hid_test
 #include "test_hid_guest.c"
 #undef main
 
@@ -10,8 +10,8 @@ int main(void)
 {
     active_peer.type = 1;
     active_peer.val[0] = 42;
-    assert(hid_guest_start() == 0);
-    hid_guest_pairing_set_events(event_sink, NULL);
+    assert(doubtech_hid_start() == 0);
+    doubtech_hid_pairing_set_events(event_sink, NULL);
     ble_hs_cfg.sync_cb();
 
     struct ble_gap_event connect = {.type = BLE_GAP_EVENT_CONNECT};
@@ -24,17 +24,17 @@ int main(void)
     challenge.passkey.params.action = BLE_SM_IOACT_NUMCMP;
     challenge.passkey.params.numcmp = 123456;
     gap_callback(&challenge, NULL);
-    assert(last_event.type == HID_GUEST_PAIRING_CHALLENGE);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_CHALLENGE);
     assert(last_event.number == 123456);
     assert(confirmations == 1);
 
     hid_pairing_t snapshot;
-    hid_guest_pairing_snapshot(&snapshot);
+    doubtech_hid_pairing_snapshot(&snapshot);
     assert(snapshot.challenge_approved && !snapshot.challenge_active);
     struct ble_gap_event encryption = {.type = BLE_GAP_EVENT_ENC_CHANGE};
     encryption.enc_change.conn_handle = 17;
     gap_callback(&encryption, NULL);
-    assert(last_event.type == HID_GUEST_BONDED);
+    assert(last_event.type == DOUBTECH_HID_BONDED);
     assert(channel.encrypted && saved_size);
 
     struct ble_gap_event unsupported = {.type = BLE_GAP_EVENT_PASSKEY_ACTION};
@@ -42,7 +42,7 @@ int main(void)
     unsupported.passkey.params.action = 0xff;
     unsigned accepted_before = confirmations;
     gap_callback(&unsupported, NULL);
-    assert(last_event.type == HID_GUEST_PAIRING_REJECTED);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_REJECTED);
     assert(confirmations == accepted_before);
 
     active_peer.val[0] = 99;
@@ -52,11 +52,11 @@ int main(void)
     challenge.passkey.conn_handle = 18;
     challenge.passkey.params.numcmp = 654321;
     gap_callback(&challenge, NULL);
-    assert(last_event.type == HID_GUEST_PAIRING_CHALLENGE && confirmations == accepted_before + 1);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_CHALLENGE && confirmations == accepted_before + 1);
     struct ble_gap_event disconnect = {.type = BLE_GAP_EVENT_DISCONNECT};
     disconnect.disconnect.conn.conn_handle = 18;
     gap_callback(&disconnect, NULL);
-    assert(last_event.type == HID_GUEST_PAIRING_REJECTED);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_REJECTED);
 
     hid_pairing_t limited;
     hid_pairing_init(&limited);

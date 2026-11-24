@@ -4,8 +4,9 @@
  * retained inventory, and deliberate removal with mocked NimBLE and NVS. */
 #include <assert.h>
 #include <string.h>
-#include "hid_guest.h"
+#include "doubtech_hid.h"
 #include "hid_gatt.h"
+#include "hid_pairing.h"
 #include "host/ble_gap.h"
 #include "host/ble_hs.h"
 #include "host/ble_sm.h"
@@ -14,7 +15,7 @@
 
 struct ble_hs_cfg ble_hs_cfg;
 static hid_channel_t channel;
-static hid_channel_t other_channels[HID_GATT_MAX_CONNECTIONS - 1];
+static hid_channel_t other_channels[DOUBTECH_HID_MAX_CONNECTIONS - 1];
 static uint16_t last_report_handle;
 static int (*gap_callback)(struct ble_gap_event *, void *);
 static ble_addr_t active_peer;
@@ -22,7 +23,7 @@ static int64_t time_us;
 static unsigned terminations, advertisements, confirmations;
 static unsigned char saved[256];
 static size_t saved_size;
-static hid_guest_pairing_event_t last_event;
+static doubtech_hid_pairing_event_t last_event;
 static unsigned sent_reports;
 static struct ble_npl_eventq host_queue;
 static struct ble_npl_callout host_timeout;
@@ -32,7 +33,7 @@ static int security_result;
 static unsigned security_requests;
 static unsigned deleted_peers;
 
-static void event_sink(const hid_guest_pairing_event_t *event, void *context)
+static void event_sink(const doubtech_hid_pairing_event_t *event, void *context)
 { (void)context; last_event = *event; }
 static int send_report(void *context, uint16_t handle, uint8_t report,
                        const uint8_t *bytes, size_t length)
@@ -138,7 +139,7 @@ int hid_gatt_register(void)
 { hid_channel_init(&channel, NULL, NULL); for (size_t i = 0; i < 2; ++i) hid_channel_init(&other_channels[i], NULL, NULL); return 0; }
 hid_channel_t *hid_gatt_channel(void) { return &channel; }
 hid_channel_t *hid_gatt_channel_at(uint8_t slot)
-{ return slot == 1 ? &channel : slot >= 2 && slot <= HID_GATT_MAX_CONNECTIONS ? &other_channels[slot - 2] : NULL; }
+{ return slot == 1 ? &channel : slot >= 2 && slot <= DOUBTECH_HID_MAX_CONNECTIONS ? &other_channels[slot - 2] : NULL; }
 hid_channel_t *hid_gatt_channel_for(uint16_t handle)
 { for (uint8_t slot = 1; slot <= 3; ++slot) { hid_channel_t *c = hid_gatt_channel_at(slot); if (c->connected && c->connection_handle == handle) return c; } return NULL; }
 size_t hid_gatt_connection_count(void)
@@ -156,13 +157,13 @@ void hid_gatt_on_subscribe(uint16_t handle, uint16_t value_handle, bool enabled)
 int main(void)
 {
     active_peer.type = 1; active_peer.val[0] = 42;
-    assert(hid_guest_start() == 0);
+    assert(doubtech_hid_start() == 0);
     assert(ble_hs_cfg.sm_mitm == 1 && ble_hs_cfg.sm_sc == 1);
     assert(ble_hs_cfg.sm_io_cap == BLE_SM_IO_CAP_DISP_YES_NO);
     assert(ble_hs_cfg.store_status_cb(NULL, NULL) != 0);
     ble_hs_cfg.sync_cb();
     assert(advertisements == 1 && !channel.armed);
-    hid_guest_pairing_set_events(event_sink, NULL);
+    doubtech_hid_pairing_set_events(event_sink, NULL);
     struct ble_gap_event connect = {.type = BLE_GAP_EVENT_CONNECT};
     connect.connect.conn_handle = 17;
     gap_callback(&connect, NULL);
@@ -173,63 +174,63 @@ int main(void)
     challenge.passkey.params.action = BLE_SM_IOACT_NUMCMP;
     challenge.passkey.params.numcmp = 123456;
     gap_callback(&challenge, NULL);
-    assert(last_event.type == HID_GUEST_PAIRING_CHALLENGE && last_event.number == 123456);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_CHALLENGE && last_event.number == 123456);
     assert(last_event.challenge_id != 0);
     assert(confirmations == 1); /* Board side accepts automatically. */
-    assert(hid_guest_pairing_confirm(last_event.challenge_id + 1, true) != 0);
-    assert(hid_guest_pairing_confirm(last_event.challenge_id, true) != 0);
+    assert(doubtech_hid_pairing_confirm(last_event.challenge_id + 1, true) != 0);
+    assert(doubtech_hid_pairing_confirm(last_event.challenge_id, true) != 0);
     struct ble_gap_event encryption = {.type = BLE_GAP_EVENT_ENC_CHANGE};
     encryption.enc_change.conn_handle = 17;
     gap_callback(&encryption, NULL);
-    assert(channel.encrypted && !channel.armed && last_event.type == HID_GUEST_BONDED);
+    assert(channel.encrypted && !channel.armed && last_event.type == DOUBTECH_HID_BONDED);
     static const hid_token_t zero_token = {{0}};
     assert(sizeof(last_event.token.bytes) == 16 &&
-           memcmp(last_event.token.bytes, zero_token.bytes, HID_PAIRING_TOKEN_LEN) != 0 && saved_size);
+           memcmp(last_event.token.bytes, zero_token.bytes, DOUBTECH_HID_TOKEN_LEN) != 0 && saved_size);
     hid_token_t token = last_event.token;
-    hid_guest_slot_snapshot_t slots[3];
-    assert(hid_guest_request_slots(slots));
+    doubtech_hid_slot_t slots[3];
+    assert(doubtech_hid_request_slots(slots));
     assert(memcmp(slots[0].token, token.bytes, 16) == 0 && slots[0].ready);
     assert(memcmp(slots[1].token, zero_token.bytes, 16) == 0 && !slots[1].ready);
-    assert(hid_guest_pairing_open() == 0);
-    assert(last_event.type == HID_GUEST_PAIRING_OPENED);
-    hid_guest_pairing_cancel();
-    assert(!hid_guest_request_ready());
+    assert(doubtech_hid_pairing_open() == 0);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_OPENED);
+    doubtech_hid_pairing_cancel();
+    assert(!doubtech_hid_request_ready());
     channel.send = send_report;
     channel.subscribed[HID_REPORT_KEYBOARD] = true;
     channel.subscribed[HID_REPORT_MOUSE] = true;
     channel.subscribed[HID_REPORT_CONSUMER] = true;
-    assert(hid_guest_request_ready());
-    assert(hid_guest_request_arm());
+    assert(doubtech_hid_request_ready());
+    assert(doubtech_hid_request_arm());
     const uint8_t keys[HID_KEYBOARD_REPORT_LEN] = {0, 0, 4};
-    assert(hid_guest_request_keyboard(keys));
-    assert(hid_guest_request_mouse(1, 10, -20, 0, 0));
-    assert(hid_guest_request_consumer(0x00e9));
-    assert(hid_guest_request_release() && sent_reports == 9);
-    uint8_t retained[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN];
+    assert(doubtech_hid_request_keyboard(keys));
+    assert(doubtech_hid_request_mouse(1, 10, -20, 0, 0));
+    assert(doubtech_hid_request_consumer(0x00e9));
+    assert(doubtech_hid_request_release() && sent_reports == 9);
+    uint8_t retained[DOUBTECH_HID_MAX_BONDS][DOUBTECH_HID_TOKEN_LEN];
     uint8_t retained_count = 0xff;
-    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(doubtech_hid_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 1 && memcmp(retained[0], token.bytes, 16) == 0);
     uint8_t current_token[16];
-    assert(hid_guest_request_current_bond_token(current_token));
+    assert(doubtech_hid_request_current_bond_token(current_token));
     assert(memcmp(current_token, token.bytes, sizeof(current_token)) == 0);
     active_peer.val[0] = 99;
     memset(current_token, 0xa5, sizeof(current_token));
-    assert(!hid_guest_request_current_bond_token(current_token));
+    assert(!doubtech_hid_request_current_bond_token(current_token));
     assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
     active_peer.val[0] = 42;
     hid_pairing_t snapshot;
-    hid_guest_pairing_snapshot(&snapshot);
+    doubtech_hid_pairing_snapshot(&snapshot);
     assert(snapshot.bond_count == 1 &&
-           memcmp(snapshot.bonds[0].token.bytes, token.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+           memcmp(snapshot.bonds[0].token.bytes, token.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     struct ble_gap_event disconnect = {.type = BLE_GAP_EVENT_DISCONNECT};
     disconnect.disconnect.conn.conn_handle = 17;
     gap_callback(&disconnect, NULL);
     assert(advertisements == 3 && !channel.connected);
-    assert(last_event.type == HID_GUEST_DISCONNECTED);
-    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(last_event.type == DOUBTECH_HID_DISCONNECTED);
+    assert(doubtech_hid_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 1 && memcmp(retained[0], token.bytes, 16) == 0);
     memset(current_token, 0xa5, sizeof(current_token));
-    assert(!hid_guest_request_current_bond_token(current_token));
+    assert(!doubtech_hid_request_current_bond_token(current_token));
     assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
     security_result = BLE_HS_EALREADY;
     gap_callback(&connect, NULL);
@@ -238,14 +239,14 @@ int main(void)
     hold_host = true;
     const uint8_t stale_keys[HID_KEYBOARD_REPORT_LEN] = {0};
     unsigned sent_before_timeout = sent_reports;
-    assert(!hid_guest_request_keyboard(stale_keys));
+    assert(!doubtech_hid_request_keyboard(stale_keys));
     memset(current_token, 0xa5, sizeof(current_token));
-    assert(!hid_guest_request_current_bond_token(current_token));
+    assert(!doubtech_hid_request_current_bond_token(current_token));
     assert(memcmp(current_token, zero_token.bytes, sizeof(current_token)) == 0);
     memset(retained, 0xa5, sizeof(retained)); retained_count = 0xff;
-    assert(!hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(!doubtech_hid_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 0 && memcmp(retained, (uint8_t[128]){0}, 128) == 0);
-    assert(!hid_guest_request_ready());
+    assert(!doubtech_hid_request_ready());
     assert(sent_reports == sent_before_timeout && host_queue.pending && host_queue.next);
     hold_host = false;
     struct ble_npl_event *expired = host_queue.pending;
@@ -255,21 +256,21 @@ int main(void)
     host_queue.pending->callback(host_queue.pending);
     host_queue.pending = NULL;
     assert(terminations == 1);
-    assert(hid_guest_request_disconnect() == ESP_OK);
+    assert(doubtech_hid_request_disconnect() == ESP_OK);
     assert(terminations == 1 && host_queue.pending);
     host_queue.pending->callback(host_queue.pending);
     host_queue.pending = NULL;
     assert(terminations == 2 && channel.needs_disconnect);
-    assert(hid_guest_pairing_forget(token, false) != 0);
+    assert(doubtech_hid_pairing_forget(token, false) != 0);
     fail_next_commit = true;
-    assert(hid_guest_pairing_forget(token, true) != 0);
-    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(doubtech_hid_pairing_forget(token, true) != 0);
+    assert(doubtech_hid_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 1 && memcmp(retained[0], token.bytes, 16) == 0);
     active_peer.val[0] = 99;
     unsigned previous_terminations = terminations;
-    assert(hid_guest_pairing_forget(token, true) == 0);
+    assert(doubtech_hid_pairing_forget(token, true) == 0);
     assert(terminations == previous_terminations && !channel.armed);
-    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(doubtech_hid_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 0);
     hid_channel_disconnected(&channel);
     assert(hid_gatt_on_connect(17) && hid_gatt_on_connect(18));
@@ -279,17 +280,17 @@ int main(void)
     second->subscribed[HID_REPORT_KEYBOARD] = true;
     second->subscribed[HID_REPORT_MOUSE] = true;
     second->subscribed[HID_REPORT_CONSUMER] = true;
-    assert(hid_guest_request_ready_slot(2));
-    assert(hid_guest_request_arm_slot(2));
-    assert(hid_guest_request_keyboard_slot(2, keys) && last_report_handle == 18);
+    assert(doubtech_hid_request_ready_slot(2));
+    assert(doubtech_hid_request_arm_slot(2));
+    assert(doubtech_hid_request_keyboard_slot(2, keys) && last_report_handle == 18);
     assert(!channel.armed && !channel.keyboard[2]);
-    assert(hid_guest_request_release_slot(2) && !second->armed);
+    assert(doubtech_hid_request_release_slot(2) && !second->armed);
     memset(slots, 0xa5, sizeof(slots));
-    assert(hid_guest_request_slots(slots));
+    assert(doubtech_hid_request_slots(slots));
     assert(memcmp(slots[1].token, zero_token.bytes, 16) == 0 && !slots[1].ready);
     hold_host = true;
     unsigned prior_terminations = terminations;
-    assert(!hid_guest_request_keyboard_slot(2, keys));
+    assert(!doubtech_hid_request_keyboard_slot(2, keys));
     assert(!channel.needs_disconnect && host_queue.pending && host_queue.next);
     hold_host = false;
     struct ble_npl_event *late = host_queue.pending;
@@ -314,7 +315,7 @@ int main(void)
     gap_callback(&challenge, NULL);
     gap_callback(&encryption, NULL);
     hid_token_t preserved = last_event.token;
-    assert(memcmp(first.bytes, preserved.bytes, HID_PAIRING_TOKEN_LEN) != 0);
+    assert(memcmp(first.bytes, preserved.bytes, DOUBTECH_HID_TOKEN_LEN) != 0);
     gap_callback(&disconnect, NULL);
     active_peer.val[0] = 42;
     gap_callback(&connect, NULL);
@@ -326,19 +327,19 @@ int main(void)
     unsigned deleted_before = deleted_peers;
     assert(gap_callback(&repeat, NULL) == BLE_GAP_REPEAT_PAIRING_IGNORE);
     assert(deleted_peers == deleted_before);
-    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(doubtech_hid_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 2);
     gap_callback(&disconnect, NULL);
     gap_callback(&connect, NULL);
-    assert(hid_guest_pairing_open() == 0);
+    assert(doubtech_hid_pairing_open() == 0);
     repeat.repeat_pairing.new_sc = 0;
     assert(gap_callback(&repeat, NULL) == BLE_GAP_REPEAT_PAIRING_IGNORE);
     assert(deleted_peers == deleted_before);
     repeat.repeat_pairing.new_sc = 1;
     assert(gap_callback(&repeat, NULL) == BLE_GAP_REPEAT_PAIRING_RETRY);
     assert(deleted_peers == deleted_before + 1);
-    assert(hid_guest_request_retained_bonds(retained, &retained_count));
+    assert(doubtech_hid_request_retained_bonds(retained, &retained_count));
     assert(retained_count == 1 &&
-           memcmp(retained[0], preserved.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+           memcmp(retained[0], preserved.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     return 0;
 }

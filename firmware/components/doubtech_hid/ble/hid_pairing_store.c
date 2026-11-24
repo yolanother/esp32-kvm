@@ -11,7 +11,7 @@ typedef struct {
     uint32_t magic;
     uint32_t version;
     uint32_t count;
-    hid_bond_t bonds[HID_PAIRING_MAX_BONDS];
+    hid_bond_t bonds[DOUBTECH_HID_MAX_BONDS];
 } stored_table_t;
 
 esp_err_t hid_pairing_store_load(hid_pairing_t *state)
@@ -28,7 +28,7 @@ esp_err_t hid_pairing_store_load(hid_pairing_t *state)
     if (result == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
     if (result != ESP_OK) return result;
     if (size != sizeof(table) || table.magic != TABLE_MAGIC ||
-        table.version != TABLE_VERSION || table.count > HID_PAIRING_MAX_BONDS)
+        table.version != TABLE_VERSION || table.count > DOUBTECH_HID_MAX_BONDS)
         return ESP_ERR_INVALID_STATE;
     for (uint32_t index = 0; index < table.count; ++index)
         if (!hid_pairing_add_bond(state, table.bonds[index].peer, table.bonds[index].token))

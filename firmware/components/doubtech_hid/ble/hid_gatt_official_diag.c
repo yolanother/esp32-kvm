@@ -14,7 +14,7 @@
 #include "host/ble_att.h"
 #include "esp_log.h"
 
-static hid_channel_t channels[HID_GATT_MAX_CONNECTIONS];
+static hid_channel_t channels[DOUBTECH_HID_MAX_CONNECTIONS];
 static uint16_t keyboard_handle;
 static uint16_t led_handle;
 static uint16_t boot_keyboard_handle;
@@ -170,7 +170,7 @@ static int send_report(void *unused, uint16_t connection_handle, uint8_t report_
 
 int hid_gatt_register(void)
 {
-    for (size_t index = 0; index < HID_GATT_MAX_CONNECTIONS; ++index)
+    for (size_t index = 0; index < DOUBTECH_HID_MAX_CONNECTIONS; ++index)
         hid_channel_init(&channels[index], send_report, NULL);
 
     ble_hs_cfg.gatts_register_cb = on_register;
@@ -207,11 +207,11 @@ int hid_gatt_register(void)
 hid_channel_t *hid_gatt_channel(void) { return &channels[0]; }
 
 hid_channel_t *hid_gatt_channel_at(uint8_t slot)
-{ return slot >= 1 && slot <= HID_GATT_MAX_CONNECTIONS ? &channels[slot - 1] : NULL; }
+{ return slot >= 1 && slot <= DOUBTECH_HID_MAX_CONNECTIONS ? &channels[slot - 1] : NULL; }
 
 hid_channel_t *hid_gatt_channel_for(uint16_t connection_handle)
 {
-    for (size_t index = 0; index < HID_GATT_MAX_CONNECTIONS; ++index)
+    for (size_t index = 0; index < DOUBTECH_HID_MAX_CONNECTIONS; ++index)
         if (channels[index].connected && channels[index].connection_handle == connection_handle)
             return &channels[index];
     return NULL;
@@ -220,7 +220,7 @@ hid_channel_t *hid_gatt_channel_for(uint16_t connection_handle)
 size_t hid_gatt_connection_count(void)
 {
     size_t count = 0;
-    for (size_t index = 0; index < HID_GATT_MAX_CONNECTIONS; ++index)
+    for (size_t index = 0; index < DOUBTECH_HID_MAX_CONNECTIONS; ++index)
         if (channels[index].connected) ++count;
     return count;
 }
@@ -228,7 +228,7 @@ size_t hid_gatt_connection_count(void)
 bool hid_gatt_on_connect(uint16_t connection_handle)
 {
     if (hid_gatt_channel_for(connection_handle)) return false;
-    for (size_t index = 0; index < HID_GATT_MAX_CONNECTIONS; ++index)
+    for (size_t index = 0; index < DOUBTECH_HID_MAX_CONNECTIONS; ++index)
         if (!channels[index].connected) {
             hid_channel_connected(&channels[index], connection_handle);
             return true;

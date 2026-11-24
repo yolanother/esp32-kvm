@@ -11,21 +11,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define HID_PAIRING_MAX_BONDS 8
+#include "doubtech_hid.h"
+
 #define HID_PAIRING_WINDOW_MS 60000ULL
 #define HID_PAIRING_CHALLENGE_MIN_MS 30000ULL
 #define HID_PAIRING_MAX_ATTEMPTS 3
-#define HID_PAIRING_TOKEN_LEN 16
 
 /** A resolved BLE peer identity; never use a rotating over-the-air address. */
 typedef struct { uint8_t type; uint8_t address[6]; } hid_peer_t;
 /** Exactly 16 opaque bytes in protocol v1 STATUS and FORGET_BOND. */
-typedef struct { uint8_t bytes[HID_PAIRING_TOKEN_LEN]; } hid_token_t;
+typedef doubtech_hid_token_t hid_token_t;
 /** An identity and opaque application token persisted separately from BLE keys. */
 typedef struct { hid_peer_t peer; hid_token_t token; } hid_bond_t;
 /** Pairing policy state; only bonds are persisted. */
-typedef struct {
-    hid_bond_t bonds[HID_PAIRING_MAX_BONDS];
+typedef struct hid_pairing {
+    hid_bond_t bonds[DOUBTECH_HID_MAX_BONDS];
     size_t bond_count;
     uint64_t deadline_ms;
     uint16_t challenge_handle;
@@ -67,7 +67,7 @@ bool hid_pairing_connected_token(const hid_pairing_t *state, bool connected,
                                  bool authenticated, hid_peer_t peer, hid_token_t *out);
 /** Copies up to eight nonzero distinct retained tokens, never peer addresses. */
 bool hid_pairing_inventory(const hid_pairing_t *state,
-                           hid_token_t out[HID_PAIRING_MAX_BONDS], size_t *count);
+                           hid_token_t out[DOUBTECH_HID_MAX_BONDS], size_t *count);
 /** Forgets a token only after explicit confirmation. */
 bool hid_pairing_forget(hid_pairing_t *state, hid_token_t token, bool confirmed);
 

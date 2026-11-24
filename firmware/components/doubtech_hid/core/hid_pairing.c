@@ -14,19 +14,19 @@ static bool same_peer(hid_peer_t a, hid_peer_t b)
 static bool token_zero(hid_token_t token)
 {
     static const hid_token_t zero = {{0}};
-    return memcmp(token.bytes, zero.bytes, HID_PAIRING_TOKEN_LEN) == 0;
+    return memcmp(token.bytes, zero.bytes, DOUBTECH_HID_TOKEN_LEN) == 0;
 }
 
 static bool same_token(hid_token_t a, hid_token_t b)
 {
-    return memcmp(a.bytes, b.bytes, HID_PAIRING_TOKEN_LEN) == 0;
+    return memcmp(a.bytes, b.bytes, DOUBTECH_HID_TOKEN_LEN) == 0;
 }
 
 void hid_pairing_init(hid_pairing_t *state) { memset(state, 0, sizeof(*state)); }
 
 bool hid_pairing_open(hid_pairing_t *state, uint64_t now_ms)
 {
-    if (state->bond_count >= HID_PAIRING_MAX_BONDS) return false;
+    if (state->bond_count >= DOUBTECH_HID_MAX_BONDS) return false;
     state->deadline_ms = now_ms + HID_PAIRING_WINDOW_MS;
     state->window_active = true;
     state->challenge_active = false;
@@ -64,7 +64,7 @@ bool hid_pairing_admit(hid_pairing_t *state, hid_peer_t peer, uint64_t now_ms)
 {
     hid_token_t token;
     if (hid_pairing_token(state, peer, &token)) return true;
-    return hid_pairing_window_open(state, now_ms) && state->bond_count < HID_PAIRING_MAX_BONDS;
+    return hid_pairing_window_open(state, now_ms) && state->bond_count < DOUBTECH_HID_MAX_BONDS;
 }
 
 bool hid_pairing_begin_challenge(hid_pairing_t *state, hid_peer_t peer, uint16_t handle,
@@ -111,7 +111,7 @@ bool hid_pairing_consume_approval(hid_pairing_t *state, uint16_t handle)
 bool hid_pairing_add_bond(hid_pairing_t *state, hid_peer_t peer, hid_token_t token)
 {
     hid_token_t existing;
-    if (token_zero(token) || state->bond_count >= HID_PAIRING_MAX_BONDS ||
+    if (token_zero(token) || state->bond_count >= DOUBTECH_HID_MAX_BONDS ||
         hid_pairing_token(state, peer, &existing))
         return false;
     for (size_t index = 0; index < state->bond_count; ++index)
@@ -149,12 +149,12 @@ bool hid_pairing_forget(hid_pairing_t *state, hid_token_t token, bool confirmed)
 }
 
 bool hid_pairing_inventory(const hid_pairing_t *state,
-                           hid_token_t out[HID_PAIRING_MAX_BONDS], size_t *count)
+                           hid_token_t out[DOUBTECH_HID_MAX_BONDS], size_t *count)
 {
     if (!out || !count) return false;
-    memset(out, 0, HID_PAIRING_MAX_BONDS * sizeof(*out));
+    memset(out, 0, DOUBTECH_HID_MAX_BONDS * sizeof(*out));
     *count = 0;
-    if (!state || state->bond_count > HID_PAIRING_MAX_BONDS) return false;
+    if (!state || state->bond_count > DOUBTECH_HID_MAX_BONDS) return false;
     for (size_t i = 0; i < state->bond_count; ++i) {
         hid_token_t token = state->bonds[i].token;
         if (token_zero(token)) return false;

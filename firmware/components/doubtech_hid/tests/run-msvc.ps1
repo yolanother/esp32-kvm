@@ -15,6 +15,7 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
 $includes = @(
     "/I$($msvc.FullName)/include",
     "/I$($kit.FullName)/ucrt",
+    "/I$repo/firmware/components/doubtech_hid/include",
     "/I$repo/firmware/components/doubtech_hid/core",
     "/I$repo/firmware/components/doubtech_hid/ble",
     "/I$repo/firmware/components/doubtech_hid/tests/mocks"

@@ -4,7 +4,7 @@
  * session, READY encrypted guest, explicit switch, and explicit arm. The
  * Waveshare panel starts only with the explicitly validated board profile. */
 #include "esp_log.h"
-#include "hid_guest.h"
+#include "doubtech_hid.h"
 #include "display.h"
 #include "display_labels.h"
 #include "transport_usb_serial_jtag.h"
@@ -13,7 +13,7 @@
 void app_main(void)
 {
     kvm_transport_diagnostics_init();
-    esp_err_t hid_result = hid_guest_start();
+    esp_err_t hid_result = doubtech_hid_start();
     if (hid_result != ESP_OK) ESP_LOGE("esp32-kvm", "HID startup failed: %d", hid_result);
     esp_err_t labels_result = kvm_display_labels_init();
     if (labels_result != ESP_OK) ESP_LOGE("esp32-kvm", "Display label storage failed: %d", labels_result);

@@ -33,7 +33,7 @@ int main(void)
     assert(hid_pairing_store_load(&reloaded) == ESP_OK);
     hid_token_t found;
     assert(reloaded.bond_count == 1 && hid_pairing_token(&reloaded, identity, &found));
-    assert(memcmp(found.bytes, token.bytes, HID_PAIRING_TOKEN_LEN) == 0);
+    assert(memcmp(found.bytes, token.bytes, DOUBTECH_HID_TOKEN_LEN) == 0);
     blob[4] = 1; /* The unshipped 64-bit-token development format is rejected. */
     assert(hid_pairing_store_load(&reloaded) == ESP_ERR_INVALID_STATE);
     blob[4] = 2;

@@ -7,12 +7,16 @@
  * Each HID request carries its one-based target slot. Live-slot and retained
  * inventory lookups copy only opaque tokens into the requesting worker;
  * timeout output is cleared. */
-#include "hid_guest.h"
+#include "doubtech_hid.h"
 #include "hid_guest_rpc.h"
 #include <string.h>
 #include <stdatomic.h>
 #include "nimble/nimble_port.h"
 #include "hid_gatt.h"
+#include "hid_pairing.h"
+
+_Static_assert(DOUBTECH_HID_KEYBOARD_REPORT_LEN == HID_KEYBOARD_REPORT_LEN,
+               "public keyboard report length must match the internal report layout");
 
 #define RPC_TIMEOUT_MS 20u
 typedef enum { RPC_READY, RPC_ARM, RPC_RELEASE, RPC_KEYBOARD, RPC_MOUSE, RPC_CONSUMER,
@@ -38,10 +42,10 @@ typedef struct {
     int8_t wheel, pan;
     uint16_t usage;
     pair_reply_args_t pair_reply;
-    uint8_t forget_token[HID_PAIRING_TOKEN_LEN];
+    uint8_t forget_token[DOUBTECH_HID_TOKEN_LEN];
     hid_token_t current_token;
-    uint8_t inventory[1 + HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN];
-    hid_guest_slot_snapshot_t slots[HID_GATT_MAX_CONNECTIONS];
+    uint8_t inventory[1 + DOUBTECH_HID_MAX_BONDS * DOUBTECH_HID_TOKEN_LEN];
+    doubtech_hid_slot_t slots[DOUBTECH_HID_MAX_CONNECTIONS];
 } rpc_state_t;
 static rpc_state_t rpc;
 
@@ -66,36 +70,36 @@ static void on_host(struct ble_npl_event *event)
         case RPC_MOUSE: rpc.result = hid_channel_mouse(channel, rpc.buttons, rpc.dx, rpc.dy,
                                                        rpc.wheel, rpc.pan); break;
         case RPC_CONSUMER: rpc.result = hid_channel_consumer(channel, rpc.usage); break;
-        case RPC_PAIR_BEGIN: rpc.result = hid_guest_pairing_open() == ESP_OK; break;
-        case RPC_PAIR_CANCEL: hid_guest_pairing_cancel(); rpc.result = true; break;
+        case RPC_PAIR_BEGIN: rpc.result = doubtech_hid_pairing_open() == ESP_OK; break;
+        case RPC_PAIR_CANCEL: doubtech_hid_pairing_cancel(); rpc.result = true; break;
         case RPC_PAIR_REPLY:
-            rpc.result = hid_guest_pairing_confirm(rpc.pair_reply.challenge_id,
+            rpc.result = doubtech_hid_pairing_confirm(rpc.pair_reply.challenge_id,
                                                     rpc.pair_reply.approved) == ESP_OK;
             break;
         case RPC_FORGET_BOND: {
             hid_token_t token;
             memcpy(token.bytes, rpc.forget_token, sizeof(token.bytes));
-            rpc.result = hid_guest_pairing_forget(token, true) == ESP_OK;
+            rpc.result = doubtech_hid_pairing_forget(token, true) == ESP_OK;
             break;
         }
         case RPC_CURRENT_TOKEN:
-            rpc.result = hid_guest_current_bond_token(&rpc.current_token);
+            rpc.result = doubtech_hid_current_bond_token(&rpc.current_token);
             break;
         case RPC_INVENTORY: {
-            hid_token_t tokens[HID_PAIRING_MAX_BONDS];
+            hid_token_t tokens[DOUBTECH_HID_MAX_BONDS];
             size_t count = 0;
-            rpc.result = hid_guest_retained_bonds(tokens, &count);
-            if (rpc.result && count <= HID_PAIRING_MAX_BONDS) {
+            rpc.result = doubtech_hid_retained_bonds(tokens, &count);
+            if (rpc.result && count <= DOUBTECH_HID_MAX_BONDS) {
                 rpc.inventory[0] = (uint8_t)count;
-                memcpy(rpc.inventory + 1, tokens, count * HID_PAIRING_TOKEN_LEN);
+                memcpy(rpc.inventory + 1, tokens, count * DOUBTECH_HID_TOKEN_LEN);
             } else rpc.result = false;
             memset(tokens, 0, sizeof(tokens));
             break;
         }
-        case RPC_SLOTS: rpc.result = hid_guest_snapshot_slots(rpc.slots); break;
+        case RPC_SLOTS: rpc.result = doubtech_hid_snapshot_slots(rpc.slots); break;
         }
         if (channel && channel->needs_disconnect && channel->connected)
-            hid_guest_disconnect_slot(rpc.slot);
+            doubtech_hid_disconnect_slot(rpc.slot);
     }
     rpc.finished = true;
     if (atomic_load(&rpc.cancelled)) rpc.busy = false;
@@ -115,9 +119,9 @@ esp_err_t hid_guest_rpc_init(void)
 static bool request(rpc_op_t operation, uint8_t slot, const void *payload, uint8_t *output)
 {
     size_t output_length = operation == RPC_INVENTORY ? sizeof(rpc.inventory) :
-                           operation == RPC_SLOTS ? sizeof(rpc.slots) : HID_PAIRING_TOKEN_LEN;
+                           operation == RPC_SLOTS ? sizeof(rpc.slots) : DOUBTECH_HID_TOKEN_LEN;
     if (output) memset(output, 0, output_length);
-    if (slot > HID_GATT_MAX_CONNECTIONS ||
+    if (slot > DOUBTECH_HID_MAX_CONNECTIONS ||
         (!slot && operation <= RPC_CONSUMER) ||
         !rpc.initialized ||
         ble_npl_mutex_pend(&rpc.mutex, 0) != BLE_NPL_OK) return false;
@@ -144,12 +148,12 @@ static bool request(rpc_op_t operation, uint8_t slot, const void *payload, uint8
                       ble_npl_time_ms_to_ticks32(RPC_TIMEOUT_MS)) == BLE_NPL_OK;
     if (!completed) atomic_store(&rpc.cancelled, true);
     if (ble_npl_mutex_pend(&rpc.mutex, 0) != BLE_NPL_OK) {
-        if (slot) hid_guest_request_disconnect_slot(slot);
+        if (slot) doubtech_hid_request_disconnect_slot(slot);
         return false;
     }
     bool result = completed && rpc.result;
     if (result && output && operation == RPC_CURRENT_TOKEN)
-        memcpy(output, rpc.current_token.bytes, HID_PAIRING_TOKEN_LEN);
+        memcpy(output, rpc.current_token.bytes, DOUBTECH_HID_TOKEN_LEN);
     if (result && output && operation == RPC_INVENTORY)
         memcpy(output, rpc.inventory, sizeof(rpc.inventory));
     if (result && output && operation == RPC_SLOTS)
@@ -162,56 +166,56 @@ static bool request(rpc_op_t operation, uint8_t slot, const void *payload, uint8
     }
     else rpc.busy = false;
     ble_npl_mutex_release(&rpc.mutex);
-    if (!completed && slot) hid_guest_request_disconnect_slot(slot);
+    if (!completed && slot) doubtech_hid_request_disconnect_slot(slot);
     return result;
 }
 
-bool hid_guest_request_ready_slot(uint8_t slot) { return request(RPC_READY, slot, NULL, NULL); }
-bool hid_guest_request_arm_slot(uint8_t slot) { return request(RPC_ARM, slot, NULL, NULL); }
-bool hid_guest_request_release_slot(uint8_t slot) { return request(RPC_RELEASE, slot, NULL, NULL); }
-bool hid_guest_request_ready(void) { return hid_guest_request_ready_slot(1); }
-bool hid_guest_request_arm(void) { return hid_guest_request_arm_slot(1); }
-bool hid_guest_request_release(void) { return hid_guest_request_release_slot(1); }
-bool hid_guest_request_keyboard_slot(uint8_t slot, const uint8_t keys[HID_KEYBOARD_REPORT_LEN])
+bool doubtech_hid_request_ready_slot(uint8_t slot) { return request(RPC_READY, slot, NULL, NULL); }
+bool doubtech_hid_request_arm_slot(uint8_t slot) { return request(RPC_ARM, slot, NULL, NULL); }
+bool doubtech_hid_request_release_slot(uint8_t slot) { return request(RPC_RELEASE, slot, NULL, NULL); }
+bool doubtech_hid_request_ready(void) { return doubtech_hid_request_ready_slot(1); }
+bool doubtech_hid_request_arm(void) { return doubtech_hid_request_arm_slot(1); }
+bool doubtech_hid_request_release(void) { return doubtech_hid_request_release_slot(1); }
+bool doubtech_hid_request_keyboard_slot(uint8_t slot, const uint8_t keys[HID_KEYBOARD_REPORT_LEN])
 { return keys && request(RPC_KEYBOARD, slot, keys, NULL); }
-bool hid_guest_request_keyboard(const uint8_t keys[HID_KEYBOARD_REPORT_LEN])
-{ return hid_guest_request_keyboard_slot(1, keys); }
-bool hid_guest_request_mouse_slot(uint8_t slot, uint8_t buttons, int16_t dx, int16_t dy,
+bool doubtech_hid_request_keyboard(const uint8_t keys[HID_KEYBOARD_REPORT_LEN])
+{ return doubtech_hid_request_keyboard_slot(1, keys); }
+bool doubtech_hid_request_mouse_slot(uint8_t slot, uint8_t buttons, int16_t dx, int16_t dy,
                                   int8_t wheel, int8_t pan)
 {
     const mouse_args_t mouse = {buttons, dx, dy, wheel, pan};
     return request(RPC_MOUSE, slot, &mouse, NULL);
 }
-bool hid_guest_request_mouse(uint8_t buttons, int16_t dx, int16_t dy,
+bool doubtech_hid_request_mouse(uint8_t buttons, int16_t dx, int16_t dy,
                              int8_t wheel, int8_t pan)
-{ return hid_guest_request_mouse_slot(1, buttons, dx, dy, wheel, pan); }
-bool hid_guest_request_consumer_slot(uint8_t slot, uint16_t usage)
+{ return doubtech_hid_request_mouse_slot(1, buttons, dx, dy, wheel, pan); }
+bool doubtech_hid_request_consumer_slot(uint8_t slot, uint16_t usage)
 { return request(RPC_CONSUMER, slot, &usage, NULL); }
-bool hid_guest_request_consumer(uint16_t usage) { return hid_guest_request_consumer_slot(1, usage); }
-bool hid_guest_request_pair_begin(void) { return request(RPC_PAIR_BEGIN, 0, NULL, NULL); }
-bool hid_guest_request_pair_cancel(void) { return request(RPC_PAIR_CANCEL, 0, NULL, NULL); }
-bool hid_guest_request_pair_reply(uint32_t challenge_id, bool approved)
+bool doubtech_hid_request_consumer(uint16_t usage) { return doubtech_hid_request_consumer_slot(1, usage); }
+bool doubtech_hid_request_pair_begin(void) { return request(RPC_PAIR_BEGIN, 0, NULL, NULL); }
+bool doubtech_hid_request_pair_cancel(void) { return request(RPC_PAIR_CANCEL, 0, NULL, NULL); }
+bool doubtech_hid_request_pair_reply(uint32_t challenge_id, bool approved)
 {
     const pair_reply_args_t args = {challenge_id, approved};
     return request(RPC_PAIR_REPLY, 0, &args, NULL);
 }
-bool hid_guest_request_forget_bond(const uint8_t token[HID_PAIRING_TOKEN_LEN])
+bool doubtech_hid_request_forget_bond(const uint8_t token[DOUBTECH_HID_TOKEN_LEN])
 { return token && request(RPC_FORGET_BOND, 0, token, NULL); }
-bool hid_guest_request_current_bond_token(uint8_t output[HID_PAIRING_TOKEN_LEN])
+bool doubtech_hid_request_current_bond_token(uint8_t output[DOUBTECH_HID_TOKEN_LEN])
 { return output && request(RPC_CURRENT_TOKEN, 1, NULL, output); }
-bool hid_guest_request_slots(hid_guest_slot_snapshot_t output[HID_GATT_MAX_CONNECTIONS])
+bool doubtech_hid_request_slots(doubtech_hid_slot_t output[DOUBTECH_HID_MAX_CONNECTIONS])
 { return output && request(RPC_SLOTS, 0, NULL, (uint8_t *)output); }
-bool hid_guest_request_retained_bonds(uint8_t output[HID_PAIRING_MAX_BONDS][HID_PAIRING_TOKEN_LEN],
+bool doubtech_hid_request_retained_bonds(uint8_t output[DOUBTECH_HID_MAX_BONDS][DOUBTECH_HID_TOKEN_LEN],
                                       uint8_t *count)
 {
     if (!output || !count) return false;
-    memset(output, 0, HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN);
+    memset(output, 0, DOUBTECH_HID_MAX_BONDS * DOUBTECH_HID_TOKEN_LEN);
     *count = 0;
-    uint8_t response[1 + HID_PAIRING_MAX_BONDS * HID_PAIRING_TOKEN_LEN];
+    uint8_t response[1 + DOUBTECH_HID_MAX_BONDS * DOUBTECH_HID_TOKEN_LEN];
     bool result = request(RPC_INVENTORY, 0, NULL, response);
-    if (result && response[0] <= HID_PAIRING_MAX_BONDS) {
+    if (result && response[0] <= DOUBTECH_HID_MAX_BONDS) {
         *count = response[0];
-        memcpy(output, response + 1, (size_t)*count * HID_PAIRING_TOKEN_LEN);
+        memcpy(output, response + 1, (size_t)*count * DOUBTECH_HID_TOKEN_LEN);
     } else result = false;
     memset(response, 0, sizeof(response));
     return result;

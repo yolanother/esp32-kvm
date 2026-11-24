@@ -38,7 +38,7 @@ enum attribute {
     ATTR_BATTERY_FORMAT
 };
 
-static hid_channel_t channels[HID_GATT_MAX_CONNECTIONS];
+static hid_channel_t channels[DOUBTECH_HID_MAX_CONNECTIONS];
 static uint16_t keyboard_handle;
 static uint16_t mouse_handle;
 static uint16_t consumer_handle;
@@ -296,7 +296,7 @@ static int send_report(void *unused, uint16_t connection_handle, uint8_t report_
 
 int hid_gatt_register(void)
 {
-    for (size_t i = 0; i < HID_GATT_MAX_CONNECTIONS; ++i)
+    for (size_t i = 0; i < DOUBTECH_HID_MAX_CONNECTIONS; ++i)
         hid_channel_init(&channels[i], send_report, NULL);
     int result = ble_gatts_count_cfg(services);
     if (result != 0) return result;
@@ -306,11 +306,11 @@ int hid_gatt_register(void)
 hid_channel_t *hid_gatt_channel(void) { return &channels[0]; }
 
 hid_channel_t *hid_gatt_channel_at(uint8_t slot)
-{ return slot >= 1 && slot <= HID_GATT_MAX_CONNECTIONS ? &channels[slot - 1] : NULL; }
+{ return slot >= 1 && slot <= DOUBTECH_HID_MAX_CONNECTIONS ? &channels[slot - 1] : NULL; }
 
 hid_channel_t *hid_gatt_channel_for(uint16_t connection_handle)
 {
-    for (size_t i = 0; i < HID_GATT_MAX_CONNECTIONS; ++i)
+    for (size_t i = 0; i < DOUBTECH_HID_MAX_CONNECTIONS; ++i)
         if (channels[i].connected && channels[i].connection_handle == connection_handle)
             return &channels[i];
     return NULL;
@@ -319,7 +319,7 @@ hid_channel_t *hid_gatt_channel_for(uint16_t connection_handle)
 size_t hid_gatt_connection_count(void)
 {
     size_t count = 0;
-    for (size_t i = 0; i < HID_GATT_MAX_CONNECTIONS; ++i)
+    for (size_t i = 0; i < DOUBTECH_HID_MAX_CONNECTIONS; ++i)
         if (channels[i].connected) ++count;
     return count;
 }
@@ -327,7 +327,7 @@ size_t hid_gatt_connection_count(void)
 bool hid_gatt_on_connect(uint16_t connection_handle)
 {
     if (hid_gatt_channel_for(connection_handle)) return false;
-    for (size_t i = 0; i < HID_GATT_MAX_CONNECTIONS; ++i)
+    for (size_t i = 0; i < DOUBTECH_HID_MAX_CONNECTIONS; ++i)
         if (!channels[i].connected) {
             hid_channel_connected(&channels[i], connection_handle);
             return true;

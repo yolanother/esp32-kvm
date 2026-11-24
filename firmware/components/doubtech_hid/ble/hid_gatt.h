@@ -8,10 +8,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "doubtech_hid.h"
 #include "hid_report.h"
-
-/** Source-side channel bound; wire-visible live capacity remains one pending proof. */
-#define HID_GATT_MAX_CONNECTIONS 3
 
 /** Registers the HID service before the NimBLE GATT server starts. */
 int hid_gatt_register(void);
