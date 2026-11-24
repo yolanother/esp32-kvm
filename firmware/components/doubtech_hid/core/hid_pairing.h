@@ -5,8 +5,8 @@
  * permits bounded numeric comparison attempts, and keeps eight opaque bond tokens stable.
  * Connected-peer lookup exposes only a nonzero token after authentication;
  * inventory copies only bounded retained tokens. */
-#ifndef ESP32_KVM_HID_PAIRING_H
-#define ESP32_KVM_HID_PAIRING_H
+#ifndef DOUBTECH_HID_PAIRING_H
+#define DOUBTECH_HID_PAIRING_H
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

@@ -1,11 +1,11 @@
-config KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+config DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
     bool "Expose keyboard-only HID for host compatibility diagnosis"
     default n
     help
         Temporarily remove mouse and consumer reports and characteristics to
-        isolate host HID registration failures. This mode is not a KVM release.
+        isolate host HID registration failures. This mode is not a release configuration.
 
-config KVM_HID_GATT_TRACE
+config DOUBTECH_HID_GATT_TRACE
     bool "Log HID GATT access for host registration diagnosis"
     default n
     help

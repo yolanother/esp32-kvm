@@ -1,7 +1,7 @@
 /* Bounded, opt-in BLE trace retrieval on boards without a connected UART. */
 #include "transport_usb_serial_jtag.h"
 #include "sdkconfig.h"
-#ifdef CONFIG_KVM_HID_GATT_TRACE
+#ifdef CONFIG_DOUBTECH_HID_GATT_TRACE
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>

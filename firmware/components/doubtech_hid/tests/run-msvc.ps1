@@ -43,7 +43,7 @@ foreach ($name in $testNames) {
         $sources += (Join-Path $repo 'firmware/components/doubtech_hid/core/hid_pairing.c')
         $sources += (Join-Path $repo 'firmware/components/doubtech_hid/ble/hid_pairing_store.c')
     }
-    [string[]]$defines = @(if ($name -eq 'test_hid_keyboard_diag' -or $name -eq 'test_hid_keyboard_gatt' -or $name -eq 'test_hid_discovery' -or $name -eq 'test_hid_official_diag') { '/DCONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC=1' })
+    [string[]]$defines = @(if ($name -eq 'test_hid_keyboard_diag' -or $name -eq 'test_hid_keyboard_gatt' -or $name -eq 'test_hid_discovery' -or $name -eq 'test_hid_official_diag') { '/DCONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC=1' })
     & $compiler /nologo /W4 /WX /std:c11 /experimental:c11atomics @defines @includes @sources "/Fo:$output/" "/Fe:$output/$name.exe" /link @libraries
     if ($LASTEXITCODE -ne 0) { throw "Compile failed: $name" }
     if ($name -eq 'test_doubtech_hid_config') {

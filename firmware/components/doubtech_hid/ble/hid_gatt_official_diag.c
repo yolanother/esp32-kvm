@@ -1,6 +1,6 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Diagnostic adapter around ESP-IDF's supported NimBLE HID service builder.
- * It preserves the KVM channel API while removing our custom GATT database
+ * It preserves the HID channel API while removing our custom GATT database
  * from the macOS compatibility test. */
 #include "hid_gatt.h"
 
@@ -40,7 +40,7 @@ static int read_pnp_id(uint16_t connection, uint16_t handle,
     if (context->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     int result = os_mbuf_append(context->om, pnp_id, sizeof(pnp_id));
-    ESP_LOGI("kvm-hid-trace", "PnP ID read conn=%u handle=%u len=%u result=%d",
+    ESP_LOGI("doubtech-hid-trace", "PnP ID read conn=%u handle=%u len=%u result=%d",
              connection, handle, (unsigned)sizeof(pnp_id), result);
     return result == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
@@ -96,7 +96,7 @@ static void trace_bytes(const char *operation, uint16_t handle,
     }
     hex[2 * length] = 0;
     (void)hex;
-    ESP_LOGI("kvm-hid-trace", "%s handle=%u bytes=%s", operation, handle, hex);
+    ESP_LOGI("doubtech-hid-trace", "%s handle=%u bytes=%s", operation, handle, hex);
 }
 
 static int trace_access(uint16_t connection, uint16_t handle,
@@ -115,7 +115,7 @@ static int trace_access(uint16_t connection, uint16_t handle,
         if (length > sizeof(payload)) length = sizeof(payload);
         if (result == 0 && os_mbuf_copydata(context->om, 0, length, payload) == 0)
             trace_bytes("ATT", handle, payload, length);
-        ESP_LOGI("kvm-hid-trace", "access conn=%u handle=%u uuid=%04x op=%u result=%d len=%u value=%u",
+        ESP_LOGI("doubtech-hid-trace", "access conn=%u handle=%u uuid=%04x op=%u result=%d len=%u value=%u",
                  connection, handle, traced[i].uuid, context->op, result,
                  (unsigned)OS_MBUF_PKTLEN(context->om), first);
         hid_channel_t *channel = hid_gatt_channel_for(connection);

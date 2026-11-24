@@ -2,12 +2,20 @@
 #define main legacy_doubtech_hid_test
 #include "test_hid_guest.c"
 #undef main
+static void diagnostic_profile_name_fits_and_keeps_static_address(void)
+{
+    static const uint8_t expected_address[6] = {0x51, 0x32, 0x84, 0x76, 0x5a, 0xe1};
+    assert(strcmp(adv_name, "DoubTech KB Test") == 0);
+    assert(adv_name_len == strlen("DoubTech KB Test") && adv_name_len <= DOUBTECH_HID_NAME_MAX_BYTES);
+    assert(rnd_address_sets == 1 && memcmp(rnd_address, expected_address, sizeof(expected_address)) == 0);
+}
 int main(void)
 {
     active_peer.type = 1; active_peer.val[0] = 42;
     assert(doubtech_hid_start(&legacy_config) == 0);
     doubtech_hid_pairing_set_events(event_sink, NULL);
     ble_hs_cfg.sync_cb();
+    diagnostic_profile_name_fits_and_keeps_static_address();
     struct ble_gap_event connect = {.type = BLE_GAP_EVENT_CONNECT};
     connect.connect.conn_handle = 17;
     gap_callback(&connect, NULL);

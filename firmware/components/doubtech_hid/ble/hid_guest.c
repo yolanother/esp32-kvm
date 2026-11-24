@@ -31,7 +31,7 @@
 /* ESP-IDF's NimBLE store configuration helper has no public header. */
 void ble_store_config_init(void);
 
-static const char *tag = "esp32-kvm-hid";
+static const char *tag = "doubtech-hid";
 static uint8_t own_address_type;
 static hid_pairing_t pairing;
 static doubtech_hid_pairing_event_fn pairing_events;
@@ -221,7 +221,7 @@ static void on_reset(int reason)
 
 static void on_sync(void)
 {
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifdef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
     /* Use a separate static identity for the diagnostic profile. macOS keeps
        GATT data by peripheral identity even after the Bluetooth UI forgets a
        device, so changing only the name cannot force fresh HID discovery. */
@@ -282,7 +282,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifdef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
         /* Match a normal HID peripheral: let the central start security when
          * reading encrypted report references. Request it only as a fallback
          * when the central subscribes to input before securing the link. */
@@ -376,20 +376,20 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     }
     case BLE_GAP_EVENT_SUBSCRIBE: {
-#ifdef CONFIG_KVM_HID_GATT_TRACE
+#ifdef CONFIG_DOUBTECH_HID_GATT_TRACE
         ESP_LOGI(tag, "HID subscribe conn=%u handle=%u notify=%u",
                  event->subscribe.conn_handle, event->subscribe.attr_handle,
                  event->subscribe.cur_notify);
 #endif
         (void)live_channel(event->subscribe.conn_handle);
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifdef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
         hid_channel_t *channel = hid_gatt_channel_for(event->subscribe.conn_handle);
         bool had_keyboard_subscription = channel &&
             (channel->subscribed[HID_REPORT_KEYBOARD] || channel->subscribed[HID_REPORT_BOOT_KEYBOARD]);
 #endif
         hid_gatt_on_subscribe(event->subscribe.conn_handle,
                               event->subscribe.attr_handle, event->subscribe.cur_notify);
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifdef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
         if (event->subscribe.cur_notify && channel && !channel->encrypted && !had_keyboard_subscription &&
             (channel->subscribed[HID_REPORT_KEYBOARD] ||
              channel->subscribed[HID_REPORT_BOOT_KEYBOARD])) {
@@ -403,7 +403,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     }
     case BLE_GAP_EVENT_NOTIFY_TX: {
-#ifdef CONFIG_KVM_HID_GATT_TRACE
+#ifdef CONFIG_DOUBTECH_HID_GATT_TRACE
         ESP_LOGI(tag, "HID notify conn=%u handle=%u status=%d",
                  event->notify_tx.conn_handle, event->notify_tx.attr_handle,
                  event->notify_tx.status);
@@ -536,7 +536,7 @@ esp_err_t doubtech_hid_start(const doubtech_hid_config_t *config)
         !valid_length(model, DOUBTECH_HID_DIS_STRING_MAX_BYTES) ||
         (bond_namespace && !valid_length(bond_namespace, DOUBTECH_HID_BOND_NAMESPACE_MAX_CHARS)))
         return ESP_ERR_INVALID_ARG;
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifdef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
     name = "DoubTech KB Test";
 #endif
     memcpy(device_name, name, strlen(name) + 1);

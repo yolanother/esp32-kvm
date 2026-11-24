@@ -12,7 +12,7 @@
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
 #include "os/os_mbuf.h"
-#ifdef CONFIG_KVM_HID_GATT_TRACE
+#ifdef CONFIG_DOUBTECH_HID_GATT_TRACE
 #include "esp_log.h"
 #endif
 
@@ -55,7 +55,7 @@ static struct ble_gatt_dsc_def keyboard_reference[] = {
      .access_cb = access_attribute, .arg = (void *)ATTR_KEYBOARD_REFERENCE},
     {0}
 };
-#ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifndef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
 static struct ble_gatt_dsc_def mouse_reference[] = {
     {.uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ | BLE_ATT_F_READ_ENC,
      .access_cb = access_attribute, .arg = (void *)ATTR_MOUSE_REFERENCE},
@@ -89,7 +89,7 @@ static const struct ble_gatt_chr_def characteristics[] = {
      .arg = (void *)ATTR_KEYBOARD_INPUT, .descriptors = keyboard_reference,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
      .val_handle = &keyboard_handle},
-#ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifndef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
     {.uuid = BLE_UUID16_DECLARE(0x2a4d), .access_cb = access_attribute,
      .arg = (void *)ATTR_MOUSE_INPUT, .descriptors = mouse_reference,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
@@ -112,7 +112,7 @@ static const struct ble_gatt_chr_def characteristics[] = {
      .arg = (void *)ATTR_BOOT_KEYBOARD_OUTPUT,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
               BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC},
-#ifndef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifndef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
     {.uuid = BLE_UUID16_DECLARE(0x2a33), .access_cb = access_attribute,
      .arg = (void *)ATTR_BOOT_MOUSE_INPUT,
      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
@@ -270,8 +270,8 @@ static int access_attribute(uint16_t connection_handle, uint16_t attribute_handl
     else if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR)
         result = write_attribute(channel, context, attribute);
     else result = BLE_ATT_ERR_UNLIKELY;
-#ifdef CONFIG_KVM_HID_GATT_TRACE
-    ESP_LOGI("esp32-kvm-gatt", "ATT conn=%u handle=%u attr=%u op=%u rc=%d",
+#ifdef CONFIG_DOUBTECH_HID_GATT_TRACE
+    ESP_LOGI("doubtech-hid-gatt", "ATT conn=%u handle=%u attr=%u op=%u rc=%d",
              connection_handle, attribute_handle, attribute, context->op, result);
 #else
     (void)attribute_handle;
@@ -293,9 +293,9 @@ static int send_report(void *unused, uint16_t connection_handle, uint8_t report_
                             report_id == HID_REPORT_BOOT_KEYBOARD ? boot_keyboard_handle :
                             boot_mouse_handle;
     if (value_handle == 0) return -1;
-#if defined(CONFIG_KVM_HID_GATT_TRACE) && defined(CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC)
+#if defined(CONFIG_DOUBTECH_HID_GATT_TRACE) && defined(CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC)
     if (length == HID_KEYBOARD_REPORT_LEN) {
-        ESP_LOGI("esp32-kvm-gatt", "input conn=%u handle=%u bytes=%02x%02x%02x%02x%02x%02x%02x%02x",
+        ESP_LOGI("doubtech-hid-gatt", "input conn=%u handle=%u bytes=%02x%02x%02x%02x%02x%02x%02x%02x",
                  connection_handle, value_handle, bytes[0], bytes[1], bytes[2], bytes[3],
                  bytes[4], bytes[5], bytes[6], bytes[7]);
     }

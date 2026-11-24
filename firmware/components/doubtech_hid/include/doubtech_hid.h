@@ -71,7 +71,8 @@ typedef void (*doubtech_hid_pairing_event_fn)(const doubtech_hid_pairing_event_t
 
 /** Advertised identity and bond storage; a NULL field selects the library default
  * (name "BLE HID", manufacturer "DoubTech", model "BLE HID", NVS namespace
- * "kvm_bonds"). Strings are copied during start and need not outlive it. */
+ * "kvm_bonds", the earlier shipped firmware's namespace). Strings are copied
+ * during start and need not outlive it. */
 typedef struct {
     const char *device_name;    /**< 1 to DOUBTECH_HID_NAME_MAX_BYTES bytes. */
     const char *manufacturer;   /**< 1 to DOUBTECH_HID_DIS_STRING_MAX_BYTES bytes. */

@@ -2,8 +2,8 @@
  * Exposes one composite HID-over-GATT service with up to three isolated
  * connection channels. Registration never starts advertising or arms input;
  * the owner supplies authenticated link and per-peer CCCD events. */
-#ifndef ESP32_KVM_HID_GATT_H
-#define ESP32_KVM_HID_GATT_H
+#ifndef DOUBTECH_HID_GATT_H
+#define DOUBTECH_HID_GATT_H
 
 #include <stdbool.h>
 #include <stdint.h>

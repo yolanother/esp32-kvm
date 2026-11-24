@@ -107,7 +107,7 @@ void nimble_port_freertos_init(void (*task)(void *)) { (void)task; }
 void nimble_port_freertos_deinit(void) { }
 void ble_svc_gap_init(void) { }
 void ble_svc_gatt_init(void) { }
-#ifdef CONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC
+#ifdef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
 #define EXPECTED_GAP_NAME "DoubTech KB Test"
 #else
 #define EXPECTED_GAP_NAME "ESP32 KVM"
@@ -119,7 +119,10 @@ int ble_svc_gap_device_appearance_set(uint16_t appearance) { return appearance =
 void ble_store_config_init(void) { }
 int ble_hs_util_ensure_addr(int privacy) { return privacy; }
 int ble_hs_id_infer_auto(int privacy, uint8_t *type) { *type = 0; return privacy; }
-int ble_hs_id_set_rnd(const uint8_t *address) { return address ? 0 : -1; }
+static uint8_t rnd_address[6];
+static int rnd_address_sets;
+int ble_hs_id_set_rnd(const uint8_t *address)
+{ if (!address) return -1; memcpy(rnd_address, address, sizeof(rnd_address)); rnd_address_sets++; return 0; }
 int ble_store_util_bonded_peers(ble_addr_t *peers, int *count, int maximum)
 { (void)peers; (void)maximum; *count = saved_size ? 1 : 0; return 0; }
 int ble_store_util_delete_peer(const ble_addr_t *peer) { (void)peer; deleted_peers++; return 0; }

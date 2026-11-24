@@ -2,8 +2,8 @@
  * Defines the composite keyboard, relative mouse, and consumer HID report map,
  * Boot Protocol routing, and one connection's fail-closed output gate. No Bluetooth stack is required
  * by this header, so report behavior can be tested before hardware flashing. */
-#ifndef ESP32_KVM_HID_REPORT_H
-#define ESP32_KVM_HID_REPORT_H
+#ifndef DOUBTECH_HID_REPORT_H
+#define DOUBTECH_HID_REPORT_H
 
 #include <stdbool.h>
 #include <stddef.h>

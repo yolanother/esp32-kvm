@@ -1,11 +1,11 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Declares NVS persistence for opaque HID bond identity tokens. NimBLE keeps
  * cryptographic bond material in its own store; this file stores no BLE keys. */
-#ifndef ESP32_KVM_HID_PAIRING_STORE_H
-#define ESP32_KVM_HID_PAIRING_STORE_H
+#ifndef DOUBTECH_HID_PAIRING_STORE_H
+#define DOUBTECH_HID_PAIRING_STORE_H
 #include "esp_err.h"
 #include "hid_pairing.h"
-/** NVS namespace the shipped KVM firmware used; the default so paired hosts keep their bonds. */
+/** NVS namespace the earlier shipped firmware used; the default so paired hosts keep their bonds. */
 #define DOUBTECH_HID_LEGACY_BOND_NAMESPACE "kvm_bonds"
 /** NVS limits a namespace name to 15 characters. */
 #define DOUBTECH_HID_BOND_NAMESPACE_MAX_CHARS 15
