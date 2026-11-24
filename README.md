@@ -138,7 +138,7 @@ The script loads ESP-IDF, runs `idf.py -C firmware set-target esp32s3` only when
 4. `-Full` runs `idf.py flash` instead and also writes the bootloader, partition table and OTA data. Use it only when those must change: the first flash of a blank board, or after the partition table (`firmware/partitions.csv`) or bootloader changed. It still never erases flash, and it does not write the NVS partition (offset `0x9000`), so bonds survive it too.
 5. Restart the desktop app. It starts a fresh USB session; the board reports `Local` with input disarmed.
 
-The free-port path of the busy check (the live `ports` listing and the check before `flash`) has not been proven on hardware yet and may reset the board.
+The live `ports` listing and the busy check before `flash` open the port and may reset the board (BLE links drop if so). Both ran on the owner's board on 2026-11-24 with the desktop app stopped: `ports` reported `COM4  303A:1001  free (opens exclusively)`, and `flash -Port COM4` completed. Automatic port selection (no `-Port`) had a bug on that run: with exactly one board it tried to open a port called `C`. It is fixed in `tools/firmware.ps1` and covered by `tools/tests/test-firmware-script.ps1`, and has been checked only as a dry run since the fix.
 
 In-app update: the desktop app has no firmware-update screen today. The building blocks are in the repository (`update-core` preflight, the host actor's `prepare_update`, `update-runner` for app-only flashing, and `tools/package_release.py`), but nothing in the app calls them. Packaging a release, its manifest and its remaining gates are in [docs/Designs/release](docs/Designs/release/README.md) and [the update preflight](docs/Designs/update/host-update-preflight.md). Use `tools/firmware.ps1` to install firmware.
 
@@ -218,20 +218,24 @@ Verified means run on 2026-11-24 in this review. Commands that were not run are 
 
 | Command | Status |
 | --- | --- |
-| `cargo fmt --all -- --check` | verified 2026-11-24, with a finding: exits 1 on this checkout with rustc 1.94.0 (formatting differences in 8 files under `crates/`, none edited by this work). CI pins 1.93.1, which was not installed here, so whether CI sees the same differences was not checked. |
+| `cargo fmt --all -- --check` | verified 2026-11-24, with a finding: exits 1 on this checkout with rustc 1.94.0 (formatting differences in 7 files under `crates/` that this work does not touch; one formatting slip in a regression test added with this work was fixed). CI pins 1.93.1 and reports the same failure, so it is not a local-toolchain artifact. The release test (`tests/release`) also fails in CI: it passes `--desktop-version 0.1.0` while the repository is at 0.1.1. |
 | `cargo check --workspace` | verified 2026-11-24 (exit 0). |
 | `npm run build` in `apps/desktop` | verified 2026-11-24 (exit 0, Node v24.13.1, npm 11.8.0). |
 | `tools/firmware.ps1 build` | verified 2026-11-24 (exit 0, 1010912-byte app image). |
 | `tools/firmware.ps1 ports -DryRun` | verified 2026-11-24 (listed `COM4  303A:1001  busy: not checked (dry run)`). |
 | `tools/firmware.ps1 flash -DryRun -Port COM9` | verified 2026-11-24 (printed `idf.py -C firmware -p COM9 app-flash`). |
+| `tools/firmware.ps1 flash -DryRun` with one board attached and no `-Port` | verified 2026-11-24 after the auto-select fix (printed `idf.py -C firmware -p COM4 app-flash`, exit 0). |
+| `tools/firmware.ps1 ports` (live, desktop app stopped) | verified 2026-11-24 on the owner's board (`COM4  303A:1001  free (opens exclusively)`). |
+| `tools/firmware.ps1 flash -Port COM4` (live, app partition only) | verified 2026-11-24 on the owner's board: ESP32-S3 (QFN56) rev v0.2, 1011904 bytes written at `0x20000`, `Hash of data verified`, hard reset via RTS; NVS (`0x9000`) was not written, and both paired guests reconnected afterwards without re-pairing. |
 | The five C suites (`doubtech_hid/tests/run-msvc.ps1`, `firmware/tests/pairing`, `router`, `integration`, `display`) | verified 2026-11-24 (all PASS). |
 | `check-product-names.ps1`, `check-api-docs.ps1`, `tools/tests/test-firmware-script.ps1` | verified 2026-11-24 (all exit 0). |
 | `npm ci` | not run in this review (it deletes and recreates `node_modules` in the working tree). |
 | `npm run tauri dev` | not run in this review (opens the app and a dev server). |
 | `npm run tauri -- build --bundles msi --ci --no-sign` and `cargo tauri build ...` | not run in this review (builds an installer). |
 | `msiexec /i ...` and `reg delete ...` | not run in this review (change the installed software and registry). |
-| `tools/firmware.ps1 ports` (without `-DryRun`) and any `tools/firmware.ps1 flash` | not run in this review (open the serial port, may reset the board and drop its Bluetooth links, and flashing changes the device). |
-| `cargo build --workspace --release`, `cargo clippy ...`, `cargo test ...` (all), the vector generator, `npx tsc --noEmit`, the Node `--test` command, the Python `unittest` commands, `rustup show`, `rustup toolchain install` | not run in this review (outside the verification set for this pass). `npm run build` covers `tsc --noEmit` for the desktop. |
+| `tools/firmware.ps1 flash -Full` | not run in this review (rewrites the bootloader, partition table and OTA data; only the app-partition `flash` was run, see above). |
+| `cargo test --workspace` | verified 2026-11-24 on the final tree (40 test suites, 0 failures). |
+| `cargo build --workspace --release`, `cargo clippy ...`, the vector generator, `npx tsc --noEmit`, the Node `--test` command, the Python `unittest` commands, `rustup show`, `rustup toolchain install` | not run in this review (outside the verification set for this pass). `npm run build` covers `tsc --noEmit` for the desktop. |
 
 ## Safety boundary
 

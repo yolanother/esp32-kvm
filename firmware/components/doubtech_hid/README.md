@@ -109,10 +109,11 @@ repository's firmware, tests, CI, recovery) are in the
    hosts must survive.
 
 Verification status of the commands above (2026-11-24): `tools/firmware.ps1 build`,
-`ports -DryRun` and `flash -DryRun -Port COM9` were run and passed. A real `flash` and a
-live `ports` were not run in this review (they open the serial port, may reset the board
-and change the device). The CMake and `idf.py` forms for a separate project were not run
-(this repository's own build was).
+`ports -DryRun` and `flash -DryRun -Port COM9` were run and passed. On the same date a live
+`ports` and a real `flash -Port COM4` (app partition only) were run on the owner's board and
+succeeded; the root README's verification table has the details. `flash -Full` was not run.
+The CMake and `idf.py` forms for a separate project were not run (this repository's own
+build was).
 
 ## Tests
 
