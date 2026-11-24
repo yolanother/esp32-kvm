@@ -370,8 +370,7 @@ fn status_slot_notification_counter_accepts_full_u32_range() {
         payload.extend_from_slice(&[4, 0, 5, 0, 6, 0xa1, 1, 0]);
         let frame = Frame::new(MessageKind::Status, 5, 1, 0, payload);
         let encoded = frame.encode().unwrap();
-        let decoded =
-            Frame::decode_decoded(&cobs_decode(&encoded[..encoded.len() - 1]).unwrap());
+        let decoded = Frame::decode_decoded(&cobs_decode(&encoded[..encoded.len() - 1]).unwrap());
         assert_eq!(decoded, Ok(frame), "counter {counter}");
     }
 }
