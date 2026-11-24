@@ -34,15 +34,15 @@ The Rust toolchain channel is selected in `rust-toolchain.toml`; JavaScript depe
 
 ## Firmware build
 
-Install ESP-IDF for ESP32-S3 using the official Windows installer, open its ESP-IDF PowerShell environment, then run:
+Install ESP-IDF v5.5.1 for ESP32-S3 (the script looks in `IDF_PATH`, `D:\esp\esp-idf-v5.5.1`, then `%USERPROFILE%\esp\esp-idf-v5.5.1`), then from the repository root in PowerShell:
 
 ```powershell
-cd firmware
-idf.py set-target esp32s3
-idf.py build
+pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 build
+pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 ports
+pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 flash [-Port COMn] [-Full] [-DryRun]
 ```
 
-The firmware entry point only logs that routing is disabled. Do not flash this scaffold expecting BLE input. An exact ESP-IDF version, board pin map, boot recovery procedure, and hardware build result will be recorded by M0 board bring-up; the toolchain has not yet been validated here.
+`flash` writes the application image only (`-Full` writes all images) and never erases flash. Quit the desktop app first, because it owns the serial port. The full README rewrite is tracked separately.
 
 ## Safety boundary
 
