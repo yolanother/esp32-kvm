@@ -3,7 +3,7 @@
 # Windows with installed MSVC and Windows SDK headers, without device access.
 $ErrorActionPreference = 'Stop'
 $testNames = if ($args.Count) { $args } else { @('test_hid_report', 'test_hid_gatt', 'test_hid_guest', 'test_hid_keyboard_diag', 'test_hid_keyboard_gatt', 'test_hid_discovery', 'test_hid_official_diag', 'test_auto_pairing') }
-$repo = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
 $msvcRoot = 'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC'
 $kitRoot = 'C:/Program Files (x86)/Windows Kits/10'
 $msvc = Get-ChildItem -LiteralPath $msvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
@@ -15,8 +15,9 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
 $includes = @(
     "/I$($msvc.FullName)/include",
     "/I$($kit.FullName)/ucrt",
-    "/I$repo/firmware/components/hid",
-    "/I$repo/firmware/tests/hid/mocks"
+    "/I$repo/firmware/components/doubtech_hid/core",
+    "/I$repo/firmware/components/doubtech_hid/ble",
+    "/I$repo/firmware/components/doubtech_hid/tests/mocks"
 )
 $libraries = @(
     "/LIBPATH:$($msvc.FullName)/lib/x64",
@@ -26,19 +27,19 @@ $libraries = @(
 foreach ($name in $testNames) {
     $sources = @(
         (Join-Path $PSScriptRoot "$name.c"),
-        (Join-Path $repo 'firmware/components/hid/hid_report.c')
+        (Join-Path $repo 'firmware/components/doubtech_hid/core/hid_report.c')
     )
     if ($name -eq 'test_hid_gatt' -or $name -eq 'test_hid_keyboard_gatt') {
-        $sources += (Join-Path $repo 'firmware/components/hid/hid_gatt.c')
+        $sources += (Join-Path $repo 'firmware/components/doubtech_hid/ble/hid_gatt.c')
     }
     if ($name -eq 'test_hid_official_diag') {
-        $sources += (Join-Path $repo 'firmware/components/hid/hid_gatt_official_diag.c')
+        $sources += (Join-Path $repo 'firmware/components/doubtech_hid/ble/hid_gatt_official_diag.c')
     }
     if ($name -eq 'test_hid_guest' -or $name -eq 'test_auto_pairing' -or $name -eq 'test_hid_discovery') {
-        $sources += (Join-Path $repo 'firmware/components/hid/hid_guest.c')
-        $sources += (Join-Path $repo 'firmware/components/hid/hid_guest_rpc.c')
-        $sources += (Join-Path $repo 'firmware/components/hid/hid_pairing.c')
-        $sources += (Join-Path $repo 'firmware/components/hid/hid_pairing_store.c')
+        $sources += (Join-Path $repo 'firmware/components/doubtech_hid/ble/hid_guest.c')
+        $sources += (Join-Path $repo 'firmware/components/doubtech_hid/ble/hid_guest_rpc.c')
+        $sources += (Join-Path $repo 'firmware/components/doubtech_hid/core/hid_pairing.c')
+        $sources += (Join-Path $repo 'firmware/components/doubtech_hid/ble/hid_pairing_store.c')
     }
     [string[]]$defines = @(if ($name -eq 'test_hid_keyboard_diag' -or $name -eq 'test_hid_keyboard_gatt' -or $name -eq 'test_hid_discovery' -or $name -eq 'test_hid_official_diag') { '/DCONFIG_KVM_HID_KEYBOARD_ONLY_DIAGNOSTIC=1' })
     & $compiler /nologo /W4 /WX /std:c11 /experimental:c11atomics @defines @includes @sources "/Fo:$output/" "/Fe:$output/$name.exe" /link @libraries

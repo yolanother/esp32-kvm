@@ -1,0 +1,4 @@
+version: "0.1.0"
+description: "Composite BLE HID-over-GATT keyboard, mouse and consumer-control service for ESP-IDF NimBLE"
+dependencies:
+  idf: ">=5.5"

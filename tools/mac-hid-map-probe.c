@@ -1,7 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Check whether macOS accepts the firmware's exact HID report map without BLE.
- * Build: clang -I firmware/components/hid tools/mac-hid-map-probe.c \
- *        firmware/components/hid/hid_report.c -framework IOKit \
+ * Build: clang -I firmware/components/doubtech_hid/core tools/mac-hid-map-probe.c \
+ *        firmware/components/doubtech_hid/core/hid_report.c -framework IOKit \
  *        -framework CoreFoundation -o /tmp/mac-hid-map-probe
  * Run: /tmp/mac-hid-map-probe & sleep 2; hidutil list | grep 'ESP32 KVM Map Probe'; wait
  */
