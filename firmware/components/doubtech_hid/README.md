@@ -7,7 +7,7 @@ map, the GATT services, numeric-comparison pairing, bond storage and a fail-safe
 per-link output gate, and exposes a small API. It does not choose which host receives
 input; the embedding firmware does.
 
-Current KVM firmware identity: configured in `firmware/main/main.c` as name "ESP32 KVM", manufacturer "ESP32 KVM", model "ESP32 KVM S3", default bond namespace.
+Current KVM firmware identity: configured in `firmware/main/main.c` as name "DoubTech HID", manufacturer "DoubTech", model "DoubTech HID", default bond namespace.
 
 Documentation (under `docs/Designs/doubtech-hid/` at the repository root):
 

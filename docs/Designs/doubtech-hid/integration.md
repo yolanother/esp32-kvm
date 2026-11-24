@@ -5,7 +5,7 @@ advertises, pairs and sends keyboard, mouse and consumer reports. It assumes you
 nothing else in this repository. Function details are in [api.md](api.md); the design is in
 [the architecture](README.md).
 
-Current KVM firmware identity: configured in `firmware/main/main.c` as name "ESP32 KVM", manufacturer "ESP32 KVM", model "ESP32 KVM S3", default bond namespace.
+Current KVM firmware identity: configured in `firmware/main/main.c` as name "DoubTech HID", manufacturer "DoubTech", model "DoubTech HID", default bond namespace.
 
 The component targets ESP-IDF 5.5 or newer (`idf_component.yml`: `idf: ">=5.5"`). This
 repository builds it with v5.5.1 for the `esp32s3` target. It has not been built for any

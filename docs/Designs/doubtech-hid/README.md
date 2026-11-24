@@ -11,7 +11,7 @@ Quick start: [component README](../../../firmware/components/doubtech_hid/README
 Function reference: [api.md](api.md). Wiring it into a firmware project:
 [integration.md](integration.md).
 
-Current KVM firmware identity: configured in `firmware/main/main.c` as name "ESP32 KVM", manufacturer "ESP32 KVM", model "ESP32 KVM S3", default bond namespace.
+Current KVM firmware identity: configured in `firmware/main/main.c` as name "DoubTech HID", manufacturer "DoubTech", model "DoubTech HID", default bond namespace.
 
 ## Roles
 

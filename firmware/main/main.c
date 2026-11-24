@@ -9,8 +9,13 @@
 #include "display_labels.h"
 #include "transport_usb_serial_jtag.h"
 
-/* Keeps the on-air identity and bond table of the shipped firmware. */
-static const doubtech_hid_config_t hid_config = {"ESP32 KVM", "ESP32 KVM", "ESP32 KVM S3", NULL};
+/* Advertises as "DoubTech HID"; the NULL bond namespace keeps the shipped firmware's kvm_bonds table so paired computers stay paired. */
+static const doubtech_hid_config_t hid_config = {
+    .device_name = "DoubTech HID",
+    .manufacturer = "DoubTech",
+    .model = "DoubTech HID",
+    .bond_namespace = NULL,
+};
 
 /** Starts services; any startup error leaves the routing gate disarmed. */
 void app_main(void)

@@ -151,7 +151,7 @@ In-app update: the desktop app has no firmware-update screen today. The building
 
 Details: [desktop pairing wizard](docs/Designs/desktop-pairing/README.md), [pairing and bond identity](docs/Designs/pairing/README.md), and the library's [integration guide](docs/Designs/doubtech-hid/integration.md) for device naming.
 
-Current KVM firmware identity: configured in `firmware/main/main.c` as name "ESP32 KVM", manufacturer "ESP32 KVM", model "ESP32 KVM S3", default bond namespace.
+Current KVM firmware identity: configured in `firmware/main/main.c` as name "DoubTech HID", manufacturer "DoubTech", model "DoubTech HID", default bond namespace.
 
 If a guest previously paired under another name, forget the device in the guest's Bluetooth settings before pairing again; hosts cache names and GATT data.
 
