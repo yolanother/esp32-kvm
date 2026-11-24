@@ -30,35 +30,44 @@ static void config_null_uses_defaults(void)
     assert(strcmp(dis_manufacturer, "DoubTech") == 0 && strcmp(dis_model, "BLE HID") == 0);
 }
 
-static void name_exactly_20_bytes_accepted(void)
+static void name_exactly_18_bytes_accepted(void)
 {
-    char name[] = "12345678901234567890";
+    char name[] = "123456789012345678";
     doubtech_hid_config_t config = {name, NULL, NULL, NULL};
     check_gap_name = false;
     assert(doubtech_hid_start(&config) == 0);
     memset(name, 'x', sizeof(name) - 1); /* The library keeps its own copy. */
     ble_hs_cfg.sync_cb();
-    assert(adv_name_len == 20 && memcmp(adv_name, "12345678901234567890", 20) == 0);
-    assert(strcmp(gap_name, "12345678901234567890") == 0);
+    assert(adv_name_len == 18 && memcmp(adv_name, "123456789012345678", 18) == 0);
+    assert(strcmp(gap_name, "123456789012345678") == 0);
 }
 
-static void name_21_bytes_rejected(void) { reject_name("123456789012345678901"); }
+static void name_19_bytes_rejected(void) { reject_name("1234567890123456789"); }
 static void name_empty_rejected(void) { reject_name(""); }
+
+static void max_length_name_fits_advertising_packet(void)
+{
+    doubtech_hid_config_t config = {"123456789012345678", NULL, NULL, NULL};
+    check_gap_name = false;
+    assert(doubtech_hid_start(&config) == 0);
+    ble_hs_cfg.sync_cb();
+    assert(adv_name_len == 18 && adv_payload_bytes == 3 + 4 + 4 + 2 + 18);
+    assert(adv_payload_bytes <= 31);
+}
 
 static void name_multibyte_counts_bytes(void)
 {
-    /* Twelve two-byte characters are 24 bytes. */
-    reject_name("\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9");
+    reject_name("\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9"); /* Ten two-byte characters are 20 bytes. */
 }
 
-static void name_multibyte_20_bytes_accepted(void)
+static void name_multibyte_18_bytes_accepted(void)
 {
-    const char *name = "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9";
+    const char *name = "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9"; /* Nine two-byte characters are 18 bytes. */
     doubtech_hid_config_t config = {name, NULL, NULL, NULL};
     check_gap_name = false;
     assert(doubtech_hid_start(&config) == 0);
     ble_hs_cfg.sync_cb();
-    assert(adv_name_len == 20 && memcmp(adv_name, name, 20) == 0);
+    assert(adv_name_len == 18 && memcmp(adv_name, name, 18) == 0);
 }
 
 static void dis_strings_bounded(void)
@@ -133,11 +142,12 @@ int main(int argc, char **argv)
 {
     static const struct { const char *name; void (*run)(void); } cases[] = {
         {"config_null_uses_defaults", config_null_uses_defaults},
-        {"name_exactly_20_bytes_accepted", name_exactly_20_bytes_accepted},
-        {"name_21_bytes_rejected", name_21_bytes_rejected},
+        {"name_exactly_18_bytes_accepted", name_exactly_18_bytes_accepted},
+        {"name_19_bytes_rejected", name_19_bytes_rejected},
         {"name_empty_rejected", name_empty_rejected},
+        {"max_length_name_fits_advertising_packet", max_length_name_fits_advertising_packet},
         {"name_multibyte_counts_bytes", name_multibyte_counts_bytes},
-        {"name_multibyte_20_bytes_accepted", name_multibyte_20_bytes_accepted},
+        {"name_multibyte_18_bytes_accepted", name_multibyte_18_bytes_accepted},
         {"dis_strings_bounded", dis_strings_bounded},
         {"advertised_name_and_dis_follow_config", advertised_name_and_dis_follow_config},
         {"legacy_identity_is_unchanged", legacy_identity_is_unchanged},

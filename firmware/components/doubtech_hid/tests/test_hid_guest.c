@@ -35,7 +35,7 @@ static unsigned security_requests;
 static unsigned deleted_peers;
 static unsigned nvs_opens, adv_field_sets, gatt_registrations;
 static char adv_name[32], gap_name[32], dis_manufacturer[64], dis_model[64];
-static size_t adv_name_len;
+static size_t adv_name_len, adv_payload_bytes;
 static bool check_gap_name = true;
 static const doubtech_hid_config_t legacy_config = {"ESP32 KVM", "ESP32 KVM", "ESP32 KVM S3", NULL};
 
@@ -129,6 +129,8 @@ int ble_sm_inject_io(uint16_t handle, struct ble_sm_io *io)
 int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *fields)
 { assert(fields->num_uuids16 == 1 && fields->uuids16[0].value == 0x1812);
   adv_field_sets++; adv_name_len = fields->name_len;
+  adv_payload_bytes = (fields->flags ? 3 : 0) + 2 + 2u * fields->num_uuids16 +
+                      (fields->appearance_is_present ? 4 : 0) + 2 + fields->name_len;
   snprintf(adv_name, sizeof(adv_name), "%.*s", (int)fields->name_len, (const char *)fields->name); return 0; }
 int ble_gap_adv_start(uint8_t type, const void *address, uint32_t duration,
                      const struct ble_gap_adv_params *parameters,

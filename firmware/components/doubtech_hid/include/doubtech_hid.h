@@ -23,8 +23,10 @@
 #define DOUBTECH_HID_TOKEN_LEN 16
 /** Length of one keyboard input report; must equal the internal HID_KEYBOARD_REPORT_LEN. */
 #define DOUBTECH_HID_KEYBOARD_REPORT_LEN 8
-/** Longest advertised and GAP device name in bytes (not characters). */
-#define DOUBTECH_HID_NAME_MAX_BYTES 20
+/** Longest advertised and GAP device name in bytes (not characters): the 31-byte
+ * advertising payload less flags (3), HID UUID16 (4), appearance (4) and the
+ * name header (2). */
+#define DOUBTECH_HID_NAME_MAX_BYTES 18
 /** Longest Device Information manufacturer or model string in bytes. */
 #define DOUBTECH_HID_DIS_STRING_MAX_BYTES 32
 

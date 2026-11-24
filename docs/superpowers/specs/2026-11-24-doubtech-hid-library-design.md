@@ -148,8 +148,8 @@ the port is complete and verified, mirroring the baseline checkpoint.
 ## Resolutions from design review (all are the author's calls)
 
 Name length (call). The advertising payload is flags (3) + HID UUID (4) + appearance (4)
-+ name header (2) + name bytes, within 31 bytes, so a name may be at most 20 bytes.
-"DoubTech HID" is 12 bytes (25 total, currently 22). The library rejects a longer name
++ name header (2) = 13 bytes of overhead, so within the 31-byte payload a name may be at most 18 bytes.
+"DoubTech HID" is 12 bytes (25 total, currently 22 for "ESP32 KVM"). The library rejects a longer name
 at start-up with an error. It never truncates and never moves the name to the scan
 response, so advertising content stays as it is today. A test covers the limit.
 

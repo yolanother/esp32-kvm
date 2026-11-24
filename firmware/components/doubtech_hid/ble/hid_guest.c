@@ -514,6 +514,10 @@ static void host_task(void *argument)
     nimble_port_freertos_deinit();
 }
 
+/* Flags (3) + HID UUID16 (4) + appearance (4) + name header (2) + name. */
+_Static_assert(3 + 4 + 4 + 2 + DOUBTECH_HID_NAME_MAX_BYTES <= 31,
+               "advertised name must fit the 31-byte legacy advertising payload");
+
 static bool valid_length(const char *text, size_t maximum)
 {
     size_t length = strlen(text);
