@@ -42,7 +42,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 ports
 pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 flash [-Port COMn] [-Full] [-DryRun]
 ```
 
-`flash` writes the application image only (`-Full` writes all images) and never erases flash. Quit the desktop app first, because it owns the serial port. The full README rewrite is tracked separately.
+`flash` writes the application image only (`-Full` writes all images) and never erases flash. Quit the desktop app first, because it owns the serial port. `ports` and the flash busy check open the port and may reset the board; BLE links drop if so. The full README rewrite is tracked separately.
 
 ## Safety boundary
 

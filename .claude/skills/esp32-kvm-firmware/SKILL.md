@@ -14,7 +14,9 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 flash [-Port CO
 pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 flash -Full [-Port COMn]
 ```
 
-Add `-DryRun` to any action to print the resolved `idf.py` command lines without running them.
+Add `-DryRun` to print the resolved `idf.py` command lines without running them; for `ports` it lists the detected boards but skips the busy probe (prints "busy: not checked (dry run)").
+
+`ports` and the flash busy check open the port and may reset the board; BLE links drop if so.
 
 ## When
 

@@ -48,6 +48,11 @@ $many = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts 'COM7,COM8'
 Assert-That ($many.Code -ne 0) 'flash with several boards and no -Port exits non-zero'
 Assert-That ($many.Output -match 'COM7' -and $many.Output -match 'COM8') 'multiple-board message lists the ports'
 
+$ports = Invoke-Firmware -Arguments @('ports', '-DryRun') -FakePorts 'COM9'
+Assert-That ($ports.Code -eq 0) 'ports -DryRun exits 0'
+Assert-That ($ports.Output -match 'COM9') 'ports -DryRun lists COM9'
+Assert-That ($ports.Output -match 'not checked') 'ports -DryRun skips the busy probe'
+
 if ($failures -gt 0) { Write-Host "$failures assertion(s) failed"; exit 1 }
 Write-Host 'All firmware script checks passed'
 exit 0

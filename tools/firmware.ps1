@@ -3,6 +3,7 @@
 #
 # Usage: tools/firmware.ps1 <build|flash|ports> [-Port COMn] [-Full] [-DryRun]
 #   flash runs app-flash by default; -Full runs flash (all images). No erase option is ever passed.
+# Warning: ports and the flash busy check open the port and may reset the board; BLE links drop if so.
 # Test-only: ESP32_KVM_FAKE_PORTS (comma-separated port names, empty for none) replaces port detection.
 [CmdletBinding()]
 param(
@@ -97,7 +98,7 @@ switch ($Action) {
             exit 0
         }
         foreach ($name in $ports) {
-            $state = if (Test-PortBusy $name) { 'busy (cannot open exclusively)' } else { 'free (opens exclusively)' }
+            $state = if ($DryRun) { 'busy: not checked (dry run)' } elseif (Test-PortBusy $name) { 'busy (cannot open exclusively)' } else { 'free (opens exclusively)' }
             Write-Host "$name  $usbId  $state"
         }
     }
