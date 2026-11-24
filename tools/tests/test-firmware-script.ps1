@@ -53,6 +53,15 @@ Assert-That ($ports.Code -eq 0) 'ports -DryRun exits 0'
 Assert-That ($ports.Output -match 'COM9') 'ports -DryRun lists COM9'
 Assert-That ($ports.Output -match 'not checked') 'ports -DryRun skips the busy probe'
 
+$one = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts 'COM4'
+Assert-That ($one.Code -eq 0) 'flash -DryRun with exactly one board and no -Port exits 0'
+Assert-That ($one.Output -match '-p COM4(\s|$)') 'single board is auto-selected as -p COM4'
+Assert-That ($one.Output -notmatch '-p C(\s|$)') 'single board name is not unrolled to its first character'
+
+$onePorts = Invoke-Firmware -Arguments @('ports', '-DryRun') -FakePorts 'COM4'
+Assert-That ($onePorts.Code -eq 0) 'ports -DryRun with one board exits 0'
+Assert-That ($onePorts.Output -match '(?m)^COM4\s' -and $onePorts.Output -notmatch '(?m)^C\s') 'ports -DryRun lists COM4, not a lone C'
+
 if ($failures -gt 0) { Write-Host "$failures assertion(s) failed"; exit 1 }
 Write-Host 'All firmware script checks passed'
 exit 0

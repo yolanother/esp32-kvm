@@ -92,7 +92,7 @@ Set-Location $repoRoot
 
 switch ($Action) {
     'ports' {
-        $ports = Get-BoardPorts
+        $ports = @(Get-BoardPorts)
         if ($ports.Count -eq 0) {
             Write-Host "No serial ports with USB id $usbId found."
             exit 0
@@ -117,7 +117,7 @@ switch ($Action) {
     }
     'flash' {
         if (-not $Port) {
-            $ports = Get-BoardPorts
+            $ports = @(Get-BoardPorts)
             if ($ports.Count -eq 0) {
                 Stop-Script "No board with USB id $usbId found. Connect the board or pass -Port COMn."
             }
