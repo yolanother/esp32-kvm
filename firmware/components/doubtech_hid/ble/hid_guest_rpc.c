@@ -1,8 +1,8 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
  * Serializes bounded HID ready, arm, release, and report requests from the
- * USB worker onto NimBLE's host loop. A timed-out request fails closed and
+ * application task onto NimBLE's host loop. A timed-out request fails closed and
  * queues a disconnect; pairing commands use the same bounded host-loop bridge
- * and no HID or pairing state is read on the USB worker. Confirmed bond
+ * and no HID or pairing state is read on the application task. Confirmed bond
  * deletion uses the same bounded bridge and preserves opaque token bytes.
  * Each HID request carries its one-based target slot. Live-slot and retained
  * inventory lookups copy only opaque tokens into the requesting worker;

@@ -114,12 +114,12 @@ Event kinds delivered to the event sink. The constants:
 | `DOUBTECH_HID_PAIRING_REJECTED` | A challenge failed, was rejected, or its link dropped; or a numeric comparison could not open a window. | The link. | 0 | |
 | `DOUBTECH_HID_PAIRING_CAPACITY` | A window was requested but eight bonds are already stored. | 0 | 0 | |
 | `DOUBTECH_HID_PAIRING_TIMEOUT` | The window expired. | 0 | 0 | |
-| `DOUBTECH_HID_DISCONNECTED` | A slot's link closed, or the NimBLE host reset. | The closed link (0 after a host reset). | The one-based slot that closed (0 after a host reset). | Header comment: signals a USB worker to clear a cached connected-token STATUS. |
+| `DOUBTECH_HID_DISCONNECTED` | A slot's link closed, or the NimBLE host reset. | The closed link (0 after a host reset). | The one-based slot that closed (0 after a host reset). | Header comment: the application can drop per-slot state it cached. |
 
-The header comment says `number` is present only for CHALLENGE; the source also
-puts the closed slot in `number` for a `DOUBTECH_HID_DISCONNECTED` caused by a link
-closing (`publish(..., disconnected_slot, ...)` in the `BLE_GAP_EVENT_DISCONNECT`
-case of `hid_guest.c`).
+`number` is the six-digit value for CHALLENGE and the one-based slot that closed for
+DISCONNECTED (`publish(..., disconnected_slot, ...)` in the `BLE_GAP_EVENT_DISCONNECT`
+case of `hid_guest.c`); a host reset publishes DISCONNECTED with `number` 0 (`on_reset`).
+The header comment says the same. Every other event leaves `number` 0.
 
 ### `doubtech_hid_pairing_event_t`
 
@@ -208,9 +208,13 @@ first).
 
 ### `void doubtech_hid_pairing_set_events(doubtech_hid_pairing_event_fn callback, void *context)`
 
-Stores the event sink and its context. Call it before `doubtech_hid_start`.
-`callback` may be `NULL` (no events). Nothing synchronizes this call, so do not
-change it while the service runs.
+Stores the event sink and its context. `callback` may be `NULL` (no events). The
+two values are plain variables read on the NimBLE host task when an event is
+published; nothing synchronizes the write. Setting the sink before
+`doubtech_hid_start` is the race-free order. Setting it after start is allowed (this
+repository's transport does, with a `NULL` context): events published before the call
+are dropped, and a write that overlaps a publish can pair the new callback with the old
+context, so set it once and do not change it while links are active.
 
 Required for pairing: `doubtech_hid_pairing_open` returns `ESP_ERR_INVALID_STATE`
 without a sink, and a guest-initiated numeric comparison depends on it (it opens
@@ -411,7 +415,9 @@ an application decide a pairing.
 
 Copies the token of the peer on slot 1 into the caller's 16 bytes. `output` is cleared
 first and stays cleared on any failure; `NULL` returns `false`. Never returns an
-address or key material.
+address or key material. It is a slot-1 request: a request
+that times out queues a disconnect of guest 1 (the timeout path at the end of `request`
+in `ble/hid_guest_rpc.c`).
 
 ### `bool doubtech_hid_request_slots(doubtech_hid_slot_t output[DOUBTECH_HID_MAX_CONNECTIONS])`
 

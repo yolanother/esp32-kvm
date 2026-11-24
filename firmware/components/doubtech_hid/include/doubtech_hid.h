@@ -3,7 +3,7 @@
  * HID startup for hardware bring-up. Callers must verify board recovery and
  * explicitly start the service before it can advertise or accept a guest. It
  * also exposes bounded NimBLE host-loop pairing requests and short status
- * events. Host/USB routes through one selected channel at a time. A bounded
+ * events. An application can route input to one selected slot at a time. A bounded
  * host-loop snapshot exposes each authenticated live peer's opaque token and
  * readiness; retained inventory uses the same serialized bridge. */
 #ifndef DOUBTECH_HID_H
@@ -19,7 +19,7 @@
 #define DOUBTECH_HID_MAX_CONNECTIONS 3
 /** Maximum retained bond tokens. */
 #define DOUBTECH_HID_MAX_BONDS 8
-/** Exactly 16 opaque bytes in protocol v1 STATUS and FORGET_BOND. */
+/** Exactly 16 opaque bytes; the application chooses their meaning. */
 #define DOUBTECH_HID_TOKEN_LEN 16
 /** Length of one keyboard input report; must equal the internal HID_KEYBOARD_REPORT_LEN. */
 #define DOUBTECH_HID_KEYBOARD_REPORT_LEN 8
@@ -52,11 +52,11 @@ typedef enum {
     DOUBTECH_HID_PAIRING_REJECTED,
     DOUBTECH_HID_PAIRING_CAPACITY,
     DOUBTECH_HID_PAIRING_TIMEOUT,
-    /** Signals the USB worker to clear its connected-token STATUS cache. */
+    /** A link closed or the host reset; the application can drop per-slot state it cached. */
     DOUBTECH_HID_DISCONNECTED
 } doubtech_hid_pairing_event_type_t;
 
-/** Status event; number is present only for CHALLENGE, token only for BONDED. */
+/** Status event; number is the challenge value for CHALLENGE and the one-based slot that closed for DISCONNECTED (0 after a host reset), token only for BONDED. */
 typedef struct {
     doubtech_hid_pairing_event_type_t type;
     uint16_t connection_handle;

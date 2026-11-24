@@ -173,7 +173,8 @@ layer holds the selected slot and forwards. The pattern used by this repository'
 `firmware/components/transport/router_hid_bridge.c`:
 
 - ready check: `doubtech_hid_request_ready_slot(slot)`, plus `doubtech_hid_request_slots`
-  sampled about once a second for status;
+  sampled about once a second for status (this repository does that in
+  `firmware/components/transport/transport_usb_serial_jtag.c`, not in `router_hid_bridge.c`);
 - switch to a slot: release the old slot (`doubtech_hid_request_release_slot`), then arm
   the new one (`doubtech_hid_request_arm_slot`); arm is the authoritative transition and
   fails if the slot is not ready or already armed;

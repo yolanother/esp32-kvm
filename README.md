@@ -6,7 +6,7 @@ ESP32 KVM shares a Windows host's physical keyboard and mouse with selected Blue
 
 This is a working trial build, not a released product. The pieces exist and have source-level tests:
 
-- Firmware (ESP-IDF, ESP32-S3): USB Serial/JTAG protocol transport, routing with a fail-local policy, a three-link BLE HID service with numeric-comparison pairing and eight stored bonds (the reusable [`doubtech_hid` library](firmware/components/doubtech_hid/README.md)), and an opt-in 240x240 status display.
+- Firmware (ESP-IDF, ESP32-S3): USB Serial/JTAG protocol transport, routing with a fail-local policy, a three-link BLE HID service with numeric-comparison pairing and eight stored bonds (the reusable [`doubtech_hid` library](firmware/components/doubtech_hid/README.md)), and a 240x240 status display (the Kconfig options default to off; `firmware/sdkconfig.defaults` turns on the Waveshare panel and CST816 touch for the validated board).
 - Desktop (Tauri 2, React/TypeScript): setup and guest-pairing wizard, dashboard and tray, per-guest key mapping and layout editors, a configurable switch shortcut, and the Windows capture adapter.
 - Release packaging of an app-only firmware image and an MSI (`tools/package_release.py`).
 
@@ -205,6 +205,7 @@ If a flash is interrupted or the board no longer enumerates, do not retry blindl
 | `Several boards with USB id 303A:1001 found` | Pass `-Port COMn`. |
 | `ESP-IDF not found. Set IDF_PATH or install ESP-IDF v5.5.1 at D:\esp\esp-idf-v5.5.1.` | Install v5.5.1 or set `IDF_PATH` to a folder that contains `export.ps1`. |
 | Build fails, or old `sdkconfig` values appear | Re-run the build once. If you edited `firmware/sdkconfig.defaults`, delete the generated, git-ignored `firmware/sdkconfig` and build again. |
+| Local GATT trace stopped logging after the Kconfig rename | The symbols were renamed from `CONFIG_KVM_HID_*` to `CONFIG_DOUBTECH_HID_*`. A local `sdkconfig` with the old names is migrated automatically through `firmware/main/sdkconfig.rename`; check with `grep DOUBTECH_HID firmware/sdkconfig`. |
 | `cargo`, `npm` or `node` not found in Git Bash | Add the cargo and Node directories to PATH as shown under Prerequisites. |
 | Bonds missing after flashing | `flash` and `flash -Full` do not erase NVS. Look for a changed bond namespace, an erased NVS partition (for example a manual full erase with another tool), or a guest that forgot the device: forget the device on the guest and pair again. See [the integration guide](docs/Designs/doubtech-hid/integration.md). |
 | Input is local after Windows sleep or resume | By design the host fails local and needs a new verified USB session and a physical all-up observation after resume before guest routing can arm again ([recovery](docs/Designs/recovery/README.md)). Select the guest again. The native sleep/resume check on hardware is still pending. |

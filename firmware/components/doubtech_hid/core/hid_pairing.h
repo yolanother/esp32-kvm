@@ -19,7 +19,7 @@
 
 /** A resolved BLE peer identity; never use a rotating over-the-air address. */
 typedef struct { uint8_t type; uint8_t address[6]; } hid_peer_t;
-/** Exactly 16 opaque bytes in protocol v1 STATUS and FORGET_BOND. */
+/** Exactly 16 opaque bytes; the application chooses their meaning. */
 typedef doubtech_hid_token_t hid_token_t;
 /** An identity and opaque application token persisted separately from BLE keys. */
 typedef struct { hid_peer_t peer; hid_token_t token; } hid_bond_t;

@@ -40,7 +40,8 @@ firmware/components/doubtech_hid/
 
 - `include/` is the contract. Everything else is private (`PRIV_INCLUDE_DIRS`:
   `core`, `ble`). The component `REQUIRES bt nvs_flash esp_timer`.
-- `core/` has no NimBLE or ESP-IDF includes, so the report gate and the pairing policy
+- `core/` has no NimBLE includes and no ESP-IDF include of its own beyond `esp_err.h`, which
+  arrives through the public header `hid_pairing.h` includes, so the report gate and the pairing policy
   run in the PC tests exactly as they run on the board. `hid_report.c` reads
   `CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC` to select a smaller report map and also
   to change readiness (keyboard subscription only), the all-up baseline (keyboard only),

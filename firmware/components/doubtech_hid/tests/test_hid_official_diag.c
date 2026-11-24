@@ -94,6 +94,7 @@ int main(void)
     read.op = BLE_GATT_ACCESS_OP_WRITE_CHR;
     assert(pnp->access_cb(1, 20, &read, pnp->arg) == BLE_ATT_ERR_WRITE_NOT_PERMITTED);
     hid_gatt_set_device_info("Acme", "Model 7");
+    unsigned dis_found = 0;
     for (const struct ble_gatt_chr_def *chr = device_info[0].characteristics; chr->uuid; chr++) {
         unsigned uuid = ble_uuid_u16(chr->uuid);
         if (uuid != 0x2a24 && uuid != 0x2a29) continue;
@@ -102,7 +103,9 @@ int main(void)
         assert(chr->access_cb(1, 20, &read_text, chr->arg) == 0);
         const char *want = uuid == 0x2a24 ? "Model 7" : "Acme";
         assert(text.len == strlen(want) && memcmp(text.data, want, text.len) == 0);
+        ++dis_found;
     }
+    assert(dis_found == 2);
     assert(parameters.hid_info == 0x03000111 && parameters.external_rpt_ref == 0x2a19);
     assert(parameters.report_map_len == hid_report_map_len);
     assert(memcmp(parameters.report_map, hid_report_map, hid_report_map_len) == 0);
