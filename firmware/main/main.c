@@ -2,7 +2,9 @@
  * Starts the one-guest BLE service and binary USB routing transport on ESP32-S3.
  * Startup selects local with no armed HID output; routing requires a validated
  * session, READY encrypted guest, explicit switch, and explicit arm. The
- * Waveshare panel starts only with the explicitly validated board profile. */
+ * Waveshare panel starts only with the explicitly validated board profile.
+ * Start order: doubtech_hid_start here owns the NimBLE host; the input-device
+ * central starts later from the USB worker, once doubtech_hid_host_synced(). */
 #include "esp_log.h"
 #include "doubtech_hid.h"
 #include "display.h"

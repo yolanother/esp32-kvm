@@ -5,17 +5,23 @@
  * for serialized minor-one STATUS. It refreshes three authenticated
  * connected peer slots through one bounded HID host-loop RPC. A
  * separate on-demand RPC supplies retained tokens for minor-two inventory.
- * The same serialized facts feed a fail-closed device screen projection. */
+ * The same serialized facts feed a fail-closed device screen projection.
+ * The input hub runs in the same worker beside the router: the BLE central
+ * starts here once the NimBLE host is synced, its callbacks only copy reports
+ * into a bounded queue, and the worker drains that queue each iteration. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
+#include "transport_hub.h"
 #include "router_hid_bridge.h"
 #include "transport_display_status.h"
 #include "display.h"
 #include "display_pairing.h"
 #include "display_labels.h"
 #include "doubtech_hid.h"
+#include "doubtech_hid_central.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
+#include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -36,7 +42,7 @@
 #endif
 
 #define KVM_USB_BUFFER_SIZE 1024
-#define KVM_USB_TASK_STACK 4096
+#define KVM_USB_TASK_STACK 6144 /* worker also starts the central (NVS load) */
 
 static kvm_transport_core_t core;
 static kvm_router_t router;
@@ -47,6 +53,80 @@ static QueueHandle_t pairing_touch_queue;
 static QueueHandle_t target_touch_queue;
 static atomic_bool pairing_overflow;
 static kvm_display_pairing_t display_pairing;
+/* Device input: the queue is shared with the NimBLE host thread under
+ * hub_lock; hub_worker (and the router it guards) belong to the worker. */
+static kvm_hub_queue_t hub_queue;
+static portMUX_TYPE hub_lock = portMUX_INITIALIZER_UNLOCKED;
+static atomic_bool hub_queue_ready;
+static kvm_hub_worker_t hub_worker;
+static QueueHandle_t central_event_queue;
+static atomic_uint published_hub_target;
+
+static void hub_queue_lock(void *context) { (void)context; portENTER_CRITICAL(&hub_lock); }
+static void hub_queue_unlock(void *context) { (void)context; portEXIT_CRITICAL(&hub_lock); }
+
+void kvm_transport_hub_submit(const kvm_hub_msg_t *msg)
+{
+    if (atomic_load(&hub_queue_ready)) (void)kvm_hub_queue_push(&hub_queue, msg);
+}
+
+uint8_t kvm_transport_hub_target(void) { return (uint8_t)atomic_load(&published_hub_target); }
+
+/* NimBLE host thread: copy and enqueue only. */
+static void central_input(const doubtech_hid_central_input_t *input, void *context)
+{
+    kvm_hub_msg_t msg;
+    (void)context;
+    if (kvm_router_hid_central_msg(input, &msg)) kvm_transport_hub_submit(&msg);
+}
+
+/* NimBLE host thread: copy and enqueue only. Pairing events are for the input
+ * pairing screen; a full queue drops the event (the window is re-entered). */
+static void central_event(const doubtech_hid_central_event_t *event, void *context)
+{
+    (void)context;
+    if (central_event_queue) (void)xQueueSend(central_event_queue, event, 0);
+}
+
+/* Starts the BLE central from the worker once the shared NimBLE host is synced,
+ * retrying a failed start with a doubling, capped delay. */
+static void poll_central_start(uint64_t time_ms)
+{
+    static const doubtech_hid_central_config_t config = {
+        .on_input = central_input, .on_event = central_event,
+        .context = NULL, .store_namespace = NULL,
+    };
+    static bool central_started;
+    static uint32_t failures;
+    static uint64_t retry_at_ms;
+    if (central_started || time_ms < retry_at_ms || !doubtech_hid_host_synced()) return;
+    esp_err_t result = doubtech_hid_central_start(&config);
+    if (result == ESP_OK) {
+        central_started = true;
+        return;
+    }
+    retry_at_ms = time_ms + kvm_hub_central_backoff_ms(failures);
+    if (failures < UINT32_MAX) failures++;
+    ESP_LOGW("esp32-kvm", "Input central start failed: %d", result);
+}
+
+static void drain_central_events(void)
+{
+    doubtech_hid_central_event_t event;
+    while (central_event_queue && xQueueReceive(central_event_queue, &event, 0) == pdTRUE) {
+        /* No consumer yet: the input pairing screen reads these. */
+    }
+}
+
+static uint8_t visible_ready_mask(const kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS])
+{
+    uint8_t ready_mask = 0;
+    for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot)
+        if (slots[slot].ready && slots[slot].subscribed &&
+            !kvm_display_guest_hidden(slots[slot].token))
+            ready_mask |= (uint8_t)(1u << slot);
+    return ready_mask;
+}
 
 static bool pair_begin(void *context)
 {
@@ -95,6 +175,7 @@ static bool drain_pairing_events(void)
         (void)xQueueReset(pairing_queue);
         disconnected = true;
         if (router.slot || router.armed) kvm_router_emergency_release(&router);
+        kvm_hub_worker_release(&hub_worker); /* a missed disconnect may hide behind the overflow */
         (void)doubtech_hid_request_pair_cancel();
         kvm_display_pairing_clear(&display_pairing);
         kvm_transport_core_pairing_event(&core, KVM_PAIRING_REJECTED, 0, 0, 0);
@@ -105,6 +186,7 @@ static bool drain_pairing_events(void)
             disconnected = true;
             if (router.slot && (!event.number || event.number == router.slot))
                 kvm_router_emergency_release(&router);
+            kvm_hub_worker_slot_lost(&hub_worker, event.number);
             continue;
         }
         kvm_transport_pairing_state_t state;
@@ -183,6 +265,10 @@ static void publish_status(bool connected, bool guest_ready, uint8_t paired_gues
     kvm_transport_display_status(&core, &router, connected, guest_ready,
                                  (uint64_t)(esp_timer_get_time() / 1000), &status);
     status.paired_guests = paired_guests;
+    status.host_session = router.session_open;
+    status.input_kbd = doubtech_hid_central_connected(DOUBTECH_HID_CENTRAL_KEYBOARD);
+    status.input_mouse = doubtech_hid_central_connected(DOUBTECH_HID_CENTRAL_MOUSE);
+    status.hub_target = hub_worker.hub.target;
     /* USB can remain electrically connected after the verified host session
        closes. Keep the authenticated BLE slot visible in either case. */
     if (!connected || !core.session_open || !router.session_open) {
@@ -273,6 +359,7 @@ static void usb_worker(void *context)
             (void)doubtech_hid_request_pair_cancel();
             (void)xQueueReset(pairing_touch_queue);
             kvm_display_pairing_clear(&display_pairing);
+            kvm_hub_worker_release(&hub_worker);
             kvm_router_emergency_release(&router);
             kvm_transport_core_reset(&core);
             was_connected = false;
@@ -283,8 +370,11 @@ static void usb_worker(void *context)
         kvm_display_pairing_expire(&display_pairing, time_ms);
         if (!(button_bits & 2u)) drain_pairing_touch(time_ms);
         uint8_t touched_slot;
+        /* With no host session a card tap selects the device-input target;
+         * with one it stays a request to the host, as before. */
         while (target_touch_queue && xQueueReceive(target_touch_queue, &touched_slot, 0) == pdTRUE)
-            (void)kvm_transport_core_device_select_request(&core, touched_slot);
+            if (!kvm_hub_worker_select(&hub_worker, touched_slot))
+                (void)kvm_transport_core_device_select_request(&core, touched_slot);
         if (!ready_sampled || time_ms < last_ready_ms || time_ms - last_ready_ms >= 1000) {
             doubtech_hid_slot_t sampled[DOUBTECH_HID_MAX_CONNECTIONS];
             bool valid = doubtech_hid_request_slots(sampled);
@@ -312,6 +402,17 @@ static void usb_worker(void *context)
             last_ready_ms = time_ms;
             ready_sampled = true;
         }
+        bool plus = (button_bits & 1u) && !(button_bits & 2u);
+        if (plus && !router.session_open) {
+            /* PLUS steps the device-input target while no host session owns it. */
+            (void)kvm_hub_worker_select(&hub_worker,
+                kvm_display_next_ready_slot(visible_ready_mask(slots), hub_worker.hub.target));
+            plus = false;
+        }
+        poll_central_start(time_ms);
+        drain_central_events();
+        kvm_hub_worker_drain(&hub_worker, &hub_queue);
+        atomic_store(&published_hub_target, hub_worker.hub.target);
         if (!connected) {
             if (was_connected) {
                 if (!display_pairing.local_owner) {
@@ -329,6 +430,8 @@ static void usb_worker(void *context)
             (void)kvm_transport_core_init(&core, "esp32-kvm-s3", esp_app_get_description()->version,
                                           new_session(), send_binary, NULL);
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
+            /* Every host ARM first makes the hub release its own arm. */
+            kvm_transport_core_bind_arm_gate(&core, kvm_hub_worker_arm_gate, &hub_worker);
             kvm_transport_core_bind_pairing(&core,
                 (kvm_transport_pairing_ops_t){
                     .begin = pair_begin, .cancel = pair_cancel, .reply = pair_reply,
@@ -351,16 +454,21 @@ static void usb_worker(void *context)
             } else kvm_transport_core_feed(&core, bytes, (size_t)read);
         }
         kvm_transport_core_tick(&core);
-        if ((button_bits & 1u) && !(button_bits & 2u)) {
-            uint8_t ready_mask = 0;
-            for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot)
-                if (slots[slot].ready && slots[slot].subscribed &&
-                    !kvm_display_guest_hidden(slots[slot].token))
-                    ready_mask |= (uint8_t)(1u << slot);
+        if (plus) {
             (void)kvm_transport_core_device_select_request(&core,
-                kvm_display_next_ready_slot(ready_mask, router.slot));
+                kvm_display_next_ready_slot(visible_ready_mask(slots), router.slot));
         }
         publish_status(true, guest_ready, paired_guests, slots);
+    }
+}
+
+static void delete_queues(void)
+{
+    QueueHandle_t *queues[] = {&pairing_queue, &pairing_touch_queue, &target_touch_queue,
+                               &central_event_queue};
+    for (size_t i = 0; i < sizeof(queues) / sizeof(queues[0]); ++i) {
+        if (*queues[i]) vQueueDelete(*queues[i]);
+        *queues[i] = NULL;
     }
 }
 
@@ -374,47 +482,31 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     esp_err_t result = usb_serial_jtag_driver_install(&config);
     if (result != ESP_OK) return result;
     pairing_queue = xQueueCreate(8, sizeof(doubtech_hid_pairing_event_t));
-    if (!pairing_queue) {
-        (void)usb_serial_jtag_driver_uninstall();
-        return ESP_ERR_NO_MEM;
-    }
     pairing_touch_queue = xQueueCreate(4, sizeof(kvm_display_pair_request_t));
-    if (!pairing_touch_queue) {
-        vQueueDelete(pairing_queue);
-        pairing_queue = NULL;
-        (void)usb_serial_jtag_driver_uninstall();
-        return ESP_ERR_NO_MEM;
-    }
     target_touch_queue = xQueueCreate(4, sizeof(uint8_t));
-    if (!target_touch_queue) {
-        vQueueDelete(pairing_queue);
-        vQueueDelete(pairing_touch_queue);
-        pairing_queue = NULL;
-        pairing_touch_queue = NULL;
+    central_event_queue = xQueueCreate(8, sizeof(doubtech_hid_central_event_t));
+    if (!pairing_queue || !pairing_touch_queue || !target_touch_queue || !central_event_queue) {
+        delete_queues();
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }
     doubtech_hid_pairing_set_events(pairing_event, NULL);
-    kvm_router_init(&router, kvm_router_hid_output(), NULL);
+    /* The hub and the router share the HID output; the router reaches it
+     * through the hub worker so its arm and release keep the hub consistent. */
+    kvm_hub_worker_init(&hub_worker, &router, kvm_router_hid_output(), NULL);
+    kvm_router_init(&router, kvm_hub_worker_router_output(), &hub_worker);
+    kvm_hub_queue_init(&hub_queue, hub_queue_lock, hub_queue_unlock, NULL);
     if (!kvm_router_set_capacity(&router, KVM_ROUTER_MAX_SLOTS)) {
         doubtech_hid_pairing_set_events(NULL, NULL);
-        vQueueDelete(pairing_queue);
-        vQueueDelete(pairing_touch_queue);
-        vQueueDelete(target_touch_queue);
-        pairing_queue = NULL;
-        pairing_touch_queue = NULL;
-        target_touch_queue = NULL;
+        delete_queues();
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_INVALID_STATE;
     }
+    atomic_store(&hub_queue_ready, true);
     if (xTaskCreate(usb_worker, "kvm_usb_loopback", KVM_USB_TASK_STACK, NULL, 10, &usb_task) != pdPASS) {
+        atomic_store(&hub_queue_ready, false);
         doubtech_hid_pairing_set_events(NULL, NULL);
-        vQueueDelete(pairing_queue);
-        vQueueDelete(pairing_touch_queue);
-        vQueueDelete(target_touch_queue);
-        pairing_queue = NULL;
-        pairing_touch_queue = NULL;
-        target_touch_queue = NULL;
+        delete_queues();
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }

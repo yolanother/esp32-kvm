@@ -22,7 +22,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Legacy transport test compile failed' }
 & (Join-Path $output 'transport_core_test.exe') (Join-Path $repo 'tests/vectors/hello-v1.cobs') (Join-Path $repo 'tests/vectors/session-open.cobs') (Join-Path $repo 'tests/vectors/get-status.cobs')
 if ($LASTEXITCODE -ne 0) { throw 'Legacy transport test failed' }
 Write-Output 'PASS legacy transport fixtures'
-& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 "/I$repo/firmware/tests/integration/mocks" @includes (Join-Path $PSScriptRoot 'test_router_hid_bridge.c') (Join-Path $repo 'firmware/components/transport/router_hid_bridge.c') "/Fo:$output/" "/Fe:$output/test_router_hid_bridge.exe" /link @libraries
+& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 "/I$repo/firmware/tests/integration/mocks" "/I$repo/firmware/components/doubtech_hid_central/include" "/I$repo/firmware/components/input_hub" @includes (Join-Path $PSScriptRoot 'test_router_hid_bridge.c') (Join-Path $repo 'firmware/components/transport/router_hid_bridge.c') "/Fo:$output/" "/Fe:$output/test_router_hid_bridge.exe" /link @libraries
 if ($LASTEXITCODE -ne 0) { throw 'HID bridge test compile failed' }
 & (Join-Path $output 'test_router_hid_bridge.exe')
 if ($LASTEXITCODE -ne 0) { throw 'HID bridge test failed' }
@@ -32,3 +32,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Transport display status compile failed' }
 & (Join-Path $output 'test_transport_display_status.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Transport display status test failed' }
 Write-Output 'PASS transport display status'
+& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 "/I$repo/firmware/components/input_hub" @includes (Join-Path $PSScriptRoot 'test_hub_worker.c') (Join-Path $repo 'firmware/components/transport/transport_hub.c') (Join-Path $repo 'firmware/components/transport/transport_core.c') (Join-Path $repo 'firmware/components/router/router.c') (Join-Path $repo 'firmware/components/input_hub/input_hub.c') "/Fo:$output/" "/Fe:$output/test_hub_worker.exe" /link @libraries
+if ($LASTEXITCODE -ne 0) { throw 'Hub worker test compile failed' }
+& (Join-Path $output 'test_hub_worker.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Hub worker test failed' }
+Write-Output 'PASS hub worker'

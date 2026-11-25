@@ -4,6 +4,7 @@
 #include "router_hid_bridge.h"
 #include "doubtech_hid.h"
 #include <assert.h>
+#include <string.h>
 
 static int ready_calls, arms, releases, keyboards, mice, consumers, disconnects;
 static uint8_t last_slot;
@@ -52,5 +53,28 @@ int main(void)
     assert(out.release(NULL, 3) && last_slot == 3);
     out.disconnect(NULL, 2);
     assert(last_slot == 2);
+
+    /* Central reports become hub messages; the conversion only copies. */
+    doubtech_hid_central_input_t central = {0};
+    kvm_hub_msg_t msg;
+    central.kind = DOUBTECH_HID_CENTRAL_KEYBOARD;
+    central.keys[0] = 0x02; central.keys[2] = 4;
+    assert(kvm_router_hid_central_msg(&central, &msg));
+    assert(msg.type == KVM_HUB_MSG_INPUT && msg.input.kind == KVM_ROUTER_KEYBOARD &&
+           msg.input.keyboard[0] == 0x02 && msg.input.keyboard[2] == 4);
+    memset(&central, 0, sizeof central);
+    central.kind = DOUBTECH_HID_CENTRAL_MOUSE;
+    central.buttons = 3; central.dx = -300; central.dy = 7; central.wheel = -1;
+    assert(kvm_router_hid_central_msg(&central, &msg));
+    assert(msg.type == KVM_HUB_MSG_INPUT && msg.input.kind == KVM_ROUTER_POINTER &&
+           msg.input.buttons == 3 && msg.input.dx == -300 && msg.input.dy == 7 &&
+           msg.input.wheel == -1 && msg.input.pan == 0);
+    memset(&central, 0, sizeof central);
+    central.kind = DOUBTECH_HID_CENTRAL_MOUSE;
+    central.lost = true;
+    assert(kvm_router_hid_central_msg(&central, &msg) && msg.type == KVM_HUB_MSG_LOST);
+    central.kind = 9; central.lost = false;
+    assert(!kvm_router_hid_central_msg(&central, &msg));
+    assert(!kvm_router_hid_central_msg(NULL, &msg));
     return 0;
 }

@@ -1,0 +1,534 @@
+/* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
+ * Runs the device-input hub beside the router the way the USB worker does:
+ * host frames go through the transport core, device reports through the hub
+ * queue, and both share one fake HID output that models a guest channel (an
+ * armed channel refuses a second arm; release disarms and sends all-up). It
+ * checks arbitration, yield-before-arm, queue overflow and device loss. */
+#include "transport_core.h"
+#include "transport_hub.h"
+#include "router.h"
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+/* ---- fake guest channels ---- */
+typedef struct { bool ready, armed, fail_send; uint8_t keys[8]; uint8_t buttons; uint16_t consumer; } chan_t;
+typedef struct { char op; uint8_t slot; kvm_router_input_t in; } op_t;
+static chan_t chan[4];
+static op_t ops[256];
+static int n_ops;
+
+static void log_op(char op, uint8_t slot, const kvm_router_input_t *in)
+{
+    assert(n_ops < 256);
+    ops[n_ops].op = op;
+    ops[n_ops].slot = slot;
+    memset(&ops[n_ops].in, 0, sizeof ops[n_ops].in);
+    if (in) ops[n_ops].in = *in;
+    n_ops++;
+}
+static void all_up(chan_t *c) { memset(c->keys, 0, 8); c->buttons = 0; c->consumer = 0; }
+static bool f_ready(void *ctx, uint8_t slot) { (void)ctx; return slot >= 1 && slot <= 3 && chan[slot].ready; }
+static bool f_arm(void *ctx, uint8_t slot)
+{
+    (void)ctx;
+    if (!f_ready(NULL, slot) || chan[slot].armed) { log_op('a', slot, NULL); return false; }
+    all_up(&chan[slot]);
+    chan[slot].armed = true;
+    log_op('A', slot, NULL);
+    return true;
+}
+static bool f_release(void *ctx, uint8_t slot)
+{
+    (void)ctx;
+    log_op('R', slot, NULL);
+    if (slot < 1 || slot > 3) return false;
+    chan[slot].armed = false;
+    if (!chan[slot].ready) return false;
+    all_up(&chan[slot]);
+    return true;
+}
+static bool f_send(void *ctx, uint8_t slot, const kvm_router_input_t *in)
+{
+    (void)ctx;
+    if (!f_ready(NULL, slot) || !chan[slot].armed || chan[slot].fail_send) { log_op('s', slot, in); return false; }
+    log_op('S', slot, in);
+    if (in->kind == KVM_ROUTER_KEYBOARD) memcpy(chan[slot].keys, in->keyboard, 8);
+    else if (in->kind == KVM_ROUTER_POINTER) chan[slot].buttons = in->buttons;
+    else chan[slot].consumer = in->consumer;
+    return true;
+}
+static void f_disconnect(void *ctx, uint8_t slot) { (void)ctx; log_op('D', slot, NULL); }
+static kvm_router_output_t fake_output(void)
+{
+    kvm_router_output_t o = {f_ready, f_release, f_arm, f_send, f_disconnect};
+    return o;
+}
+static int count_ops(char op, uint8_t slot)
+{
+    int n = 0;
+    for (int i = 0; i < n_ops; i++) n += ops[i].op == op && ops[i].slot == slot;
+    return n;
+}
+static int find_op(char op, uint8_t slot)
+{
+    for (int i = 0; i < n_ops; i++) if (ops[i].op == op && ops[i].slot == slot) return i;
+    return -1;
+}
+
+/* ---- host frames (independent encoder, as in test_transport_router.c) ---- */
+static uint8_t reply[1024];
+static size_t reply_len;
+static uint64_t now_ms;
+static uint32_t crc(const uint8_t *p, size_t n)
+{
+    uint32_t v = UINT32_MAX;
+    for (size_t i = 0; i < n; i++) {
+        v ^= p[i];
+        for (int b = 0; b < 8; b++) v = (v >> 1) ^ (0x82f63b78u & (0u - (v & 1u)));
+    }
+    return ~v;
+}
+static void u32(uint8_t *p, uint32_t n) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(n >> (8 * i)); }
+static void u64(uint8_t *p, uint64_t n) { u32(p, (uint32_t)n); u32(p + 4, (uint32_t)(n >> 32)); }
+static size_t frame(uint8_t *out, uint8_t kind, uint64_t session, uint32_t seq,
+                    uint32_t generation, const uint8_t *payload, size_t payload_len)
+{
+    uint8_t raw[540] = {0};
+    raw[0] = 0x56; raw[1] = 0x4b; raw[2] = 1; raw[3] = kind;
+    raw[4] = (uint8_t)payload_len; raw[5] = (uint8_t)(payload_len >> 8);
+    u64(raw + 8, session); u32(raw + 16, seq); u32(raw + 20, generation);
+    if (payload_len) memcpy(raw + 24, payload, payload_len);
+    size_t raw_len = 24 + payload_len + 4;
+    u32(raw + raw_len - 4, crc(raw, raw_len - 4));
+    size_t code_at = 0, at = 1;
+    uint8_t code = 1;
+    for (size_t i = 0; i < raw_len; i++) {
+        if (!raw[i]) { out[code_at] = code; code_at = at++; code = 1; }
+        else { out[at++] = raw[i]; if (++code == 0xff) { out[code_at] = code; code_at = at++; code = 1; } }
+    }
+    out[code_at] = code; out[at++] = 0;
+    return at;
+}
+static size_t decode(uint8_t *out)
+{
+    size_t at = 0, src = 0;
+    while (src + 1 < reply_len) {
+        uint8_t code = reply[src++];
+        for (uint8_t i = 1; i < code; i++) out[at++] = reply[src++];
+        if (code != 0xff && src + 1 < reply_len) out[at++] = 0;
+    }
+    return at;
+}
+static void capture(void *context, const uint8_t *p, size_t n)
+{ (void)context; assert(n <= sizeof(reply)); memcpy(reply, p, n); reply_len = n; }
+static uint64_t clock_ms(void *context) { (void)context; return now_ms; }
+
+/* ---- fixture ---- */
+#define SESSION 7u
+static kvm_router_t router;
+static kvm_hub_worker_t worker;
+static kvm_transport_core_t core;
+static kvm_hub_queue_t queue;
+static uint32_t seq;
+
+static void send_frame(uint8_t kind, uint64_t session, uint32_t s, uint32_t generation,
+                       const uint8_t *payload, size_t n)
+{
+    uint8_t encoded[600];
+    size_t len = frame(encoded, kind, session, s, generation, payload, n);
+    kvm_transport_core_feed(&core, encoded, len);
+}
+/* Returns (kind << 8) | error of the last ACK/NACK. */
+static unsigned last_result(void)
+{
+    uint8_t d[600];
+    size_t n = decode(d);
+    assert(n >= 30);
+    return (unsigned)d[3] << 8 | d[29];
+}
+#define ACK_OK ((unsigned)KVM_MSG_ACK << 8)
+#define NACK(e) ((unsigned)KVM_MSG_NACK << 8 | (unsigned)(e))
+
+static void setup(void)
+{
+    memset(chan, 0, sizeof chan);
+    for (int s = 1; s <= 3; s++) chan[s].ready = true;
+    n_ops = 0;
+    now_ms = 0;
+    seq = 100;
+    kvm_router_init(&router, kvm_hub_worker_router_output(), &worker);
+    assert(kvm_router_set_capacity(&router, 3));
+    kvm_hub_worker_init(&worker, &router, fake_output(), NULL);
+    kvm_hub_queue_init(&queue, NULL, NULL, NULL);
+    assert(kvm_transport_core_init(&core, "b", "1", SESSION, capture, NULL));
+    kvm_transport_core_bind_router(&core, &router, clock_ms, NULL);
+    kvm_transport_core_bind_arm_gate(&core, kvm_hub_worker_arm_gate, &worker);
+}
+static void open_session(void)
+{
+    const uint8_t hello2[] = {2, 0, 0, 0, 0, 0};
+    const uint8_t open[] = {0xa2, 1, 0x61, 'h', 2, 0};
+    send_frame(KVM_MSG_HELLO, 0, ++seq, 0, hello2, sizeof hello2);
+    send_frame(KVM_MSG_SESSION_OPEN, SESSION, ++seq, 0, open, sizeof open);
+    assert(router.session_open && !router.armed);
+}
+static unsigned host_switch(uint8_t slot)
+{
+    uint8_t p[9];
+    p[0] = slot; u32(p + 1, router.generation); u32(p + 5, router.generation + 1);
+    send_frame(KVM_MSG_SWITCH, SESSION, ++seq, router.generation, p, 9);
+    return last_result();
+}
+static unsigned host_arm_seq(uint8_t slot, uint32_t s)
+{
+    uint8_t p[5];
+    p[0] = slot; u32(p + 1, router.generation);
+    send_frame(KVM_MSG_ARM, SESSION, s, router.generation, p, 5);
+    return last_result();
+}
+static unsigned host_arm(uint8_t slot) { return host_arm_seq(slot, ++seq); }
+
+static kvm_hub_msg_t key_msg(uint8_t code)
+{
+    kvm_hub_msg_t m;
+    memset(&m, 0, sizeof m);
+    m.type = KVM_HUB_MSG_INPUT;
+    m.input.kind = KVM_ROUTER_KEYBOARD;
+    m.input.keyboard[2] = code;
+    return m;
+}
+static kvm_hub_msg_t pointer_msg(uint8_t buttons, int16_t dx)
+{
+    kvm_hub_msg_t m;
+    memset(&m, 0, sizeof m);
+    m.type = KVM_HUB_MSG_INPUT;
+    m.input.kind = KVM_ROUTER_POINTER;
+    m.input.buttons = buttons;
+    m.input.dx = dx;
+    return m;
+}
+static kvm_hub_msg_t lost_msg(void)
+{
+    kvm_hub_msg_t m;
+    memset(&m, 0, sizeof m);
+    m.type = KVM_HUB_MSG_LOST;
+    return m;
+}
+static void push(kvm_hub_msg_t m) { assert(kvm_hub_queue_push(&queue, &m)); }
+static void drain(void) { kvm_hub_worker_drain(&worker, &queue); }
+/* Hub on target 1 with key 4 and button 1 held on slot 1. */
+static void hub_holding_slot1(void)
+{
+    assert(kvm_hub_worker_select(&worker, 1));
+    push(key_msg(4));
+    push(pointer_msg(1, 0));
+    drain();
+    assert(chan[1].armed && chan[1].keys[2] == 4 && chan[1].buttons == 1);
+    assert(worker.hub.armed_slot == 1);
+}
+
+/* ---- tests ---- */
+static void hub_input_routes_when_no_session(void)
+{
+    setup();
+    assert(!router.session_open);
+    assert(kvm_hub_worker_select(&worker, 1) && worker.hub.target == 1);
+    push(key_msg(4));
+    drain();
+    assert(worker.last_result == KVM_HUB_FORWARDED);
+    assert(chan[1].armed && chan[1].keys[2] == 4);
+    /* Spec decision 10: a host session that has not armed a guest leaves device
+     * input routed to the hub target... */
+    open_session();
+    push(key_msg(5));
+    drain();
+    assert(worker.last_result == KVM_HUB_FORWARDED && chan[1].keys[2] == 5);
+    /* ...but touch and PLUS selection belong to the host while a session is open. */
+    assert(!kvm_hub_worker_select(&worker, 2) && worker.hub.target == 1);
+    /* The host switching its own (unarmed) slot does not move the hub target. */
+    assert(host_switch(3) == ACK_OK && router.slot == 3 && !router.armed);
+    push(key_msg(6));
+    drain();
+    assert(chan[1].keys[2] == 6 && worker.hub.target == 1);
+}
+
+static void hub_dropped_while_router_armed(void)
+{
+    setup();
+    assert(kvm_hub_worker_select(&worker, 1));
+    open_session();
+    assert(host_switch(2) == ACK_OK);
+    assert(host_arm(2) == ACK_OK && router.armed && router.slot == 2);
+    n_ops = 0;
+    push(key_msg(4));
+    push(pointer_msg(1, 3));
+    drain();
+    assert(worker.last_result == KVM_HUB_DROPPED_HOST_ARMED);
+    assert(n_ops == 0); /* the hub emitted nothing, on any slot */
+    assert(!chan[1].armed && worker.hub.armed_slot == 0);
+    /* A device loss while armed emits nothing either. */
+    push(lost_msg());
+    drain();
+    assert(n_ops == 0);
+    /* The host releasing its route hands device input back to the hub target. */
+    send_frame(KVM_MSG_RELEASE_ALL, SESSION, ++seq, router.generation, NULL, 0);
+    assert(last_result() == ACK_OK && !router.armed);
+    push(key_msg(7));
+    drain();
+    assert(worker.last_result == KVM_HUB_FORWARDED && chan[1].keys[2] == 7);
+}
+
+static void router_arm_yields_hub(void)
+{
+    int all_up_kb, all_up_ptr, release, arm;
+    /* Same slot: without the yield the channel is still armed by the hub and
+     * the router's arm would fail (fail-local, NACK NOT_READY). */
+    setup();
+    hub_holding_slot1();
+    open_session();
+    assert(host_switch(1) == ACK_OK);
+    n_ops = 0;
+    assert(host_arm(1) == ACK_OK);
+    assert(router.armed && router.slot == 1 && !router.fault);
+    assert(worker.hub.armed_slot == 0 && chan[1].armed);
+    all_up_kb = find_op('S', 1);
+    assert(all_up_kb >= 0 && ops[all_up_kb].in.kind == KVM_ROUTER_KEYBOARD &&
+           ops[all_up_kb].in.keyboard[2] == 0);
+    all_up_ptr = all_up_kb + 1;
+    assert(ops[all_up_ptr].op == 'S' && ops[all_up_ptr].in.kind == KVM_ROUTER_POINTER &&
+           ops[all_up_ptr].in.buttons == 0);
+    release = find_op('R', 1);
+    arm = find_op('A', 1);
+    assert(all_up_kb < release && release < arm); /* hub all-up, hub release, then router arm */
+    assert(count_ops('a', 1) == 0);
+
+    /* Different slot: the hub's held keys on slot 1 are released before the
+     * router arms slot 2, so nothing stays pressed on slot 1. */
+    setup();
+    hub_holding_slot1();
+    open_session();
+    assert(host_switch(2) == ACK_OK);
+    n_ops = 0;
+    assert(host_arm(2) == ACK_OK && router.armed);
+    assert(chan[1].keys[2] == 0 && chan[1].buttons == 0 && !chan[1].armed);
+    assert(find_op('R', 1) >= 0 && find_op('R', 1) < find_op('A', 2));
+
+    /* Yield fails (ready slot refuses the all-up): the ARM is refused with
+     * NACK BUSY, the router is untouched, and a retry succeeds once it can. */
+    setup();
+    hub_holding_slot1();
+    open_session();
+    assert(host_switch(1) == ACK_OK);
+    uint32_t generation = router.generation;
+    chan[1].fail_send = true;
+    n_ops = 0;
+    uint32_t arm_seq = ++seq;
+    assert(host_arm_seq(1, arm_seq) == NACK(KVM_ROUTER_BUSY));
+    assert(!router.armed && router.slot == 1 && !router.fault && router.generation == generation);
+    assert(count_ops('A', 1) == 0 && count_ops('a', 1) == 0);
+    assert(worker.hub.armed_slot == 1); /* still held, retried by the next ARM */
+    chan[1].fail_send = false;
+    assert(host_arm_seq(1, arm_seq) == ACK_OK); /* same-sequence retry */
+    assert(router.armed && worker.hub.armed_slot == 0 && chan[1].keys[2] == 0);
+}
+
+static void router_release_rearms_hub(void)
+{
+    setup();
+    hub_holding_slot1();
+    open_session();
+    assert(host_switch(1) == ACK_OK && !router.armed);
+    /* The host moves its unarmed route off slot 1: the router releases slot 1,
+     * which disarms the hub's channel; the hub must forget its arm. */
+    assert(host_switch(2) == ACK_OK);
+    assert(!chan[1].armed && worker.hub.armed_slot == 0);
+    push(key_msg(9));
+    drain();
+    assert(worker.last_result == KVM_HUB_FORWARDED && chan[1].armed && chan[1].keys[2] == 9);
+}
+
+static void queue_overflow_keeps_release(void)
+{
+    kvm_hub_msg_t m;
+    int motions = 0, n = 0;
+    /* a. press, 15 motions, release: the release evicts the oldest motion. */
+    kvm_hub_queue_init(&queue, NULL, NULL, NULL);
+    push(key_msg(4));
+    for (int i = 0; i < 15; i++) push(pointer_msg(0, 1));
+    assert(queue.count == KVM_HUB_QUEUE_DEPTH);
+    m = pointer_msg(0, 1);
+    assert(!kvm_hub_queue_push(&queue, &m)); /* pure motion is what overflow drops */
+    push(key_msg(0));
+    while (kvm_hub_queue_pop(&queue, &m)) {
+        if (n == 0) assert(m.input.kind == KVM_ROUTER_KEYBOARD && m.input.keyboard[2] == 4);
+        motions += m.input.kind == KVM_ROUTER_POINTER;
+        n++;
+    }
+    assert(motions == 14 && m.input.kind == KVM_ROUTER_KEYBOARD && m.input.keyboard[2] == 0);
+
+    /* b. ring full of key states: later states keep the newest per kind, in order. */
+    kvm_hub_queue_init(&queue, NULL, NULL, NULL);
+    for (int i = 0; i < 16; i++) push(key_msg((uint8_t)(i % 2 ? 0 : 4)));
+    push(key_msg(5));
+    push(pointer_msg(1, 2)); /* button press in tail */
+    push(pointer_msg(1, 3)); /* motion accumulates */
+    push(pointer_msg(0, 0)); /* button release */
+    push(key_msg(0));        /* final key release */
+    n = 0;
+    kvm_router_input_t last_kb = {0}, last_ptr = {0};
+    last_ptr.buttons = 0xff;
+    while (kvm_hub_queue_pop(&queue, &m)) {
+        n++;
+        if (m.input.kind == KVM_ROUTER_KEYBOARD) last_kb = m.input;
+        else last_ptr = m.input;
+    }
+    assert(n == 18 && last_kb.keyboard[2] == 0 && last_ptr.buttons == 0 && last_ptr.dx == 5);
+    assert(!queue.tail);
+
+    /* c. through the worker: a release queued behind a full ring still reaches the guest. */
+    setup();
+    assert(kvm_hub_worker_select(&worker, 1));
+    for (int i = 0; i < 16; i++) push(key_msg((uint8_t)(i % 2 ? 4 : 5)));
+    push(key_msg(0));
+    drain(); /* bounded: at most one ring's worth per call */
+    drain();
+    assert(chan[1].keys[2] == 0);
+}
+
+static void device_lost_sends_all_up(void)
+{
+    kvm_hub_msg_t m;
+    setup();
+    hub_holding_slot1();
+    n_ops = 0;
+    push(lost_msg());
+    drain();
+    assert(chan[1].keys[2] == 0 && chan[1].buttons == 0);
+    assert(count_ops('S', 1) >= 2);
+    assert(ops[0].in.kind == KVM_ROUTER_KEYBOARD && ops[1].in.kind == KVM_ROUTER_POINTER);
+
+    /* A loss is never dropped, even behind a full ring, and keeps its place. */
+    kvm_hub_queue_init(&queue, NULL, NULL, NULL);
+    push(key_msg(4));
+    for (int i = 0; i < 15; i++) push(pointer_msg(0, 1));
+    push(lost_msg());
+    push(key_msg(0)); /* post-loss: evicts a motion queued before the loss */
+    int n = 0, lost_at = -1;
+    while (kvm_hub_queue_pop(&queue, &m)) {
+        if (m.type == KVM_HUB_MSG_LOST) lost_at = n;
+        n++;
+    }
+    assert(n == 17 && lost_at == 15 && m.type == KVM_HUB_MSG_INPUT);
+
+    kvm_hub_queue_init(&queue, NULL, NULL, NULL);
+    for (int i = 0; i < 16; i++) push(key_msg(4));
+    push(key_msg(6)); /* tail state before the loss is superseded by it */
+    push(lost_msg());
+    push(key_msg(7)); /* tail state after the loss */
+    n = 0; lost_at = -1;
+    while (kvm_hub_queue_pop(&queue, &m)) {
+        if (m.type == KVM_HUB_MSG_LOST) lost_at = n;
+        n++;
+    }
+    assert(n == 18 && lost_at == 16 && m.input.keyboard[2] == 7);
+
+    /* End to end: a press then a loss behind a full ring leaves nothing held. */
+    setup();
+    assert(kvm_hub_worker_select(&worker, 1));
+    for (int i = 0; i < 16; i++) push(key_msg(4));
+    push(lost_msg());
+    drain();
+    drain();
+    assert(chan[1].keys[2] == 0 && chan[1].buttons == 0);
+}
+
+static void select_retries_on_later_input(void)
+{
+    setup();
+    hub_holding_slot1();
+    chan[1].fail_send = true; /* old target refuses the all-up while ready */
+    assert(kvm_hub_worker_select(&worker, 2));
+    assert(worker.hub.target == 1 && worker.select_pending);
+    chan[1].fail_send = false;
+    push(key_msg(5));
+    drain();
+    assert(!worker.select_pending && worker.hub.target == 2);
+    assert(chan[1].keys[2] == 0 && !chan[1].armed && chan[2].keys[2] == 5);
+}
+
+static void switch_failed_is_counted_and_retried(void)
+{
+    kvm_hub_msg_t chord = key_msg(0x1f); /* Left Ctrl + Left Alt + 2 */
+    chord.input.keyboard[0] = 0x05;
+    setup();
+    hub_holding_slot1();
+    push(key_msg(0)); /* a chord key must be newly pressed */
+    drain();
+    chan[1].fail_send = true;
+    push(chord);
+    drain();
+    assert(worker.last_result == KVM_HUB_SWITCH_FAILED && worker.switch_failures == 1);
+    chan[1].fail_send = false;
+    push(chord); /* still held: the latched chord retries the switch */
+    drain();
+    assert(worker.last_result == KVM_HUB_TARGET_CHANGED && worker.hub.target == 2);
+}
+
+static void slot_lost_and_emergency(void)
+{
+    setup();
+    hub_holding_slot1();
+    chan[1].armed = false; /* the guest dropped and came back unarmed */
+    kvm_hub_worker_slot_lost(&worker, 1);
+    assert(worker.hub.armed_slot == 0);
+    push(key_msg(8));
+    drain();
+    assert(chan[1].armed && chan[1].keys[2] == 8);
+    kvm_hub_worker_release(&worker);
+    assert(!chan[1].armed && chan[1].keys[2] == 0 && worker.hub.armed_slot == 0);
+
+    /* A disconnect for an unknown slot releases with all-up instead of assuming. */
+    setup();
+    hub_holding_slot1();
+    kvm_hub_worker_slot_lost(&worker, 2);
+    assert(worker.hub.armed_slot == 1 && chan[1].keys[2] == 4);
+    kvm_hub_worker_slot_lost(&worker, 0);
+    assert(worker.hub.armed_slot == 0 && !chan[1].armed && chan[1].keys[2] == 0);
+
+    /* The guest disarmed the channel on its own (HID control-point suspend):
+     * the dropped report resets the channel so the next report re-arms. */
+    setup();
+    hub_holding_slot1();
+    chan[1].armed = false;
+    push(key_msg(5));
+    drain();
+    assert(worker.last_result == KVM_HUB_DROPPED_NOT_READY && worker.hub.armed_slot == 0);
+    push(key_msg(6));
+    drain();
+    assert(worker.last_result == KVM_HUB_FORWARDED && chan[1].armed && chan[1].keys[2] == 6);
+}
+
+static void central_backoff_is_bounded(void)
+{
+    assert(kvm_hub_central_backoff_ms(0) == KVM_HUB_CENTRAL_BACKOFF_MIN_MS);
+    assert(kvm_hub_central_backoff_ms(1) == 2 * KVM_HUB_CENTRAL_BACKOFF_MIN_MS);
+    assert(kvm_hub_central_backoff_ms(7) == KVM_HUB_CENTRAL_BACKOFF_MAX_MS);
+    assert(kvm_hub_central_backoff_ms(4000000000u) == KVM_HUB_CENTRAL_BACKOFF_MAX_MS);
+}
+
+int main(void)
+{
+    hub_input_routes_when_no_session();
+    hub_dropped_while_router_armed();
+    router_arm_yields_hub();
+    router_release_rearms_hub();
+    queue_overflow_keeps_release();
+    device_lost_sends_all_up();
+    select_retries_on_later_input();
+    switch_failed_is_counted_and_retried();
+    slot_lost_and_emergency();
+    central_backoff_is_bounded();
+    puts("test_hub_worker: all passed");
+    return 0;
+}

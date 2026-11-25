@@ -434,9 +434,16 @@ static void handle_frame(kvm_transport_core_t *core, const uint8_t *p, size_t le
             if (core->pairing_state == KVM_PAIRING_WAITING ||
                 core->pairing_state == KVM_PAIRING_CHALLENGE)
                 result = KVM_ROUTER_PAUSED;
-            else if (payload_length == 5 && generation == get_u32(payload + 1))
-                result = kvm_router_arm(r, session, seq, payload[0], get_u32(payload + 1), now_ms);
-            else r->last_result_generation = r->generation;
+            else if (payload_length == 5 && generation == get_u32(payload + 1)) {
+                /* The gate (device-input hub) releases its own arm before the
+                 * router may arm; a refusal leaves the router untouched. */
+                if (core->arm_gate && !core->arm_gate(core->arm_gate_context, payload[0])) {
+                    r->last_result_generation = r->generation;
+                    result = KVM_ROUTER_BUSY;
+                } else {
+                    result = kvm_router_arm(r, session, seq, payload[0], get_u32(payload + 1), now_ms);
+                }
+            } else r->last_result_generation = r->generation;
             send_result(core, kind, seq, result);
         } else if (kind == KVM_MSG_PAIR_BEGIN || kind == KVM_MSG_PAIR_CANCEL ||
                    kind == KVM_MSG_PAIR_REPLY || kind == KVM_MSG_FORGET_BOND) {
@@ -605,6 +612,14 @@ void kvm_transport_core_bind_router(kvm_transport_core_t *core, kvm_router_t *ro
     core->router = router;
     core->now = now;
     core->now_context = now_context;
+}
+
+void kvm_transport_core_bind_arm_gate(kvm_transport_core_t *core,
+                                      kvm_transport_arm_gate_fn gate, void *context)
+{
+    if (!core) return;
+    core->arm_gate = gate;
+    core->arm_gate_context = context;
 }
 
 void kvm_transport_core_bind_pairing(kvm_transport_core_t *core,

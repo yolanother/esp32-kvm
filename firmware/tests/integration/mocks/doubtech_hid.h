@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #define DOUBTECH_HID_KEYBOARD_REPORT_LEN 8
-typedef int esp_err_t;
+#include "esp_err.h"
 bool doubtech_hid_request_ready(void);
 bool doubtech_hid_request_arm(void);
 bool doubtech_hid_request_release(void);

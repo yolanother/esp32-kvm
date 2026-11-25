@@ -32,6 +32,11 @@ typedef struct {
     bool updating;
     uint8_t update_percent;
     bool recovery_required;
+    /* Device-owned input facts, filled by the USB worker; not yet rendered. */
+    bool host_session;   /* the router holds a live host session */
+    bool input_kbd;      /* a paired keyboard is connected */
+    bool input_mouse;    /* a paired mouse is connected */
+    uint8_t hub_target;  /* device-input target: 0 This PC, 1 to 3 guests */
 } kvm_display_status_t;
 
 /** Pairing states mirrored from the negotiated firmware status protocol. */
