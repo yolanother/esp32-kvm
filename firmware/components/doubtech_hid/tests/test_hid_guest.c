@@ -37,6 +37,7 @@ static unsigned nvs_opens, adv_field_sets, gatt_registrations;
 static char adv_name[32], gap_name[32], dis_manufacturer[64], dis_model[64];
 static size_t adv_name_len, adv_payload_bytes;
 static bool check_gap_name = true;
+static int mock_nimble_bonds = -1;
 static const doubtech_hid_config_t legacy_config = {"ESP32 KVM", "ESP32 KVM", "ESP32 KVM S3", NULL};
 
 static void event_sink(const doubtech_hid_pairing_event_t *event, void *context)
@@ -124,7 +125,7 @@ static int rnd_address_sets;
 int ble_hs_id_set_rnd(const uint8_t *address)
 { if (!address) return -1; memcpy(rnd_address, address, sizeof(rnd_address)); rnd_address_sets++; return 0; }
 int ble_store_util_bonded_peers(ble_addr_t *peers, int *count, int maximum)
-{ (void)peers; (void)maximum; *count = saved_size ? 1 : 0; return 0; }
+{ (void)peers; (void)maximum; *count = mock_nimble_bonds >= 0 ? mock_nimble_bonds : saved_size ? 1 : 0; return 0; }
 int ble_store_util_delete_peer(const ble_addr_t *peer) { (void)peer; deleted_peers++; return 0; }
 int ble_sm_inject_io(uint16_t handle, struct ble_sm_io *io)
 { assert((handle == 17 || handle == 18) && io->action == BLE_SM_IOACT_NUMCMP && io->numcmp_accept);
@@ -172,6 +173,44 @@ void hid_gatt_on_encryption(uint16_t handle, bool encrypted)
 void hid_gatt_on_subscribe(uint16_t handle, uint16_t value_handle, bool enabled)
 { /* Handle 10 stands in for the keyboard input value handle. */
   if (handle == 17 && value_handle == 10) hid_channel_subscribed(&channel, HID_REPORT_KEYBOARD, enabled); }
+
+/* Seeds the persisted guest table with `count` bonds before doubtech_hid_start. */
+void seed_guest_bonds(unsigned count)
+{
+    struct { uint32_t magic, version, count; hid_bond_t bonds[DOUBTECH_HID_MAX_BONDS]; } table;
+    memset(&table, 0, sizeof(table));
+    table.magic = 0x4b564d42u; table.version = 2; table.count = count;
+    for (unsigned i = 0; i < count; ++i) {
+        table.bonds[i].peer.type = 1; table.bonds[i].peer.address[0] = (uint8_t)(i + 1);
+        memset(table.bonds[i].token.bytes, (int)(i + 1), DOUBTECH_HID_TOKEN_LEN);
+    }
+    assert(sizeof(table) <= sizeof(saved));
+    memcpy(saved, &table, sizeof(table)); saved_size = sizeof(table);
+}
+
+/* Foreign (non-guest) NimBLE bonds below the reserve must not block pairing. */
+void pairing_open_ignores_foreign_bonds(void)
+{
+    seed_guest_bonds(6);
+    mock_nimble_bonds = 10;
+    doubtech_hid_config_t config = {NULL, NULL, NULL, NULL, 4};
+    assert(doubtech_hid_start(&config) == 0);
+    doubtech_hid_pairing_set_events(event_sink, NULL);
+    assert(doubtech_hid_pairing_open() == ESP_OK);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_OPENED);
+}
+
+/* Eight guests refuse a ninth even when foreign bonds leave NimBLE room. */
+void pairing_open_refused_at_eight_guests(void)
+{
+    seed_guest_bonds(8);
+    mock_nimble_bonds = 10;
+    doubtech_hid_config_t config = {NULL, NULL, NULL, NULL, 4};
+    assert(doubtech_hid_start(&config) == 0);
+    doubtech_hid_pairing_set_events(event_sink, NULL);
+    assert(doubtech_hid_pairing_open() == ESP_ERR_INVALID_STATE);
+    assert(last_event.type == DOUBTECH_HID_PAIRING_CAPACITY);
+}
 
 int main(void)
 {

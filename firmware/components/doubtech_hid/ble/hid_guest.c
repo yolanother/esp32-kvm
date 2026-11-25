@@ -37,6 +37,8 @@ static hid_pairing_t pairing;
 static doubtech_hid_pairing_event_fn pairing_events;
 static void *pairing_event_context;
 static bool started;
+static uint8_t foreign_bond_reserve;
+static volatile bool host_synced;
 static char device_name[DOUBTECH_HID_NAME_MAX_BYTES + 1];
 static struct ble_npl_event disconnect_events[DOUBTECH_HID_MAX_CONNECTIONS];
 static struct ble_npl_callout pairing_timeout;
@@ -211,6 +213,7 @@ static void advertise(void)
 static void on_reset(int reason)
 {
     (void)reason;
+    host_synced = false;
     ble_npl_callout_stop(&advertising_retry);
     for (uint8_t slot = 1; slot <= DOUBTECH_HID_MAX_CONNECTIONS; ++slot) {
         hid_channel_t *channel = hid_gatt_channel_at(slot);
@@ -246,6 +249,7 @@ static void on_sync(void)
     ble_svc_gatt_changed(0x0001, 0xffff);
     restart_reconnect_sweep();
     advertise();
+    host_synced = true;
 }
 
 /* Encryption and CCCD writes can be reported for a link before this callback has
@@ -534,12 +538,14 @@ esp_err_t doubtech_hid_start(const doubtech_hid_config_t *config)
     if (!valid_length(name, DOUBTECH_HID_NAME_MAX_BYTES) ||
         !valid_length(manufacturer, DOUBTECH_HID_DIS_STRING_MAX_BYTES) ||
         !valid_length(model, DOUBTECH_HID_DIS_STRING_MAX_BYTES) ||
-        (bond_namespace && !valid_length(bond_namespace, DOUBTECH_HID_BOND_NAMESPACE_MAX_CHARS)))
+        (bond_namespace && !valid_length(bond_namespace, DOUBTECH_HID_BOND_NAMESPACE_MAX_CHARS)) ||
+        (config && config->foreign_bond_reserve > DOUBTECH_HID_MAX_BONDS))
         return ESP_ERR_INVALID_ARG;
 #ifdef CONFIG_DOUBTECH_HID_KEYBOARD_ONLY_DIAGNOSTIC
     name = "DoubTech KB Test";
 #endif
     memcpy(device_name, name, strlen(name) + 1);
+    foreign_bond_reserve = config ? config->foreign_bond_reserve : 0;
     hid_gatt_set_device_info(manufacturer, model);
     esp_err_t result = hid_pairing_store_set_namespace(bond_namespace);
     if (result != ESP_OK) return result;
@@ -586,14 +592,17 @@ void doubtech_hid_pairing_set_events(doubtech_hid_pairing_event_fn callback, voi
     pairing_event_context = context;
 }
 
+bool doubtech_hid_host_synced(void) { return host_synced; }
+
 esp_err_t doubtech_hid_pairing_open(void)
 {
     if (!started || !pairing_events) return ESP_ERR_INVALID_STATE;
-    ble_addr_t bonds[DOUBTECH_HID_MAX_BONDS];
+    /* Bonds owned by other roles (the central) share the NimBLE store; allow for them. */
+    ble_addr_t bonds[DOUBTECH_HID_MAX_BONDS * 2];
     int count = 0;
-    if (ble_store_util_bonded_peers(bonds, &count, DOUBTECH_HID_MAX_BONDS) != 0)
+    if (ble_store_util_bonded_peers(bonds, &count, DOUBTECH_HID_MAX_BONDS + foreign_bond_reserve) != 0)
         return ESP_ERR_INVALID_STATE;
-    if (count >= DOUBTECH_HID_MAX_BONDS || pairing.bond_count >= DOUBTECH_HID_MAX_BONDS) {
+    if (count >= DOUBTECH_HID_MAX_BONDS + foreign_bond_reserve || pairing.bond_count >= DOUBTECH_HID_MAX_BONDS) {
         publish(DOUBTECH_HID_PAIRING_CAPACITY, 0, 0, NULL);
         return ESP_ERR_INVALID_STATE;
     }

@@ -138,6 +138,31 @@ static void start_twice_is_safe(void)
     assert(strcmp(gap_name, "ESP32 KVM") == 0);
 }
 
+static void reserve_above_8_rejected(void)
+{
+    doubtech_hid_config_t config = {NULL, NULL, NULL, NULL, 9};
+    check_gap_name = false;
+    assert(doubtech_hid_start(&config) == ESP_ERR_INVALID_ARG);
+    no_side_effects();
+    doubtech_hid_config_t maximum = {NULL, NULL, NULL, NULL, 8};
+    assert(doubtech_hid_start(&maximum) == 0);
+}
+
+static void host_synced_false_before_sync_true_after(void)
+{
+    check_gap_name = false;
+    assert(!doubtech_hid_host_synced());
+    assert(doubtech_hid_start(NULL) == 0);
+    assert(!doubtech_hid_host_synced());
+    ble_hs_cfg.sync_cb();
+    assert(doubtech_hid_host_synced());
+    ble_hs_cfg.reset_cb(0);
+    assert(!doubtech_hid_host_synced());
+}
+
+static void foreign_ignored(void) { check_gap_name = false; pairing_open_ignores_foreign_bonds(); }
+static void eight_guests_refused(void) { check_gap_name = false; pairing_open_refused_at_eight_guests(); }
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; void (*run)(void); } cases[] = {
@@ -152,6 +177,10 @@ int main(int argc, char **argv)
         {"advertised_name_and_dis_follow_config", advertised_name_and_dis_follow_config},
         {"legacy_identity_is_unchanged", legacy_identity_is_unchanged},
         {"start_twice_is_safe", start_twice_is_safe},
+        {"reserve_above_8_rejected", reserve_above_8_rejected},
+        {"host_synced_false_before_sync_true_after", host_synced_false_before_sync_true_after},
+        {"pairing_open_ignores_foreign_bonds", foreign_ignored},
+        {"pairing_open_refused_at_eight_guests", eight_guests_refused},
     };
     for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index)
         if (argc == 2 && strcmp(argv[1], cases[index].name) == 0) {

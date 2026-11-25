@@ -15,6 +15,7 @@ static const doubtech_hid_config_t hid_config = {
     .manufacturer = "DoubTech",
     .model = "DoubTech HID",
     .bond_namespace = NULL,
+    .foreign_bond_reserve = 4,
 };
 
 /** Starts services; any startup error leaves the routing gate disarmed. */

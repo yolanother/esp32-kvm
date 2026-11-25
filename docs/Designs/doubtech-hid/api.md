@@ -160,6 +160,7 @@ typedef struct {
     const char *manufacturer;
     const char *model;
     const char *bond_namespace;
+    uint8_t foreign_bond_reserve;
 } doubtech_hid_config_t;
 ```
 
@@ -169,6 +170,7 @@ typedef struct {
 | `manufacturer` | 1 to `DOUBTECH_HID_DIS_STRING_MAX_BYTES` (32) bytes. | `"DoubTech"` |
 | `model` | 1 to 32 bytes. | `"BLE HID"` |
 | `bond_namespace` | 1 to 15 characters (an NVS namespace name). | `"kvm_bonds"`, the namespace the earlier shipped firmware used |
+| `foreign_bond_reserve` | 0 to `DOUBTECH_HID_MAX_BONDS` (8); larger values make `doubtech_hid_start` return `ESP_ERR_INVALID_ARG`. The number of NimBLE bonds owned by other roles (for example a central) that share the store; `doubtech_hid_pairing_open` allows that many extra NimBLE bonds. | `0` (an omitted field is zero) |
 
 The strings are copied during `doubtech_hid_start`; they do not need to outlive it.
 A `NULL` pointer to the whole struct selects every default. An empty string is not
@@ -206,6 +208,10 @@ Connections, MITM, display-yes/no capability). With
 `"DoubTech KB Test"` whatever `device_name` says (the name is still validated
 first).
 
+### `bool doubtech_hid_host_synced(void)`
+
+Returns `true` from the moment the NimBLE host sync callback finishes until the next host reset, and `false` before the first sync. It reads one flag and may be called from any task. A host reset also clears it.
+
 ### `void doubtech_hid_pairing_set_events(doubtech_hid_pairing_event_fn callback, void *context)`
 
 Stores the event sink and its context. `callback` may be `NULL` (no events). The
@@ -229,8 +235,8 @@ current advertisement and schedules a restart (250 ms) that advertises
 undirected and discoverable. Existing guests stay connected.
 
 Returns `ESP_OK`; `ESP_ERR_INVALID_STATE` if the service is not started, no event
-sink is set, the bond store cannot be queried, or eight bonds are stored (the last
-case also publishes `DOUBTECH_HID_PAIRING_CAPACITY`); `ESP_FAIL` if the 60-second
+sink is set, the bond store cannot be queried, eight guest bonds are stored, or the NimBLE store holds `DOUBTECH_HID_MAX_BONDS + foreign_bond_reserve` bonds (the last two
+cases also publish `DOUBTECH_HID_PAIRING_CAPACITY`); `ESP_FAIL` if the 60-second
 timer cannot be armed (the window is closed again).
 
 ### `void doubtech_hid_pairing_cancel(void)`
