@@ -16,7 +16,10 @@ typedef enum {
     KVM_HUB_SWALLOWED,
     KVM_HUB_DROPPED_HOST_ARMED,
     KVM_HUB_DROPPED_NOT_READY,
-    KVM_HUB_TARGET_CHANGED
+    KVM_HUB_TARGET_CHANGED,
+    /** A chord was swallowed but releasing the held old state failed on a ready slot; it is
+     * retried on each later swallowed keyboard report until it succeeds. */
+    KVM_HUB_SWITCH_FAILED
 } kvm_hub_result_t;
 
 /** Hub state; armed_slot is zero while the hub holds no output arm. keys, buttons and
@@ -31,6 +34,8 @@ typedef struct {
     uint16_t consumer;
     uint8_t raw_keys[8]; /* last raw keyboard report, for chord press detection */
     bool chord_latched;  /* swallow keyboard reports until every non-modifier key is up */
+    bool switch_pending; /* a chord switch or release is awaiting retry */
+    uint8_t pending_target;
 } kvm_input_hub_t;
 
 /** Initializes the hub on target zero with nothing armed or held. */
@@ -54,8 +59,9 @@ kvm_hub_result_t kvm_input_hub_input(kvm_input_hub_t *hub, const kvm_router_inpu
                                      bool router_armed);
 /** Sends all-up then releases the arm. The caller must invoke it BEFORE the router arms;
  * the hub cannot see the router slot. Returns true when nothing is left held or armed
- * (a dead slot counts as released), false when a ready slot failed and a retry is needed. */
-bool kvm_input_hub_yield(kvm_input_hub_t *hub);
+* (a dead slot counts as released), false when a ready slot failed and a retry is needed.
+ * With router_armed it abandons local state without emitting and returns true. */
+bool kvm_input_hub_yield(kvm_input_hub_t *hub, bool router_armed);
 /** Sends all-up keyboard, zero pointer and zero consumer after an input device is lost.
  * With router_armed it only abandons local state and emits nothing. */
 void kvm_input_hub_device_lost(kvm_input_hub_t *hub, bool router_armed);

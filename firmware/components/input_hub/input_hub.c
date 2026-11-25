@@ -38,6 +38,7 @@ static void clear_local(kvm_input_hub_t *hub)
     hub->armed_slot = 0;
     memset(hub->raw_keys, 0, sizeof hub->raw_keys);
     hub->chord_latched = false;
+    hub->switch_pending = false;
 }
 
 /* True when the output reports the slot not ready: it cannot hold keys down. */
@@ -164,6 +165,15 @@ static bool hub_chord(const uint8_t keys[8], uint8_t *target, bool *release_all)
     return true;
 }
 
+static bool apply_switch(kvm_input_hub_t *hub, uint8_t target)
+{
+    if (target != hub->target) {
+        return kvm_input_hub_set_target(hub, target, false);
+    }
+    /* Unchanged: still release anything held (modifiers forwarded before the chord). */
+    return kvm_input_hub_yield(hub, false);
+}
+
 static bool no_keys(const uint8_t keys[8])
 {
     int i;
@@ -181,13 +191,25 @@ static bool chord_input(kvm_input_hub_t *hub, const kvm_router_input_t *input,
 {
     uint8_t target = 0;
     bool release_all = false;
+    uint8_t before = hub->target;
     bool was_up = no_keys(hub->raw_keys);
     memcpy(hub->raw_keys, input->keyboard, sizeof hub->raw_keys);
     if (hub->chord_latched) {
-        if (no_keys(input->keyboard)) {
+        *result = KVM_HUB_SWALLOWED;
+        if (hub->switch_pending) {
+            uint8_t prior = hub->target;
+            if (!apply_switch(hub, hub->pending_target)) {
+                *result = KVM_HUB_SWITCH_FAILED;
+            } else {
+                hub->switch_pending = false;
+                if (hub->target != prior) {
+                    *result = KVM_HUB_TARGET_CHANGED;
+                }
+            }
+        }
+        if (no_keys(input->keyboard) && !hub->switch_pending) {
             hub->chord_latched = false;
         }
-        *result = KVM_HUB_SWALLOWED;
         return true;
     }
     /* A chord key must be newly pressed with nothing else held. */
@@ -196,12 +218,12 @@ static bool chord_input(kvm_input_hub_t *hub, const kvm_router_input_t *input,
     }
     hub->chord_latched = true;
     *result = KVM_HUB_SWALLOWED;
-    if (target != hub->target) {
-        if (kvm_input_hub_set_target(hub, target, false)) {
-            *result = KVM_HUB_TARGET_CHANGED;
-        }
-    } else if (release_all) {
-        (void)kvm_input_hub_yield(hub);
+    if (!apply_switch(hub, target)) {
+        hub->switch_pending = true;
+        hub->pending_target = target;
+        *result = KVM_HUB_SWITCH_FAILED;
+    } else if (target != before) {
+        *result = KVM_HUB_TARGET_CHANGED;
     }
     return true;
 }
@@ -243,8 +265,12 @@ kvm_hub_result_t kvm_input_hub_input(kvm_input_hub_t *hub, const kvm_router_inpu
     return KVM_HUB_FORWARDED;
 }
 
-bool kvm_input_hub_yield(kvm_input_hub_t *hub)
+bool kvm_input_hub_yield(kvm_input_hub_t *hub, bool router_armed)
 {
+    if (router_armed) {
+        clear_local(hub);
+        return true;
+    }
     /* A failed all-up keeps the arm too, so a retry can still reach the held slot. */
     return send_all_up(hub) && drop_arm(hub);
 }
@@ -256,6 +282,9 @@ void kvm_input_hub_device_lost(kvm_input_hub_t *hub, bool router_armed)
         clear_local(hub);
         return;
     }
+    memset(hub->raw_keys, 0, sizeof hub->raw_keys);
+    hub->chord_latched = false;
+    hub->switch_pending = false;
     was_held = held(hub);
     if (send_all_up(hub) && !was_held) {
         (void)drop_arm(hub);
