@@ -79,6 +79,7 @@ typedef struct {
     uint8_t card_ready_mask;
     uint8_t selected_card;
     bool show_guest_settings;
+    bool usb_dim;  /* no host session: render the view with a dimmed "USB off" badge */
 } kvm_display_view_t;
 
 /** Derives visible text from confirmed status and a monotonic timestamp. */

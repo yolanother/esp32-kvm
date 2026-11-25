@@ -39,12 +39,15 @@ int main(void)
     status.armed = false;
     kvm_display_make_view(&status, 1000, &view);
     assert(strcmp(view.primary, "DISARMED") == 0);
+    /* usb_off_with_ready_guest_shows_active_dimmed */
     status.usb_connected = false;
     kvm_display_make_view(&status, 1000, &view);
-    assert(view.screen == KVM_DISPLAY_PAUSED);
-    assert(strcmp(view.primary, "INPUT PAUSED") == 0);
+    assert(view.screen == KVM_DISPLAY_ACTIVE);
+    assert(view.usb_dim);
+    assert(strcmp(view.title, "DOUBTECH HID") == 0);
     assert(strcmp(view.detail, "1 guest connected") == 0);
-    assert(strcmp(view.footer, "USB off | reconnect host") == 0);
+    assert(strcmp(view.footer, "USB off") == 0);
+    assert(strcmp(view.primary, "INPUT PAUSED") != 0);
     status.usb_connected = true;
     status.show_guest_list = true;
     status.touch_available = true;
@@ -80,7 +83,7 @@ int main(void)
     status.ready_slots = 1;
     status.usb_connected = false;
     kvm_display_make_view(&status, 61000, &view);
-    assert(view.screen == KVM_DISPLAY_PAUSED);
+    assert(view.screen == KVM_DISPLAY_ACTIVE && view.usb_dim);
     assert(strcmp(view.detail, "1 guest connected") == 0);
     status.usb_connected = true;
     status.ready_slots = 1;
@@ -161,6 +164,71 @@ int main(void)
     kvm_display_make_view(&status, 1000, &view);
     assert(view.screen == KVM_DISPLAY_UPDATE);
     assert(strcmp(view.primary, "42%") == 0);
+
+    /* No host session: the guest view stays, only usb_dim/footer change. */
+    {
+        kvm_display_status_t s = {0};
+        kvm_display_view_t on = {0}, off, prev;
+        s.guest_slots = 2; s.ready_slots = 2; s.ready_mask = 3; s.occupied_mask = 3;
+        s.guest_ready = true; s.selected_slot = 0;
+        for (int i = 0; i < 6; ++i) {
+            s.usb_connected = s.host_session = (i % 2) == 0;
+            kvm_display_make_view(&s, 5000, &prev);
+            kvm_display_make_view(&s, 5000, &off);
+            assert(memcmp(&prev, &off, sizeof prev) == 0);
+            if (s.usb_connected) on = prev;
+            else {
+                assert(off.screen == on.screen && off.screen == KVM_DISPLAY_ACTIVE);
+                assert(off.usb_dim && !on.usb_dim);
+                assert(off.card_visible_mask == on.card_visible_mask);
+                assert(off.card_ready_mask == on.card_ready_mask);
+                assert(off.selected_card == on.selected_card);
+                assert(strcmp(off.primary, on.primary) == 0);
+                assert(strcmp(off.detail, on.detail) == 0);
+                assert(strcmp(off.footer, "USB off") == 0);
+            }
+        }
+        /* usb_off_no_guest_shows_guest_view_not_pause */
+        memset(&s, 0, sizeof s);
+        kvm_display_make_view(&s, 5000, &off);
+        assert(off.screen == KVM_DISPLAY_GUEST_LIST && off.usb_dim);
+        assert(off.selectable_slots == 0);
+        assert(strcmp(off.detail, "No guests connected") == 0);
+        assert(strcmp(off.footer, "USB off") == 0);
+        assert(strcmp(off.primary, "INPUT PAUSED") != 0);
+        /* fault_still_pauses and armed-without-ready still pause with no session */
+        s.fault = true;
+        kvm_display_make_view(&s, 5000, &off);
+        assert(off.screen == KVM_DISPLAY_PAUSED && strcmp(off.primary, "INPUT PAUSED") == 0);
+        assert(!off.usb_dim);
+        s.fault = false; s.armed = true; s.guest_ready = false;
+        s.ready_slots = 1; s.ready_mask = 1; s.occupied_mask = 1; s.guest_slots = 1;
+        kvm_display_make_view(&s, 5000, &off);
+        assert(off.screen == KVM_DISPLAY_PAUSED && strcmp(off.title, "ROUTING FAULT") == 0);
+        /* recovery_still_wins and updating still win */
+        s.armed = false; s.recovery_required = true;
+        kvm_display_make_view(&s, 5000, &off);
+        assert(off.screen == KVM_DISPLAY_RECOVERY && !off.usb_dim);
+        s.recovery_required = false; s.updating = true;
+        kvm_display_make_view(&s, 5000, &off);
+        assert(off.screen == KVM_DISPLAY_UPDATE);
+        s.updating = false;
+        /* pairing keeps precedence over the no-session view */
+        s.pairing_state = KVM_DISPLAY_PAIRING_WAITING;
+        s.pairing_deadline_ms = 9000;
+        s.ready_slots = 0; s.ready_mask = 0; s.occupied_mask = 0; s.guest_slots = 0;
+        kvm_display_make_view(&s, 5000, &off);
+        assert(off.screen == KVM_DISPLAY_PAIRING && !off.usb_dim);
+        /* show_guest_list unchanged with a host session */
+        memset(&s, 0, sizeof s);
+        s.usb_connected = s.host_session = true;
+        s.guest_slots = 1; s.ready_slots = 1; s.ready_mask = 1; s.occupied_mask = 1;
+        s.show_guest_list = true;
+        kvm_display_make_view(&s, 5000, &on);
+        assert(on.screen == KVM_DISPLAY_GUEST_LIST && !on.usb_dim);
+        assert(strcmp(on.rows[0], "GUEST 1  STANDBY") == 0);
+        assert(strcmp(on.footer, "Use host to select") == 0);
+    }
 
     kvm_display_buttons_t b;
     kvm_display_buttons_init(&b, false, true, 0);
