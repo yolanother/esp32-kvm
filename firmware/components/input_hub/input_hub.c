@@ -225,11 +225,39 @@ bool kvm_input_hub_flush(kvm_input_hub_t *hub, bool router_armed)
     return ok;
 }
 
+static bool switch_target(kvm_input_hub_t *hub, uint8_t target, bool router_armed);
+
 bool kvm_input_hub_set_target(kvm_input_hub_t *hub, uint8_t target, bool router_armed)
 {
     if (target > KVM_INPUT_HUB_MAX_TARGET) {
         return false;
     }
+    hub->explicit_target = true;
+    return switch_target(hub, target, router_armed);
+}
+
+bool kvm_input_hub_auto_target(kvm_input_hub_t *hub, uint8_t ready_mask, bool router_armed)
+{
+    uint8_t slot;
+    if (hub->explicit_target) {
+        return false;
+    }
+    if (hub->target != 0 && (ready_mask & (1u << (hub->target - 1u)))) {
+        return false; /* still on a ready guest: keep it */
+    }
+    for (slot = 1; slot <= KVM_INPUT_HUB_MAX_TARGET; slot++) {
+        if (ready_mask & (1u << (slot - 1u))) {
+            break;
+        }
+    }
+    if (slot > KVM_INPUT_HUB_MAX_TARGET || slot == hub->target) {
+        return false;
+    }
+    return switch_target(hub, slot, router_armed);
+}
+
+static bool switch_target(kvm_input_hub_t *hub, uint8_t target, bool router_armed)
+{
     if (router_armed) {
         clear_local(hub);
         hub->target = target;
@@ -333,6 +361,7 @@ static bool chord_input(kvm_input_hub_t *hub, const kvm_router_input_t *input,
         return false;
     }
     hub->chord_latched = true;
+    hub->explicit_target = true; /* even a chord for the current target is a choice */
     hub->switch_pending = false; /* a fresh chord supersedes any stale pending target */
     *result = KVM_HUB_SWALLOWED;
     if (!apply_switch(hub, target)) {

@@ -310,9 +310,11 @@ static void display_worker(void *context)
         kvm_display_make_view(&next, (uint64_t)esp_timer_get_time() / 1000, &view);
         char badge[48];
         kvm_display_badge_text(&next, badge, sizeof badge);
-        /* The badge only replaces the footer on the dimmed active screen. Input
-           changes do not alter the view, so compare the badge text as well. */
-        bool badge_changed = view.usb_dim && strcmp(badge, shown_badge) != 0;
+        /* The badge only replaces the footer on the dimmed active screen, and
+           never the This PC hint (the same footer with or without a session).
+           Input changes do not alter the view, so compare the badge as well. */
+        bool use_badge = view.usb_dim && !view.footer_hint;
+        bool badge_changed = use_badge && strcmp(badge, shown_badge) != 0;
         if (panel_started && (memcmp(&shown, &view, sizeof(view)) != 0 || badge_changed) &&
             lvgl_port_lock(20)) {
             lv_label_set_text(title_label, view.title);
@@ -323,8 +325,8 @@ static void display_worker(void *context)
 #endif
             lv_label_set_text(primary_label, view.primary);
             lv_label_set_text(detail_label, view.detail);
-            lv_label_set_text(footer_label, view.usb_dim ? badge : view.footer);
-            strcpy(shown_badge, view.usb_dim ? badge : "");
+            lv_label_set_text(footer_label, use_badge ? badge : view.footer);
+            snprintf(shown_badge, sizeof shown_badge, "%s", use_badge ? badge : "");
             bool input_screen = view.screen == KVM_DISPLAY_INPUT_PAIR;
             /* The input rows reach y 220; its countdown footer sits below them.
                Beside the entry and gear buttons the footer ends before x 142.

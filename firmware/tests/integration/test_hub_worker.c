@@ -867,6 +867,43 @@ static void disconnected_slot_still_abandons(void)
     assert(!kvm_hub_queue_pending(&queue));
 }
 
+/* After boot (nothing chosen yet) the owner types with no chord: input goes
+ * to the first ready guest, not to the This PC stub. Guests coming and going
+ * move it only until an explicit choice, which then holds (no persistence). */
+static void boot_default_target_is_first_ready_guest(void)
+{
+    setup();
+    assert(worker.hub.target == 0);
+    kvm_hub_worker_auto_target(&worker, 0x00); /* no guest yet: nothing to pick */
+    assert(worker.hub.target == 0);
+    kvm_hub_worker_auto_target(&worker, 0x01); /* guest 1 reconnects after boot */
+    assert(worker.hub.target == 1);
+    push(key_msg(4));
+    drain();
+    assert(worker.last_result == KVM_HUB_FORWARDED && chan[1].armed && chan[1].keys[2] == 4);
+    /* Guest 1 drops (DISCONNECTED, then the slot sample): guest 2 takes over. */
+    chan[1].ready = false;
+    chan[1].armed = false;
+    kvm_hub_worker_slot_lost(&worker, 1);
+    kvm_hub_worker_auto_target(&worker, 0x02);
+    assert(worker.hub.target == 2);
+    push(key_msg(5));
+    drain();
+    assert(chan[2].keys[2] == 5);
+    /* An explicit touch choice of This PC is remembered until reboot. */
+    assert(kvm_hub_worker_select(&worker, 0) && worker.hub.target == 0);
+    kvm_hub_worker_auto_target(&worker, 0x07);
+    assert(worker.hub.target == 0 && !chan[2].armed && chan[2].keys[2] == 0);
+    /* The same rule with a host session open but unarmed (the app is running). */
+    setup();
+    open_session();
+    kvm_hub_worker_auto_target(&worker, 0x04);
+    assert(worker.hub.target == 3);
+    push(key_msg(6));
+    drain();
+    assert(chan[3].keys[2] == 6);
+}
+
 /* ---- input-device pairing beside the router and guest pairing ---- */
 static kvm_display_input_pairing_t input_pairing;
 static int central_begin_calls, central_cancel_calls, guest_begin_calls;
@@ -1081,6 +1118,7 @@ int main(void)
     busy_bridge_keeps_hub_arm_and_host_arm_succeeds();
     host_arm_recovers_a_stale_channel_arm();
     disconnected_slot_still_abandons();
+    boot_default_target_is_first_ready_guest();
     central_backoff_is_bounded();
     input_pairing_allowed_with_unarmed_session();
     guest_pairing_refused_while_input_window_open();

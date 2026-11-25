@@ -35,6 +35,16 @@ static bool input_screen_shown(const kvm_display_status_t *s)
            !(s->armed && !s->guest_ready);
 }
 
+/* Typing on This PC goes nowhere until stage 3: tell the owner how to reach a guest. */
+#define THIS_PC_HINT "This PC: use Ctrl+Alt+1-3"
+
+/* Keyboard connected, device input on This PC and no host route armed: the
+ * same in either session state, so it never makes the screen flash. */
+static bool this_pc_hint(const kvm_display_status_t *s)
+{
+    return s->input_kbd && s->hub_target == 0 && !s->armed;
+}
+
 static const char *input_kind_text(uint8_t kind)
 {
     return kind == KVM_DISPLAY_INPUT_KEYBOARD ? "KEYBOARD" :
@@ -143,8 +153,16 @@ static void make_input_view(const kvm_display_status_t *s, uint64_t now_ms,
         break;
     default: /* RESULT */
         if (s->input_pair_reason == 0) {
+            /* Say where the new device's input goes (the hub target, a ready
+               guest by default); on This PC, how to reach a guest instead. */
+            uint8_t target = s->hub_target <= 3u ? s->hub_target : 0;
+            char label[25];
+            if (v->card_visible_mask & (1u << target)) COPY_TEXT(label, v->card_labels[target]);
+            else snprintf(label, sizeof(label), "Guest %u", (unsigned)target);
             snprintf(v->primary, sizeof(v->primary), "%s PAIRED", input_kind_text(s->input_pair_kind));
-            COPY_TEXT(v->detail, s->input_pair_name[0] ? s->input_pair_name : "Ready to use");
+            join_text(v->detail, sizeof(v->detail), "Input goes to ", label, NULL);
+            if (target == 0) COPY_TEXT(v->footer, THIS_PC_HINT);
+            else COPY_TEXT(v->footer, s->input_pair_name);
         } else {
             uint8_t reason = s->input_pair_reason <= KVM_DISPLAY_INPUT_REASON_CANCELLED
                                  ? s->input_pair_reason : KVM_DISPLAY_INPUT_REASON_AUTH_FAILED;
@@ -276,6 +294,12 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         if (!s->usb_connected) {
             v->usb_dim = true;
             COPY_TEXT(v->footer, "USB off");
+        }
+        /* The This PC hint is the footer in both session states (the renderer
+           shows it instead of the badge), so it never differs with the session. */
+        if (this_pc_hint(s)) {
+            v->footer_hint = true;
+            COPY_TEXT(v->footer, THIS_PC_HINT);
         }
     }
 }

@@ -568,6 +568,9 @@ static void usb_worker(void *context)
                 kvm_display_next_ready_slot(visible_ready_mask(slots), hub_worker.hub.target));
             plus = false;
         }
+        /* Until the owner chooses a target (chord, card, PLUS), device input
+           follows the first ready guest: This PC is a stub until stage 3. */
+        kvm_hub_worker_auto_target(&hub_worker, visible_ready_mask(slots));
         poll_central_start(time_ms);
         refresh_input_devices();
         if (!(button_bits & 2u)) drain_input_touch(time_ms);

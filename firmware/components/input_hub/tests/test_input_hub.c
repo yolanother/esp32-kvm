@@ -907,8 +907,57 @@ static void keyboard_lost_resets_chord_tracking(void)
     assert(!hub.chord_latched);
 }
 
+/* This PC is a stub until stage 3, so until the owner makes an explicit choice
+ * since boot the hub keeps its target on a ready guest: the lowest-numbered one
+ * when the current target is not a ready guest; a ready target is kept. */
+static void auto_target_follows_ready_guests_until_explicit(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = key(4);
+    kvm_router_input_t to_pc = kbd(LCA, KEY_0, 0);
+    kvm_router_input_t up = kbd(0, 0, 0);
+    setup(&hub, &f);
+    assert(hub.target == 0 && !hub.explicit_target);
+    assert(!kvm_input_hub_auto_target(&hub, 0x00, false) && hub.target == 0); /* no guest */
+    assert(kvm_input_hub_auto_target(&hub, 0x06, false) && hub.target == 2);  /* lowest ready */
+    assert(!kvm_input_hub_auto_target(&hub, 0x07, false) && hub.target == 2); /* kept: still ready */
+    assert(f.count == 0 && !hub.explicit_target);
+    assert(kvm_input_hub_input(&hub, &in, false) == KVM_HUB_FORWARDED && hub.armed_slot == 2);
+    /* Guest 2 drops: all-up and release on it first, then the lowest ready guest. */
+    f.count = 0;
+    assert(kvm_input_hub_auto_target(&hub, 0x05, false) && hub.target == 1);
+    assert(is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && f.calls[0].slot == 2);
+    assert(hub.armed_slot == 0 && hub.keys[2] == 0);
+    assert(!kvm_input_hub_auto_target(&hub, 0x00, false) && hub.target == 1); /* none: left alone */
+    /* An explicit This PC (chord) is remembered: no automatic move any more. */
+    kvm_input_hub_input(&hub, &up, false);
+    assert(kvm_input_hub_input(&hub, &to_pc, false) == KVM_HUB_TARGET_CHANGED && hub.target == 0);
+    assert(hub.explicit_target);
+    assert(!kvm_input_hub_auto_target(&hub, 0x07, false) && hub.target == 0);
+    /* Any set_target (touch, PLUS) is explicit too. */
+    setup(&hub, &f);
+    assert(kvm_input_hub_set_target(&hub, 3, false) && hub.explicit_target);
+    assert(!kvm_input_hub_auto_target(&hub, 0x01, false) && hub.target == 3);
+    /* An invalid target is not a choice. */
+    setup(&hub, &f);
+    assert(!kvm_input_hub_set_target(&hub, 9, false) && !hub.explicit_target);
+    /* A switch that cannot release the old target is retried by the next call. */
+    assert(kvm_input_hub_auto_target(&hub, 0x01, false) && hub.target == 1);
+    kvm_input_hub_input(&hub, &in, false);
+    f.send_ok = false;
+    assert(!kvm_input_hub_auto_target(&hub, 0x02, false) && hub.target == 1);
+    f.send_ok = true;
+    assert(kvm_input_hub_auto_target(&hub, 0x02, false) && hub.target == 2 && !hub.explicit_target);
+    /* With the router armed it moves without emitting. */
+    kvm_input_hub_input(&hub, &in, false);
+    f.count = 0;
+    assert(kvm_input_hub_auto_target(&hub, 0x01, true) && hub.target == 1 && f.count == 0);
+}
+
 int main(void)
 {
+    auto_target_follows_ready_guests_until_explicit();
     keyboard_lost_releases_only_keyboard_state();
     mouse_lost_releases_only_buttons();
     kind_loss_with_nothing_held_releases_the_arm();

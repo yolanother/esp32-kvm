@@ -135,6 +135,12 @@ void kvm_hub_worker_slot_lost(kvm_hub_worker_t *worker, uint8_t slot);
  * (kvm_input_hub_set_live); a false ready() alone (the request bridge can be
  * busy) never does. Call only with a sample that succeeded. */
 void kvm_hub_worker_set_live(kvm_hub_worker_t *worker, uint8_t live_mask);
+/** Default device-input target (This PC is a stub until stage 3): until an
+ * explicit choice since boot (chord, touch card, PLUS, including This PC), keeps
+ * the hub on a ready guest of ready_mask (bit slot - 1), the lowest-numbered one
+ * whenever the current target is not ready (kvm_input_hub_auto_target). Call
+ * every iteration with the visible ready guests; nothing is persisted. */
+void kvm_hub_worker_auto_target(kvm_hub_worker_t *worker, uint8_t ready_mask);
 /** Physical emergency release: all-up and release the hub's arm. */
 void kvm_hub_worker_release(kvm_hub_worker_t *worker);
 /** Delay before central start attempt failures + 1, doubling and capped. */

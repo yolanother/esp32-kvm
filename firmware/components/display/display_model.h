@@ -37,7 +37,7 @@ typedef struct {
     bool host_session;   /* the router holds a live host session */
     bool input_kbd;      /* a paired keyboard is connected */
     bool input_mouse;    /* a paired mouse is connected */
-    uint8_t hub_target;  /* device-input target: 0 This PC, 1 to 3 guests */
+    uint8_t hub_target;  /* device-input target: 0 This PC (a stub until stage 3), 1 to 3 guests */
     /* Input-device pairing snapshot, built by the USB worker
        (kvm_display_input_pairing_status); the display never asks the central. */
     uint8_t input_pair_state;          /* kvm_display_input_state_t */
@@ -157,6 +157,7 @@ typedef struct {
     uint8_t selected_card;
     bool show_guest_settings;
     bool usb_dim;  /* no host session: render the view with a dimmed "USB off" badge */
+    bool footer_hint; /* footer is the "This PC: use Ctrl+Alt+1-3" hint: shown even when dimmed */
     bool show_input_entry;      /* "Add keyboard or mouse", beside the guest settings */
     bool input_cancel;          /* INPUT_PAIR: the close/cancel control is shown */
     uint8_t input_row_count;    /* INPUT_PAIR: selectable device rows */

@@ -413,6 +413,11 @@ void kvm_hub_worker_set_live(kvm_hub_worker_t *w, uint8_t live_mask)
     kvm_input_hub_set_live(&w->hub, live_mask);
 }
 
+void kvm_hub_worker_auto_target(kvm_hub_worker_t *w, uint8_t ready_mask)
+{
+    (void)kvm_input_hub_auto_target(&w->hub, ready_mask, w->router->armed);
+}
+
 void kvm_hub_worker_release(kvm_hub_worker_t *w)
 {
     w->select_pending = false;

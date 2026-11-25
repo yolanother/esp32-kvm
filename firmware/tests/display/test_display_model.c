@@ -221,7 +221,19 @@ static void input_pairing_tests(void)
     assert(kvm_display_input_pairing_blocks_guest(&p)); /* until the result is dismissed */
     input_view(&p, 5000, &s, &v);
     assert(s.input_pair_state == 3 && s.input_pair_reason == 0);
-    assert(strcmp(v.primary, "KEYBOARD PAIRED") == 0 && strcmp(v.detail, "Keyboard K") == 0);
+    /* The result names where input now goes: here This PC (the stub), with the chord hint. */
+    assert(strcmp(v.primary, "KEYBOARD PAIRED") == 0 && strcmp(v.detail, "Input goes to This PC") == 0);
+    assert(strcmp(v.footer, "This PC: use Ctrl+Alt+1-3") == 0);
+    /* On a guest (the default once one is ready): its card label, and the device name. */
+    s.hub_target = 1;
+    kvm_display_make_view(&s, 5000, &v);
+    assert(strcmp(v.detail, "Input goes to Guest 1") == 0 && strcmp(v.footer, "Keyboard K") == 0);
+    snprintf(s.guest_names[0], sizeof s.guest_names[0], "%s", "Desk PC");
+    kvm_display_make_view(&s, 5000, &v);
+    assert(strcmp(v.detail, "Input goes to Desk PC") == 0);
+    s.hub_target = 3; /* not shown on screen: named by number */
+    kvm_display_make_view(&s, 5000, &v);
+    assert(strcmp(v.detail, "Input goes to Guest 3") == 0);
     /* A failure after the result does not overwrite it. */
     {
         kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_FAILED, 0, 0, 2);
@@ -830,14 +842,19 @@ int main(void)
         kvm_display_status_t s = {0};
         kvm_display_view_t on, off;
         /* Toggling the session never changes the screen except usb_dim and
-           footer, for every guest count, hub target and selected slot. */
+           footer, for every guest count, hub target, selected slot and
+           keyboard state. The This PC hint (keyboard connected, input on This
+           PC, nothing armed) is the same footer in both states. */
         for (uint8_t ready = 0; ready <= 3; ++ready)
         for (uint8_t hub = 0; hub <= 3; ++hub)
-        for (uint8_t sel = 0; sel <= 3; ++sel) {
+        for (uint8_t sel = 0; sel <= 3; ++sel)
+        for (uint8_t kbd = 0; kbd <= 1; ++kbd) {
+            bool hint = kbd && hub == 0;
             memset(&s, 0, sizeof s);
             s.guest_slots = ready; s.ready_slots = ready;
             s.ready_mask = s.occupied_mask = (uint8_t)((1u << ready) - 1u);
             s.guest_ready = true; s.selected_slot = sel; s.hub_target = hub;
+            s.input_kbd = kbd != 0;
             s.usb_connected = s.host_session = true;
             kvm_display_make_view(&s, 5000, &on);
             s.usb_connected = s.host_session = false;
@@ -852,13 +869,26 @@ int main(void)
             assert(off.selected_card == on.selected_card);
             assert(on.selected_card == (hub <= ready ? hub : 0)); /* unoccupied: This PC */
             assert(!on.usb_dim && off.usb_dim);
-            assert(strcmp(off.footer, "USB off") == 0);
-            assert(strcmp(on.footer, "Selected target is highlighted") == 0);
+            assert(on.footer_hint == hint && off.footer_hint == hint);
+            if (hint) {
+                assert(strcmp(on.footer, "This PC: use Ctrl+Alt+1-3") == 0);
+                assert(strcmp(off.footer, on.footer) == 0);
+            } else {
+                assert(strcmp(off.footer, "USB off") == 0);
+                assert(strcmp(on.footer, "Selected target is highlighted") == 0);
+            }
             /* Everything else is identical once usb_dim and footer are aligned. */
             off.usb_dim = false;
             memcpy(off.footer, on.footer, sizeof off.footer);
             assert(memcmp(&on, &off, sizeof on) == 0);
         }
+        /* An armed host route is not "This PC with no output": no hint. */
+        memset(&s, 0, sizeof s);
+        s.usb_connected = s.host_session = true; s.armed = true; s.guest_ready = true;
+        s.guest_slots = s.ready_slots = 1; s.ready_mask = s.occupied_mask = 1;
+        s.selected_slot = 1; s.input_kbd = true; s.hub_target = 0;
+        kvm_display_make_view(&s, 5000, &on);
+        assert(!on.footer_hint && strcmp(on.footer, "Selected target is highlighted") == 0);
         /* usb_off_no_guest_shows_guest_view_not_pause */
         memset(&s, 0, sizeof s);
         kvm_display_make_view(&s, 5000, &off);

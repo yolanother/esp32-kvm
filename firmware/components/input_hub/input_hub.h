@@ -49,9 +49,13 @@ typedef struct {
     uint8_t want_keys[8];
     uint8_t want_buttons;
     uint16_t want_consumer;
+    /* An explicit choice (chord, touch, PLUS: any set_target) was made since init; until
+     * then kvm_input_hub_auto_target keeps the target on a ready guest. Not persisted. */
+    bool explicit_target;
 } kvm_input_hub_t;
 
-/** Initializes the hub on target zero with nothing armed or held and every slot live. */
+/** Initializes the hub on target zero with nothing armed or held, every slot live and no
+ * explicit target (automatic targeting on). */
 void kvm_input_hub_init(kvm_input_hub_t *hub, kvm_router_output_t output, void *context);
 /** Re-arm policy: a retry never arms. All-up is only ever sent to a slot the hub itself holds
  * armed (held state implies an arm). Whenever router_armed is true, or the router arms, the
@@ -62,11 +66,20 @@ void kvm_input_hub_init(kvm_input_hub_t *hub, kvm_router_output_t output, void *
  * confirmed release only for a slot known disconnected (kvm_input_hub_set_live); a not-ready
  * or failing live slot keeps both, marks the hub dirty and is retried.
  *
- * Selects target 0 to 3, sending all-up and releasing the old target first. Returns false
- * and keeps the old target when the target is invalid or the all-up or release did not go
- * through on a live old target (retry later). A known-disconnected old target never blocks
- * the switch. */
+ * Selects target 0 to 3, sending all-up and releasing the old target first. A valid target
+ * is an explicit choice (it ends automatic targeting until init), even when the switch has
+ * to be retried. Returns false and keeps the old target when the target is invalid or the
+ * all-up or release did not go through on a live old target (retry later). A
+ * known-disconnected old target never blocks the switch. */
 bool kvm_input_hub_set_target(kvm_input_hub_t *hub, uint8_t target, bool router_armed);
+/** Default target while This PC (0) is a stub: until the first explicit choice since init,
+ * keeps the target on a ready guest. When the current target is not a ready guest in
+ * ready_mask (bit slot - 1) it moves to the lowest-numbered ready one; a target that is still
+ * ready is kept (no jump when a lower guest connects later, so a flapping guest cannot pull
+ * the keyboard away), and with no ready guest the target is left alone. Returns true when the
+ * target changed; a switch that could not release the old target returns false and the next
+ * call retries it. */
+bool kvm_input_hub_auto_target(kvm_input_hub_t *hub, uint8_t ready_mask, bool router_armed);
 /** Records which guest slots may still hold an arm (bit slot - 1 set). Clearing the armed
  * slot's bit (link dropped, or the HID host reports it not ready) abandons its arm and held
  * state without emitting: a disconnected or unready channel is not armed. A successful hub
