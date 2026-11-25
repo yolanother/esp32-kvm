@@ -33,7 +33,5 @@ void kvm_transport_input_touch(kvm_display_input_request_t request);
  * 16; overflow drops pointer motion first; a LOST message is never dropped).
  * Safe from the NimBLE host thread; ignored before the transport starts. */
 void kvm_transport_hub_submit(const kvm_hub_msg_t *msg);
-/** Last device-input target published by the worker: 0 This PC, 1 to 3 guests. */
-uint8_t kvm_transport_hub_target(void);
 
 #endif /* ESP32_KVM_TRANSPORT_USB_SERIAL_JTAG_H */

@@ -259,6 +259,16 @@ void kvm_hub_worker_init(kvm_hub_worker_t *w, kvm_router_t *router, kvm_router_o
     kvm_input_hub_init(&w->hub, hub_output, w);
 }
 
+void kvm_hub_worker_bind_core(kvm_hub_worker_t *w, const kvm_transport_core_t *core)
+{
+    w->core = core;
+}
+
+bool kvm_hub_worker_host_session(const kvm_hub_worker_t *w)
+{
+    return w->router->session_open && (!w->core || w->core->session_open);
+}
+
 void kvm_hub_worker_set_clock(kvm_hub_worker_t *w, kvm_hub_clock_fn now, void *context)
 {
     w->now = now;
@@ -386,7 +396,7 @@ void kvm_hub_worker_iteration(kvm_hub_worker_t *w, kvm_hub_queue_t *q, kvm_trans
 
 bool kvm_hub_worker_select(kvm_hub_worker_t *w, uint8_t target)
 {
-    if (w->router->session_open || target > KVM_INPUT_HUB_MAX_TARGET) return false;
+    if (kvm_hub_worker_host_session(w) || target > KVM_INPUT_HUB_MAX_TARGET) return false;
     if (kvm_input_hub_set_target(&w->hub, target, w->router->armed)) {
         w->select_pending = false;
     } else {

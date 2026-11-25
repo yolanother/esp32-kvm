@@ -942,6 +942,11 @@ int main(void)
         s.selected_slot = 2; s.hub_target = 1;
         kvm_display_make_view(&s, 5000, &on);
         assert(on.selected_card == 2);
+        /* Selected by the host but not armed: the highlight is the hub target
+           (where the keyboard types); the host's slot shows as DISARMED. */
+        s.armed = false;
+        kvm_display_make_view(&s, 5000, &on);
+        assert(on.selected_card == 1 && strcmp(on.primary, "DISARMED") == 0);
         memset(&s, 0, sizeof s);
         /* fault_still_pauses and armed-without-ready still pause with no session */
         s.fault = true;

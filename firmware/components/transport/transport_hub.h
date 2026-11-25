@@ -77,6 +77,7 @@ typedef uint64_t (*kvm_hub_clock_fn)(void *context);
 typedef struct {
     kvm_input_hub_t hub;
     kvm_router_t *router;
+    const kvm_transport_core_t *core; /* optional: the host session, as the screen shows it */
     kvm_router_output_t output;
     void *context;
     kvm_hub_clock_fn now;
@@ -94,6 +95,14 @@ typedef struct {
  * kvm_hub_worker_router_output() and this worker as its context. */
 void kvm_hub_worker_init(kvm_hub_worker_t *worker, kvm_router_t *router,
                          kvm_router_output_t output, void *context);
+/** Binds the transport core whose session, together with the router's, decides
+ * who owns a card tap or PLUS (kvm_hub_worker_host_session). */
+void kvm_hub_worker_bind_core(kvm_hub_worker_t *worker, const kvm_transport_core_t *core);
+/** True while a host session owns selection: the same predicate the status
+ * projection uses for usb_connected (core and router session both open; the
+ * router alone when no core is bound), so a tap always goes where the screen
+ * says: the host with a live session, the hub when it shows "USB off". */
+bool kvm_hub_worker_host_session(const kvm_hub_worker_t *worker);
 /** Monotonic milliseconds for the drain budget; without it only the count bounds a drain. */
 void kvm_hub_worker_set_clock(kvm_hub_worker_t *worker, kvm_hub_clock_fn now, void *context);
 /** Router output that delegates to the worker's output. Its arm runs only when
@@ -122,8 +131,9 @@ void kvm_hub_worker_drain(kvm_hub_worker_t *worker, kvm_hub_queue_t *queue);
 void kvm_hub_worker_iteration(kvm_hub_worker_t *worker, kvm_hub_queue_t *queue,
                               kvm_transport_core_t *core, const uint8_t *bytes,
                               size_t length);
-/** Touch or PLUS selection. False when a host session owns selection; true when
- * the hub took the target or will retry it on the next device report. */
+/** Touch or PLUS selection. False when a host session owns selection
+ * (kvm_hub_worker_host_session); true when the hub took the target or will
+ * retry it on the next drain. */
 bool kvm_hub_worker_select(kvm_hub_worker_t *worker, uint8_t target);
 /** A guest slot dropped (DISCONNECTED event): marks it known disconnected and
  * forgets the hub arm on that slot. 0 (slot unknown) releases the hub's arm

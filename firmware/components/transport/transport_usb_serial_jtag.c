@@ -74,7 +74,6 @@ static portMUX_TYPE hub_lock = portMUX_INITIALIZER_UNLOCKED;
 static atomic_bool hub_queue_ready;
 static kvm_hub_worker_t hub_worker;
 static QueueHandle_t central_event_queue;
-static atomic_uint published_hub_target;
 /* Input-device pairing screen: worker-owned, fed by touch and central events. */
 static kvm_display_input_pairing_t input_pairing;
 static QueueHandle_t input_touch_queue;
@@ -86,8 +85,6 @@ void kvm_transport_hub_submit(const kvm_hub_msg_t *msg)
 {
     if (atomic_load(&hub_queue_ready)) (void)kvm_hub_queue_push(&hub_queue, msg);
 }
-
-uint8_t kvm_transport_hub_target(void) { return (uint8_t)atomic_load(&published_hub_target); }
 
 /* NimBLE host thread: copy and enqueue only. */
 static void central_input(const doubtech_hid_central_input_t *input, void *context)
@@ -403,7 +400,7 @@ static void publish_status(bool connected, bool guest_ready, uint8_t paired_gues
     kvm_transport_display_status(&core, &router, connected, guest_ready,
                                  (uint64_t)(esp_timer_get_time() / 1000), &status);
     status.paired_guests = paired_guests;
-    status.host_session = router.session_open;
+    status.host_session = kvm_hub_worker_host_session(&hub_worker);
     status.input_kbd = doubtech_hid_central_connected(DOUBTECH_HID_CENTRAL_KEYBOARD);
     status.input_mouse = doubtech_hid_central_connected(DOUBTECH_HID_CENTRAL_MOUSE);
     status.hub_target = hub_worker.hub.target;
@@ -564,7 +561,7 @@ static void usb_worker(void *context)
             ready_sampled = true;
         }
         bool plus = (button_bits & 1u) && !(button_bits & 2u);
-        if (plus && !router.session_open) {
+        if (plus && !kvm_hub_worker_host_session(&hub_worker)) {
             /* PLUS steps the device-input target while no host session owns it. */
             (void)kvm_hub_worker_select(&hub_worker,
                 kvm_display_next_ready_slot(visible_ready_mask(slots), hub_worker.hub.target));
@@ -596,7 +593,6 @@ static void usb_worker(void *context)
             }
             was_connected = false;
             kvm_hub_worker_iteration(&hub_worker, &hub_queue, NULL, NULL, 0);
-            atomic_store(&published_hub_target, hub_worker.hub.target);
             publish_status(false, guest_ready, paired_guests, slots);
             vTaskDelay(wait);
             continue;
@@ -630,7 +626,6 @@ static void usb_worker(void *context)
         /* Host bytes (heartbeats, ARM) and the router tick (lease) are served
          * first; only then the time-bounded device drain runs. */
         kvm_hub_worker_iteration(&hub_worker, &hub_queue, &core, bytes, host_bytes);
-        atomic_store(&published_hub_target, hub_worker.hub.target);
         if (plus) {
             (void)kvm_transport_core_device_select_request(&core,
                 kvm_display_next_ready_slot(visible_ready_mask(slots), router.slot));
@@ -676,6 +671,7 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     /* The hub and the router share the HID output; the router reaches it
      * through the hub worker so its arm and release keep the hub consistent. */
     kvm_hub_worker_init(&hub_worker, &router, kvm_router_hid_output(), NULL);
+    kvm_hub_worker_bind_core(&hub_worker, &core); /* taps follow the screen's session */
     kvm_hub_worker_set_clock(&hub_worker, now_ms, NULL);
     kvm_router_init(&router, kvm_hub_worker_router_output(), &hub_worker);
     kvm_hub_queue_init(&hub_queue, hub_queue_lock, hub_queue_unlock, NULL);

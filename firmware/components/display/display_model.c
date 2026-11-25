@@ -281,9 +281,14 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
                      s->ready_slots, s->ready_slots == 1 ? "" : "s");
         else COPY_TEXT(v->detail, "No guest connected");
         COPY_TEXT(v->footer, "Selected target is highlighted");
-        /* Highlight rule: with a host route armed the host's selected slot is
-           the live target; otherwise (disarmed, or no host session) the device
-           input hub target is. A target whose card is not shown falls back to
+        /* Highlight rule: the highlighted card is where input goes right now.
+           With a host route armed that is the host's selected slot. Otherwise
+           it is the device-input hub target, also when a host session is open
+           and the host has selected (SWITCH) a slot it has not armed: that slot
+           receives nothing yet, while the paired keyboard types to the hub
+           target. The host's unarmed selection shows as "DISARMED" in primary,
+           not as a highlight; this keeps the highlight identical with and
+           without a session. A target whose card is not shown falls back to
            This PC so something is always highlighted. */
         uint8_t target = (s->usb_connected && s->armed) ? s->selected_slot : s->hub_target;
         v->selected_card = (target <= 3u && (v->card_visible_mask & (1u << target))) ? target : 0;

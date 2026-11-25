@@ -9,6 +9,7 @@
 #include "transport_hub.h"
 #include "router_hid_bridge.h"
 #include "display_pairing.h"
+#include "transport_display_status.h"
 #include "router.h"
 #include <assert.h>
 #include <stdio.h>
@@ -207,6 +208,7 @@ static void setup(void)
     kvm_hub_queue_init(&queue, NULL, NULL, NULL);
     assert(kvm_transport_core_init(&core, "b", "1", SESSION, capture, NULL));
     kvm_transport_core_bind_router(&core, &router, clock_ms, NULL);
+    kvm_hub_worker_bind_core(&worker, &core);
 }
 static void open_session(void)
 {
@@ -904,6 +906,26 @@ static void boot_default_target_is_first_ready_guest(void)
     assert(chan[3].keys[2] == 6);
 }
 
+/* Who owns a card tap or PLUS follows exactly what the screen shows: the
+ * status projection's session (core and router both open). In any gap
+ * between the two (a lease expiry closes the router first) the screen shows
+ * "USB off" and the hub takes the selection; with both open the host does. */
+static void selection_owner_matches_the_screen(void)
+{
+    for (int combo = 0; combo < 4; combo++) {
+        kvm_display_status_t status;
+        bool core_open = (combo & 1) != 0, router_open = (combo & 2) != 0;
+        setup();
+        open_session();
+        core.session_open = core_open;
+        router.session_open = router_open;
+        kvm_transport_display_status(&core, &router, true, true, now_ms, &status);
+        assert(kvm_hub_worker_host_session(&worker) == status.usb_connected);
+        assert(kvm_hub_worker_select(&worker, 2) == !status.usb_connected);
+        assert(worker.hub.target == (status.usb_connected ? 0 : 2));
+    }
+}
+
 /* ---- input-device pairing beside the router and guest pairing ---- */
 static kvm_display_input_pairing_t input_pairing;
 static int central_begin_calls, central_cancel_calls, guest_begin_calls;
@@ -1158,6 +1180,7 @@ int main(void)
     host_arm_recovers_a_stale_channel_arm();
     disconnected_slot_still_abandons();
     boot_default_target_is_first_ready_guest();
+    selection_owner_matches_the_screen();
     central_backoff_is_bounded();
     input_pairing_allowed_with_unarmed_session();
     guest_pairing_refused_while_input_window_open();
