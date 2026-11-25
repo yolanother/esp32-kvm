@@ -324,57 +324,86 @@ static bool reconnect_kind(uint8_t kind)
 void central_reconnect_init(central_reconnect_t *r, uint32_t now_ms)
 {
     memset(r, 0, sizeof(*r));
-    r->due_ms[DOUBTECH_HID_CENTRAL_KEYBOARD] = now_ms;
-    r->due_ms[DOUBTECH_HID_CENTRAL_MOUSE] = now_ms;
+    r->next_ms = now_ms;
 }
 
-/* Milliseconds until due. A due time is never set more than one gap ahead, so a
- * larger difference means the clock passed it long ago (wrapped): due now. */
+uint32_t central_reconnect_gap_ms(uint32_t random)
+{
+    return CENTRAL_RECONNECT_GAP_MS + random % (CENTRAL_RECONNECT_JITTER_MS + 1u);
+}
+
+/* Milliseconds until due. A due time is never set more than one gap (with
+ * jitter) ahead, so a larger difference means the clock passed it long ago
+ * (wrapped): due now. */
 static uint32_t reconnect_wait(uint32_t due_ms, uint32_t now_ms)
 {
     uint32_t wait = due_ms - now_ms;
-    return wait > CENTRAL_RECONNECT_GAP_MS ? 0u : wait;
+    return wait > CENTRAL_RECONNECT_GAP_MS + CENTRAL_RECONNECT_JITTER_MS ? 0u : wait;
+}
+
+static bool reconnect_pending(const central_reconnect_facts_t *f, uint8_t kind)
+{
+    return reconnect_kind(kind) && f->stored[kind] && !f->guest[kind] && !f->linked[kind];
 }
 
 central_reconnect_action_t central_reconnect_next(const central_reconnect_t *r, uint32_t now_ms,
                                                   const central_reconnect_facts_t *f)
 {
     central_reconnect_action_t act = {CENTRAL_RECONNECT_NONE, 0, 0};
-    uint8_t best = 0;
-    uint32_t best_wait = 0;
-    for (uint8_t kind = DOUBTECH_HID_CENTRAL_KEYBOARD; kind <= DOUBTECH_HID_CENTRAL_MOUSE; ++kind) {
-        if (!f->stored[kind] || f->guest[kind] || f->linked[kind]) continue;
-        uint32_t wait = reconnect_wait(r->due_ms[kind], now_ms);
-        if (!best || wait < best_wait) { /* keyboard first on a tie */
-            best = kind;
-            best_wait = wait;
-        }
-    }
-    if (!best) return act;
-    act.kind = best;
+    /* Round robin: the kind after the last attempt's goes first. */
+    uint8_t first = r->last_kind == DOUBTECH_HID_CENTRAL_KEYBOARD ? DOUBTECH_HID_CENTRAL_MOUSE
+                                                                   : DOUBTECH_HID_CENTRAL_KEYBOARD;
+    uint8_t second = first == DOUBTECH_HID_CENTRAL_KEYBOARD ? DOUBTECH_HID_CENTRAL_MOUSE
+                                                            : DOUBTECH_HID_CENTRAL_KEYBOARD;
+    bool urgent = reconnect_pending(f, r->urgent_kind);
+    uint8_t kind = urgent ? r->urgent_kind : reconnect_pending(f, first) ? first
+                                           : reconnect_pending(f, second) ? second : 0;
+    if (!kind) return act;
+    act.kind = kind;
+    uint32_t wait = urgent ? 0u : reconnect_wait(r->next_ms, now_ms);
     if (f->pairing || f->connecting || f->links >= f->link_budget) {
         /* Blocked: the window end or the link event re-evaluates; poll meanwhile. */
         act.step = CENTRAL_RECONNECT_WAIT;
-        act.delay_ms = best_wait > CENTRAL_RECONNECT_GAP_MS ? best_wait : CENTRAL_RECONNECT_GAP_MS;
+        act.delay_ms = wait > CENTRAL_RECONNECT_GAP_MS ? wait : CENTRAL_RECONNECT_GAP_MS;
         return act;
     }
-    if (best_wait) {
+    if (wait) {
         act.step = CENTRAL_RECONNECT_WAIT;
-        act.delay_ms = best_wait;
+        act.delay_ms = wait;
         return act;
     }
     act.step = CENTRAL_RECONNECT_CONNECT;
     return act;
 }
 
-void central_reconnect_attempt_failed(central_reconnect_t *r, uint8_t kind, uint32_t now_ms)
+void central_reconnect_attempt_started(central_reconnect_t *r, uint8_t kind, uint32_t now_ms)
 {
-    if (reconnect_kind(kind)) r->due_ms[kind] = now_ms + CENTRAL_RECONNECT_GAP_MS;
+    (void)now_ms;
+    if (!reconnect_kind(kind)) return;
+    r->last_kind = kind;
+    if (r->urgent_kind == kind) r->urgent_kind = 0; /* the immediate retry is used up */
 }
 
-void central_reconnect_link_lost(central_reconnect_t *r, uint8_t kind, uint32_t now_ms)
+void central_reconnect_attempt_failed(central_reconnect_t *r, uint8_t kind, uint32_t now_ms, uint32_t random)
 {
-    if (reconnect_kind(kind)) r->due_ms[kind] = now_ms;
+    if (!reconnect_kind(kind)) return;
+    r->last_kind = kind;
+    if (r->urgent_kind == kind) r->urgent_kind = 0;
+    r->next_ms = now_ms + central_reconnect_gap_ms(random); /* one gap for every kind */
+}
+
+void central_reconnect_link_lost(central_reconnect_t *r, uint8_t kind, uint32_t now_ms, uint32_t random)
+{
+    if (!reconnect_kind(kind)) return;
+    if (!r->fast_used[kind] || now_ms - r->fast_at_ms[kind] >= CENTRAL_RECONNECT_FAST_MS) {
+        r->urgent_kind = kind;
+        r->fast_used[kind] = true;
+        r->fast_at_ms[kind] = now_ms;
+        return;
+    }
+    /* Dropping again soon: no immediate retry; at least one gap from now. */
+    uint32_t gap = central_reconnect_gap_ms(random);
+    if (reconnect_wait(r->next_ms, now_ms) < gap) r->next_ms = now_ms + gap;
 }
 
 uint8_t central_reconnect_link_budget(unsigned max_connections, unsigned guest_reserve, unsigned central_links)

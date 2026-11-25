@@ -87,14 +87,17 @@ typedef struct {
  * ESP_ERR_INVALID_ARG for a NULL config or an invalid namespace.
  *
  * Reconnect: from then on the stored keyboard and mouse are connected by their
- * identity address in 10 s attempts, 15 s apart, one attempt at a time (the
- * keyboard first), until connected or forgotten. None runs while an input
- * pairing window is open (they resume when it ends), none to an identity that
- * is a guest's, and none beyond the connection budget left after the guests'
- * DOUBTECH_HID_MAX_CONNECTIONS. A connected device that drops (asleep, out of
- * range) is retried at once, then on the same cadence; a connect the
- * controller refuses is an ordinary retry. Each connection reports CONNECTED
- * once input flows and DISCONNECTED when it closes. */
+ * identity address on one shared schedule until connected or forgotten: one
+ * 10 s attempt at a time, alternating between the stored kinds (keyboard
+ * first), and after any attempt that ends without a link a single 15 to 17 s
+ * gap before the next attempt of either kind (scheduled attempts keep the initiator busy at most
+ * 10 s in every 25 s). None runs while an input pairing window is open (they
+ * resume when it ends), none to an identity that is a guest's, and none beyond
+ * the connection budget left after the guests' DOUBTECH_HID_MAX_CONNECTIONS.
+ * A connected device that drops (asleep, out of range) is retried at once, at
+ * most once per 30 s, otherwise on the shared schedule; a connect the
+ * controller refuses is an ordinary failed attempt. Each connection reports
+ * CONNECTED once input flows and DISCONNECTED when it closes. */
 esp_err_t doubtech_hid_central_start(const doubtech_hid_central_config_t *config);
 
 /** Opens a 30 s scan for HID keyboards and mice with sm_mitm cleared for the

@@ -144,18 +144,29 @@ bool central_gatt_notify(const central_gatt_t *m, uint16_t handle, const uint8_t
 bool central_gatt_disconnect(central_gatt_t *m, doubtech_hid_central_input_t *out);
 
 /* ---- Stored-device reconnect schedule ------------------------------------
- * Pure cadence for reconnecting the stored keyboard and mouse: one connection
- * attempt of CENTRAL_RECONNECT_ATTEMPT_MS (the ble_gap_connect duration), then
- * CENTRAL_RECONNECT_GAP_MS before that kind is tried again, so advertising and
- * guest notifications keep their airtime. At most one outgoing attempt runs at
- * a time (keyboard first on a tie), none while an input pairing window is
- * open, never to an identity that is a guest's, and never beyond the central
- * links the connection budget leaves after the guest reserve. A ready link
- * that drops (a keyboard gone to sleep) is retried at once, then on the same
- * cadence. The adapter owns the timer; times are wrapping milliseconds. */
+ * Pure cadence for reconnecting the stored keyboard and mouse, one global
+ * schedule for both: one connection attempt of CENTRAL_RECONNECT_ATTEMPT_MS
+ * (the ble_gap_connect duration) at a time, and after any attempt that ends
+ * without a link (timed out, failed or refused) one shared gap of
+ * CENTRAL_RECONNECT_GAP_MS plus 0 to CENTRAL_RECONNECT_JITTER_MS before the
+ * next attempt of either kind, so scheduled attempts keep the initiator busy at most 10 s in every
+ * 25 s and advertising and guest notifications keep their airtime. Attempts
+ * alternate between the stored kinds (keyboard first), so with both absent
+ * each is tried at least every 2 x (10 + 17) s, with one stored every 27 s.
+ * None runs while an input pairing window is open, none to an identity that
+ * is a guest's, and none beyond the central links the connection budget
+ * leaves after the guest reserve. A ready link that drops (a keyboard gone to
+ * sleep) is retried at once, at most once per CENTRAL_RECONNECT_FAST_MS per
+ * kind; otherwise it follows the global schedule. The adapter owns the timer
+ * and the random source; times are wrapping milliseconds. */
 
 #define CENTRAL_RECONNECT_ATTEMPT_MS 10000u
 #define CENTRAL_RECONNECT_GAP_MS 15000u
+/** Added to each gap (0 to this many ms, from the caller's random value) so
+ * the board's attempts do not stay in step with a device's advertising. */
+#define CENTRAL_RECONNECT_JITTER_MS 2000u
+/** A kind gets at most one immediate retry after a drop in this period. */
+#define CENTRAL_RECONNECT_FAST_MS 30000u
 
 typedef enum {
     CENTRAL_RECONNECT_NONE,    /* nothing to reconnect: stop the timer */
@@ -169,9 +180,13 @@ typedef struct {
     uint32_t delay_ms;
 } central_reconnect_action_t;
 
-/** Earliest next attempt per kind (index DOUBTECH_HID_CENTRAL_KEYBOARD / _MOUSE). */
+/** Global schedule state (kinds index DOUBTECH_HID_CENTRAL_KEYBOARD / _MOUSE). */
 typedef struct {
-    uint32_t due_ms[3];
+    uint32_t next_ms;       /* earliest next scheduled attempt, any kind */
+    uint8_t last_kind;      /* kind of the last attempt (round robin), 0 none */
+    uint8_t urgent_kind;    /* a ready link of this kind dropped: one immediate attempt */
+    bool fast_used[3];      /* an immediate retry was granted ... */
+    uint32_t fast_at_ms[3]; /* ... at this time */
 } central_reconnect_t;
 
 /** What the adapter knows right now, indexed by kind. */
@@ -185,16 +200,24 @@ typedef struct {
     uint8_t link_budget; /* central links the connection budget allows */
 } central_reconnect_facts_t;
 
-/** Both kinds due at now_ms (the boot attempt after the central starts). */
+/** The first attempt is due at now_ms (the boot attempt after the central starts). */
 void central_reconnect_init(central_reconnect_t *r, uint32_t now_ms);
 /** The next step for the given facts. */
 central_reconnect_action_t central_reconnect_next(const central_reconnect_t *r, uint32_t now_ms,
                                                   const central_reconnect_facts_t *facts);
+/** A CONNECT was started for kind (it is the round robin's last kind now). */
+void central_reconnect_attempt_started(central_reconnect_t *r, uint8_t kind, uint32_t now_ms);
 /** An attempt ended without a ready link (timed out, failed before ready, or
- * could not start, e.g. ENOMEM or EBUSY): that kind waits the gap. */
-void central_reconnect_attempt_failed(central_reconnect_t *r, uint8_t kind, uint32_t now_ms);
-/** A ready link of that kind dropped: it is due again at once. */
-void central_reconnect_link_lost(central_reconnect_t *r, uint8_t kind, uint32_t now_ms);
+ * could not start, e.g. ENOMEM or EBUSY): every kind waits one gap plus a
+ * jitter taken from random. */
+void central_reconnect_attempt_failed(central_reconnect_t *r, uint8_t kind, uint32_t now_ms,
+                                      uint32_t random);
+/** A ready link of that kind dropped: one immediate attempt when none was
+ * granted to that kind in the last CENTRAL_RECONNECT_FAST_MS; otherwise the
+ * kind waits for the global schedule (at least one gap from now). */
+void central_reconnect_link_lost(central_reconnect_t *r, uint8_t kind, uint32_t now_ms, uint32_t random);
+/** The gap after a failed attempt for that random value: GAP + 0..JITTER ms. */
+uint32_t central_reconnect_gap_ms(uint32_t random);
 /** Central links left for input devices: max_connections less the guests'
  * reserve, capped at the central's own link count (0 when none are left). */
 uint8_t central_reconnect_link_budget(unsigned max_connections, unsigned guest_reserve, unsigned central_links);

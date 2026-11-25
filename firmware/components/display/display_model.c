@@ -94,6 +94,8 @@ static void make_devices_view(const kvm_display_status_t *s, kvm_display_view_t 
         snprintf(v->footer, sizeof(v->footer), "%s FORGOTTEN", input_kind_text(s->input_dev_notice_kind));
     } else if (s->input_dev_notice == KVM_DISPLAY_INPUT_NOTICE_FAILED) {
         COPY_TEXT(v->footer, "FORGET FAILED, RETRY");
+    } else if (s->input_dev_notice == KVM_DISPLAY_INPUT_NOTICE_FORGETTING) {
+        COPY_TEXT(v->footer, "FORGETTING...");
     }
 }
 

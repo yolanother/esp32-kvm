@@ -130,7 +130,9 @@ typedef struct {
 void kvm_display_input_pairing_init(kvm_display_input_pairing_t *pairing,
                                     kvm_display_input_ops_t ops);
 /** Records whether a device of that kind is stored and its name (NULL or
- *  empty for none); the worker refreshes it from the central. */
+ *  empty for none); the worker refreshes it from the central every iteration.
+ *  A FORGETTING notice (forget request timed out) for that kind becomes
+ *  FORGOTTEN once the device is no longer stored. */
 void kvm_display_input_pairing_device(kvm_display_input_pairing_t *pairing, uint8_t kind,
                                       bool stored, const char *name);
 /** Applies one touch request. BEGIN (from closed or the device list),

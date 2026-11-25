@@ -586,6 +586,22 @@ static void input_devices_tests(void)
     input_view(&p, 1200, &s, &v);
     assert(strcmp(v.footer, "FORGET FAILED, RETRY") == 0 && strcmp(v.input_rows[0], "KEYBOARD: K380") == 0);
 
+    /* A forget whose request timed out may still run: FORGETTING..., then the
+       worker's next refresh of the stored devices settles it. */
+    devices_reset(&p);
+    forget_result = KVM_DISPLAY_INPUT_OP_UNKNOWN;
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    assert(devices_tap(&p, 120, 64, 1000, false, false));
+    assert(!devices_tap(&p, 120, 64, 1200, false, false) && forget_calls == 1);
+    input_view(&p, 1200, &s, &v);
+    assert(strcmp(v.footer, "FORGETTING...") == 0 && strcmp(v.input_rows[0], "KEYBOARD: K380") == 0);
+    kvm_display_input_pairing_device(&p, KVM_DISPLAY_INPUT_KEYBOARD, true, "K380"); /* not yet */
+    input_view(&p, 1300, &s, &v);
+    assert(strcmp(v.footer, "FORGETTING...") == 0);
+    kvm_display_input_pairing_device(&p, KVM_DISPLAY_INPUT_KEYBOARD, false, NULL); /* it ran */
+    input_view(&p, 1400, &s, &v);
+    assert(strcmp(v.footer, "KEYBOARD FORGOTTEN") == 0 && strcmp(v.input_rows[0], "KEYBOARD: not paired") == 0);
+
     /* "Add keyboard or mouse" starts the pairing window from the list. */
     devices_reset(&p);
     assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));

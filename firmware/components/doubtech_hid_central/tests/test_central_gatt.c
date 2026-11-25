@@ -4,8 +4,9 @@
  * (with and without a report ID), unsupported devices (reason 1), capacity
  * (reason 5), an injected error in every discovery state, and the lost input a
  * ready link reports when it closes. Also drives the stored-device reconnect
- * schedule: 10 s attempts 15 s apart, one at a time, none during a pairing
- * scan, never to a guest identity, within the connection budget. */
+ * schedule: one global cadence of 10 s attempts and 15 s (+ jitter) gaps,
+ * alternating kinds, one at a time, bounded immediate retries after a drop,
+ * none during a pairing scan, never to a guest identity, within the budget. */
 #include <stdio.h>
 #include <string.h>
 
@@ -511,6 +512,8 @@ static void test_abort_from_ready_reports_lost_once(void)
 
 /* ---- stored-device reconnect schedule ---- */
 
+#define RND0 0u /* a random value that adds no jitter */
+
 static central_reconnect_facts_t facts_both_stored(void)
 {
     central_reconnect_facts_t f;
@@ -521,18 +524,49 @@ static central_reconnect_facts_t facts_both_stored(void)
 }
 
 /* Starts the attempt the schedule asked for: the link now exists and is connecting. */
-static void start_attempt(central_reconnect_facts_t *f, uint8_t kind)
+static void start_attempt(central_reconnect_t *r, central_reconnect_facts_t *f, uint8_t kind, uint32_t t)
 {
+    central_reconnect_attempt_started(r, kind, t);
     f->linked[kind] = true;
     f->connecting = true;
     f->links++;
 }
 
-static void end_attempt(central_reconnect_facts_t *f, uint8_t kind)
+static void end_link(central_reconnect_facts_t *f, uint8_t kind)
 {
     f->linked[kind] = false;
     f->connecting = false;
     f->links--;
+}
+
+/* The attempt timed out (or failed before ready). */
+static void fail_attempt(central_reconnect_t *r, central_reconnect_facts_t *f, uint8_t kind, uint32_t t,
+                         uint32_t random)
+{
+    end_link(f, kind);
+    central_reconnect_attempt_failed(r, kind, t, random);
+}
+
+/* Advances *t through WAIT steps to the next action. */
+static central_reconnect_action_t run_to_action(const central_reconnect_t *r, uint32_t *t,
+                                                const central_reconnect_facts_t *f)
+{
+    central_reconnect_action_t a = central_reconnect_next(r, *t, f);
+    for (int guard = 0; guard < 8 && a.step == CENTRAL_RECONNECT_WAIT; ++guard) {
+        *t += a.delay_ms;
+        a = central_reconnect_next(r, *t, f);
+    }
+    return a;
+}
+
+static void test_reconnect_gap_and_jitter(void)
+{
+    CHECK(central_reconnect_gap_ms(0) == CENTRAL_RECONNECT_GAP_MS);
+    for (uint32_t rnd = 0; rnd < 50000u; rnd += 997u) {
+        uint32_t gap = central_reconnect_gap_ms(rnd * 2654435761u);
+        CHECK(gap >= CENTRAL_RECONNECT_GAP_MS && gap <= CENTRAL_RECONNECT_GAP_MS + CENTRAL_RECONNECT_JITTER_MS);
+    }
+    CHECK(central_reconnect_gap_ms(UINT32_MAX) <= CENTRAL_RECONNECT_GAP_MS + CENTRAL_RECONNECT_JITTER_MS);
 }
 
 static void test_reconnect_boot_one_attempt_at_a_time(void)
@@ -543,42 +577,90 @@ static void test_reconnect_boot_one_attempt_at_a_time(void)
     /* Boot: the keyboard goes first, at once. */
     central_reconnect_action_t a = central_reconnect_next(&r, 1000, &f);
     CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
-    start_attempt(&f, KB);
+    start_attempt(&r, &f, KB, 1000);
     /* The mouse is due too, but one outgoing attempt at a time. */
     a = central_reconnect_next(&r, 1000, &f);
     CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms > 0);
     CHECK(central_reconnect_next(&r, 1000 + CENTRAL_RECONNECT_ATTEMPT_MS - 1, &f).step != CENTRAL_RECONNECT_CONNECT);
-    /* The 10 s attempt times out: the mouse takes its turn, the keyboard waits 15 s. */
+    /* The 10 s attempt times out: one global gap before ANY next attempt. */
     uint32_t t = 1000 + CENTRAL_RECONNECT_ATTEMPT_MS;
-    end_attempt(&f, KB);
-    central_reconnect_attempt_failed(&r, KB, t);
+    fail_attempt(&r, &f, KB, t, RND0);
     a = central_reconnect_next(&r, t, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms == CENTRAL_RECONNECT_GAP_MS);
+    CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS - 1, &f).step == CENTRAL_RECONNECT_WAIT);
+    /* Then the mouse takes its turn. */
+    a = central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS, &f);
     CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == MOUSE);
 }
 _Static_assert(CENTRAL_RECONNECT_ATTEMPT_MS == 10000u && CENTRAL_RECONNECT_GAP_MS == 15000u,
                "spec: 10 s attempts, 15 s apart");
 
-static void test_reconnect_retries_after_gap(void)
+/* Both devices absent for a long time: strictly alternating attempts, the
+ * initiator busy at most 10 s in every 25 s, each kind tried at least every
+ * 2 x (10 + 15) s (2 x (10 + 17) s with the largest jitter). */
+static void steady_state_both_absent(uint32_t (*random)(int), uint32_t max_spacing, uint32_t max_per_kind)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    uint32_t t = 0, prev_start = 0, kind_start[3] = {0, 0, 0};
+    bool seen[3] = {false, false, false};
+    uint8_t prev = 0;
+    central_reconnect_init(&r, 0);
+    for (int i = 0; i < 40; ++i) {
+        central_reconnect_action_t a = run_to_action(&r, &t, &f);
+        CHECK(a.step == CENTRAL_RECONNECT_CONNECT);
+        if (i > 0) {
+            CHECK(a.kind != prev); /* round robin */
+            uint32_t spacing = t - prev_start;
+            CHECK(spacing >= CENTRAL_RECONNECT_ATTEMPT_MS + CENTRAL_RECONNECT_GAP_MS);
+            CHECK(spacing <= max_spacing);
+        }
+        if (seen[a.kind]) CHECK(t - kind_start[a.kind] <= max_per_kind);
+        seen[a.kind] = true;
+        kind_start[a.kind] = t;
+        prev = a.kind;
+        prev_start = t;
+        start_attempt(&r, &f, a.kind, t);
+        /* Nothing else starts while it runs. */
+        CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_ATTEMPT_MS / 2, &f).step == CENTRAL_RECONNECT_WAIT);
+        t += CENTRAL_RECONNECT_ATTEMPT_MS;
+        fail_attempt(&r, &f, a.kind, t, random(i));
+    }
+    CHECK(seen[KB] && seen[MOUSE]);
+}
+
+static uint32_t no_jitter(int i) { (void)i; return RND0; }
+static uint32_t some_jitter(int i) { return (uint32_t)i * 2654435761u; }
+
+static void test_reconnect_steady_state_both_absent(void)
+{
+    steady_state_both_absent(no_jitter, 25000u, 50000u);
+    steady_state_both_absent(some_jitter, 25000u + CENTRAL_RECONNECT_JITTER_MS,
+                             2u * (25000u + CENTRAL_RECONNECT_JITTER_MS));
+}
+
+static void test_reconnect_one_stored_kind(void)
 {
     central_reconnect_t r;
     central_reconnect_facts_t f = facts_both_stored();
     f.stored[MOUSE] = false;
     central_reconnect_init(&r, 0);
-    uint32_t t = 0;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
+    uint32_t t = 0, prev_start = 0;
+    for (int i = 0; i < 10; ++i) {
+        central_reconnect_action_t a = run_to_action(&r, &t, &f);
         CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
-        start_attempt(&f, KB);
+        if (i > 0) CHECK(t - prev_start == 25000u);
+        prev_start = t;
+        start_attempt(&r, &f, KB, t);
         t += CENTRAL_RECONNECT_ATTEMPT_MS;
-        end_attempt(&f, KB);
-        central_reconnect_attempt_failed(&r, KB, t);
+        fail_attempt(&r, &f, KB, t, RND0);
         a = central_reconnect_next(&r, t, &f);
         CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms == CENTRAL_RECONNECT_GAP_MS);
-        CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS - 1, &f).step == CENTRAL_RECONNECT_WAIT);
-        t += CENTRAL_RECONNECT_GAP_MS;
     }
     /* A connect the controller refused (ENOMEM, EBUSY) is a normal retry too. */
-    central_reconnect_attempt_failed(&r, KB, t);
+    CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS, &f).step == CENTRAL_RECONNECT_CONNECT);
+    t += CENTRAL_RECONNECT_GAP_MS;
+    central_reconnect_attempt_failed(&r, KB, t, RND0);
     CHECK(central_reconnect_next(&r, t, &f).step == CENTRAL_RECONNECT_WAIT);
     CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS, &f).step == CENTRAL_RECONNECT_CONNECT);
 }
@@ -603,6 +685,13 @@ static void test_reconnect_stops_when_forgotten_or_connected(void)
         central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
         CHECK(a.step != CENTRAL_RECONNECT_CONNECT || a.kind == KB);
     }
+    /* A forgotten kind's pending immediate retry is dropped with it. */
+    central_reconnect_init(&r, 0);
+    f = facts_both_stored();
+    central_reconnect_link_lost(&r, MOUSE, 0, RND0);
+    f.stored[MOUSE] = false;
+    central_reconnect_action_t a = central_reconnect_next(&r, 0, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
 }
 
 static void test_reconnect_resumes_after_disconnect(void)
@@ -612,20 +701,72 @@ static void test_reconnect_resumes_after_disconnect(void)
     f.stored[MOUSE] = false;
     central_reconnect_init(&r, 0);
     CHECK(central_reconnect_next(&r, 0, &f).step == CENTRAL_RECONNECT_CONNECT);
-    start_attempt(&f, KB);
+    start_attempt(&r, &f, KB, 0);
     f.connecting = false; /* connected and ready */
     CHECK(central_reconnect_next(&r, 50000u, &f).step == CENTRAL_RECONNECT_NONE);
-    /* The keyboard went to sleep: the first attempt is immediate, then the usual cadence. */
-    end_attempt(&f, KB);
-    central_reconnect_link_lost(&r, KB, 60000u);
+    /* The keyboard went to sleep: the first attempt is immediate, then the global cadence. */
+    end_link(&f, KB);
+    central_reconnect_link_lost(&r, KB, 60000u, RND0);
     central_reconnect_action_t a = central_reconnect_next(&r, 60000u, &f);
     CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
-    start_attempt(&f, KB);
-    end_attempt(&f, KB);
-    central_reconnect_attempt_failed(&r, KB, 70000u);
+    start_attempt(&r, &f, KB, 60000u);
+    fail_attempt(&r, &f, KB, 70000u, RND0);
     a = central_reconnect_next(&r, 70000u, &f);
     CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms == CENTRAL_RECONNECT_GAP_MS);
     CHECK(central_reconnect_next(&r, 85000u, &f).step == CENTRAL_RECONNECT_CONNECT);
+    /* The immediate retry jumps the global gap, but only for the kind that dropped. */
+    f = facts_both_stored();
+    central_reconnect_init(&r, 0);
+    start_attempt(&r, &f, MOUSE, 0);
+    fail_attempt(&r, &f, MOUSE, 10000u, RND0); /* the mouse waits until 25 s */
+    f.linked[KB] = true;
+    f.links = 1;
+    end_link(&f, KB);
+    f.connecting = false;
+    central_reconnect_link_lost(&r, KB, 12000u, RND0);
+    a = central_reconnect_next(&r, 12000u, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
+}
+
+static void test_reconnect_repeated_drops_limit_immediate_retries(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    f.stored[MOUSE] = false;
+    central_reconnect_init(&r, 0);
+    /* Connected for a long time (the schedule's last due time is long past). */
+    uint32_t t = 600000u;
+    central_reconnect_link_lost(&r, KB, t, RND0);
+    central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB); /* first drop: at once */
+    start_attempt(&r, &f, KB, t);
+    f.connecting = false;           /* ready again */
+    end_link(&f, KB);               /* ... and dropped again 5 s later */
+    central_reconnect_link_lost(&r, KB, t + 5000u, RND0);
+    a = central_reconnect_next(&r, t + 5000u, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms == CENTRAL_RECONNECT_GAP_MS);
+    a = central_reconnect_next(&r, t + 5000u + CENTRAL_RECONNECT_GAP_MS, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT);
+    start_attempt(&r, &f, KB, t + 20000u);
+    f.connecting = false;
+    end_link(&f, KB);
+    /* A drop 30 s after the last immediate retry gets one again. */
+    central_reconnect_link_lost(&r, KB, t + CENTRAL_RECONNECT_FAST_MS, RND0);
+    a = central_reconnect_next(&r, t + CENTRAL_RECONNECT_FAST_MS, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
+    /* Flapping: in 5 minutes of drops every 2 s, at most one immediate retry per 30 s. */
+    central_reconnect_init(&r, 0);
+    f = facts_both_stored();
+    f.stored[MOUSE] = false;
+    int immediate = 0;
+    for (uint32_t when = 0; when < 300000u; when += 2000u) {
+        central_reconnect_link_lost(&r, KB, when, RND0);
+        if (central_reconnect_next(&r, when, &f).step == CENTRAL_RECONNECT_CONNECT) {
+            immediate++;
+            central_reconnect_attempt_started(&r, KB, when); /* ready again at once */
+        }
+    }
+    CHECK(immediate >= 1 && immediate <= 10);
 }
 
 static void test_reconnect_never_during_pairing_scan(void)
@@ -633,15 +774,16 @@ static void test_reconnect_never_during_pairing_scan(void)
     central_reconnect_t r;
     central_reconnect_facts_t f = facts_both_stored();
     central_reconnect_init(&r, 0);
+    central_reconnect_link_lost(&r, MOUSE, 0, RND0); /* even an immediate retry waits */
     f.pairing = true;
     for (uint32_t t = 0; t <= 2u * DOUBTECH_HID_CENTRAL_PAIR_WINDOW_MS; t += 1000u) {
         central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
         CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms > 0);
     }
-    /* The window ended: the overdue keyboard goes at once. */
+    /* The window ended: the overdue attempt goes at once. */
     f.pairing = false;
     central_reconnect_action_t a = central_reconnect_next(&r, 61000u, &f);
-    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT);
 }
 
 static void test_reconnect_never_to_a_guest_identity(void)
@@ -650,6 +792,7 @@ static void test_reconnect_never_to_a_guest_identity(void)
     central_reconnect_facts_t f = facts_both_stored();
     central_reconnect_init(&r, 0);
     f.guest[KB] = true; /* a stale record that now names a guest's identity */
+    central_reconnect_link_lost(&r, KB, 0, RND0);
     for (uint32_t t = 0; t < 200000u; t += 2500u) {
         central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
         CHECK(a.step != CENTRAL_RECONNECT_CONNECT || a.kind == MOUSE);
@@ -689,18 +832,23 @@ static void test_reconnect_clock_wraps(void)
     uint32_t t = 0xFFFFF000u;
     central_reconnect_init(&r, t);
     CHECK(central_reconnect_next(&r, t, &f).step == CENTRAL_RECONNECT_CONNECT);
-    central_reconnect_attempt_failed(&r, KB, t);
+    central_reconnect_attempt_failed(&r, KB, t, RND0);
     central_reconnect_action_t a = central_reconnect_next(&r, t + 1000u, &f);
     CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms == CENTRAL_RECONNECT_GAP_MS - 1000u);
     CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS, &f).step == CENTRAL_RECONNECT_CONNECT);
+    /* A due time far in the past (more than a gap and jitter) is due, not far ahead. */
+    CHECK(central_reconnect_next(&r, t + 0x80000000u, &f).step == CENTRAL_RECONNECT_CONNECT);
 }
 
 int main(void)
 {
+    test_reconnect_gap_and_jitter();
     test_reconnect_boot_one_attempt_at_a_time();
-    test_reconnect_retries_after_gap();
+    test_reconnect_steady_state_both_absent();
+    test_reconnect_one_stored_kind();
     test_reconnect_stops_when_forgotten_or_connected();
     test_reconnect_resumes_after_disconnect();
+    test_reconnect_repeated_drops_limit_immediate_retries();
     test_reconnect_never_during_pairing_scan();
     test_reconnect_never_to_a_guest_identity();
     test_reconnect_respects_the_connection_budget();

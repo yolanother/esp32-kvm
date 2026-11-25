@@ -317,10 +317,11 @@ static void link_closed(link_t *link)
     if (was_pairing) pair_end();
     if (pair.phase == PAIR_SCANNING && pair.scan_deferred && start_scan() == 0) pair.scan_deferred = false;
     if (!was_pairing && valid_kind(kind)) {
-        /* A ready device that dropped (asleep) is retried at once; an attempt
-         * that never got ready waits the gap. A forgotten kind is not retried. */
-        if (was_ready) central_reconnect_link_lost(&reconnect, kind, now_ms());
-        else central_reconnect_attempt_failed(&reconnect, kind, now_ms());
+        /* A ready device that dropped (asleep) is retried at once (at most once
+         * per 30 s); an attempt that never got ready starts the global gap.
+         * A forgotten kind is not retried. */
+        if (was_ready) central_reconnect_link_lost(&reconnect, kind, now_ms(), esp_random());
+        else central_reconnect_attempt_failed(&reconnect, kind, now_ms(), esp_random());
     }
     reconnect_kick(); /* the initiator or a link slot is free again */
 }
@@ -865,9 +866,11 @@ static void reconnect_on_host(struct ble_npl_event *event)
             return;
         }
         esp_err_t result = central_connect_stored(act.kind);
-        if (result != ESP_OK) {
+        if (result == ESP_OK) {
+            central_reconnect_attempt_started(&reconnect, act.kind, now);
+        } else {
             ESP_LOGD(tag, "reconnect of kind %u not started: %d", act.kind, result);
-            central_reconnect_attempt_failed(&reconnect, act.kind, now);
+            central_reconnect_attempt_failed(&reconnect, act.kind, now, esp_random());
         }
     }
     (void)ble_npl_callout_reset(&reconnect_timer, ble_npl_time_ms_to_ticks32(CENTRAL_RECONNECT_GAP_MS));

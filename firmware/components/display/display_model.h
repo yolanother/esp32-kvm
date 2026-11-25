@@ -75,6 +75,8 @@ typedef enum {
 #define KVM_DISPLAY_INPUT_NOTICE_NONE 0u
 #define KVM_DISPLAY_INPUT_NOTICE_FORGOTTEN 1u
 #define KVM_DISPLAY_INPUT_NOTICE_FAILED 2u
+/** The forget request timed out and may still run: settled by the next refresh. */
+#define KVM_DISPLAY_INPUT_NOTICE_FORGETTING 3u
 /** DEVICES rows: keyboard, mouse, then "Add keyboard or mouse". */
 #define KVM_DISPLAY_INPUT_DEVICE_ROWS 3u
 #define KVM_DISPLAY_INPUT_ADD_ROW 2u

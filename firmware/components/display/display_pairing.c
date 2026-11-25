@@ -158,6 +158,8 @@ void kvm_display_input_pairing_device(kvm_display_input_pairing_t *p, uint8_t ki
     } else {
         p->stored_mask &= (uint8_t)~(1u << kind);
         dst[0] = '\0';
+        if (p->notice == KVM_DISPLAY_INPUT_NOTICE_FORGETTING && p->notice_kind == kind)
+            p->notice = KVM_DISPLAY_INPUT_NOTICE_FORGOTTEN; /* the timed-out forget did run */
     }
 }
 
@@ -177,7 +179,10 @@ static bool input_forget(kvm_display_input_pairing_t *p, uint8_t kind, uint64_t 
                                               : KVM_DISPLAY_INPUT_OP_REFUSED;
     p->notice_kind = kind;
     if (op != KVM_DISPLAY_INPUT_OP_OK) {
-        p->notice = KVM_DISPLAY_INPUT_NOTICE_FAILED; /* still listed until the central says otherwise */
+        /* Still listed until the central says otherwise. A timed-out request may
+         * still run on the host: the worker's refresh then settles the notice. */
+        p->notice = op == KVM_DISPLAY_INPUT_OP_UNKNOWN ? KVM_DISPLAY_INPUT_NOTICE_FORGETTING
+                                                      : KVM_DISPLAY_INPUT_NOTICE_FAILED;
         return false;
     }
     p->notice = KVM_DISPLAY_INPUT_NOTICE_FORGOTTEN;
