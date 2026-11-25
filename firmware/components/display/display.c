@@ -160,8 +160,10 @@ static void update_target_card(unsigned index, const kvm_display_view_t *view)
         return;
     }
     lv_obj_remove_flag(card, LV_OBJ_FLAG_HIDDEN);
-    /* No host session: dim the whole card (same geometry) so the screen reads as USB off. */
-    lv_obj_set_style_opa(card, view->usb_dim ? LV_OPA_50 : LV_OPA_COVER, 0);
+    /* No host session: dim only This PC (card 0, the USB-attached host); guest
+       cards stay prominent. Every redraw sets opacity explicitly, so it restores
+       when usb_dim clears. */
+    lv_obj_set_style_opa(card, (view->usb_dim && index == 0) ? LV_OPA_50 : LV_OPA_COVER, 0);
     bool selected = view->selected_card == index;
     bool ready = view->card_ready_mask & (1u << index);
     lv_obj_set_style_bg_color(card, lv_color_hex(selected ? 0x1d4948 : 0x15242e), 0);

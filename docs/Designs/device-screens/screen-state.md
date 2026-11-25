@@ -6,7 +6,7 @@ The view priority is recovery, update, routing fault or armed-without-ready-gues
 
 ### No PC app session (USB off)
 
-With no host session the board shows the same active screen as with a session. Only two things differ: the target cards are dimmed (50% opacity, geometry and touch targets unchanged) and the footer shows a badge instead of "Selected target is highlighted". The badge lists the USB state first, then each connected device-owned input:
+With no host session the board shows the same active screen as with a session. Only two things differ: the This PC card (the USB-attached host) is dimmed to 50% opacity while the guest cards stay at full opacity (geometry and touch targets unchanged; opacity is reapplied on every redraw, so it restores when the session returns) and the footer shows a badge instead of "Selected target is highlighted". The badge lists the USB state first, then each connected device-owned input:
 
 | USB | Keyboard | Mouse | Footer badge |
 | --- | --- | --- | --- |
