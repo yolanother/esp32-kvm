@@ -913,7 +913,15 @@ static kvm_display_input_op_t central_begin(void *c)
 { (void)c; central_begin_calls++; return central_begin_result; }
 static kvm_display_input_op_t central_select(void *c, uint8_t index)
 { (void)c; (void)index; return KVM_DISPLAY_INPUT_OP_OK; }
-static bool central_cancel(void *c) { (void)c; central_cancel_calls++; return central_cancel_ok; }
+/* How long one cancel request holds the worker (the central's bounded RPC). */
+static unsigned central_cancel_block_ms;
+static bool central_cancel(void *c)
+{
+    (void)c;
+    central_cancel_calls++;
+    now_ms += central_cancel_block_ms;
+    return central_cancel_ok;
+}
 /* The worker's PC-app guest PAIR_BEGIN: refused while the input window is open. */
 static bool guest_pair_begin(void *c)
 {
@@ -937,6 +945,7 @@ static void input_setup(void)
     central_begin_calls = central_cancel_calls = guest_begin_calls = 0;
     central_begin_result = KVM_DISPLAY_INPUT_OP_OK;
     central_cancel_ok = true;
+    central_cancel_block_ms = 0;
     kvm_display_input_pairing_init(&input_pairing,
         (kvm_display_input_ops_t){central_begin, central_select, central_cancel, NULL});
     kvm_transport_core_bind_pairing(&core,
@@ -1011,10 +1020,40 @@ static void input_pairing_refused_and_ended_when_router_armed(void)
                                              router.armed, false));
     assert(host_switch(2) == ACK_OK && host_arm(2) == ACK_OK && router.armed);
     kvm_display_input_pairing_tick(&input_pairing, now_ms + 20, router.armed);
-    assert(central_cancel_calls == 1 && input_pairing.state == KVM_DISPLAY_INPUT_RESULT &&
+    /* BUSY at once; the cancel itself waits until the route disarms (or the
+       central's own timer ends the window), and the guest gate stays closed. */
+    assert(central_cancel_calls == 0 && input_pairing.state == KVM_DISPLAY_INPUT_RESULT &&
            input_pairing.reason == KVM_DISPLAY_INPUT_REASON_BUSY &&
-           input_pairing.busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST);
+           input_pairing.busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST && input_pairing.stopping);
+    assert(kvm_display_input_pairing_blocks_guest(&input_pairing));
     assert(router.armed && router.slot == 2); /* the host route is untouched */
+}
+
+/* While the PC is armed the worker must keep serving host input: a cancel RPC
+ * that holds the worker for its full 200 ms timeout is never issued then. The
+ * window stays BUSY ("PC is controlling a guest") and guest pairing stays
+ * refused until the central's own timer has surely ended it. */
+static void armed_window_never_blocks_the_worker(void)
+{
+    uint64_t start, worst = 0, t;
+    input_setup();
+    open_session();
+    central_cancel_block_ms = 200;
+    central_cancel_ok = false; /* even a cancel that would fail and be retried */
+    assert(kvm_display_input_pairing_request(&input_pairing, input_begin, now_ms,
+                                             router.armed, false));
+    assert(host_switch(1) == ACK_OK && host_arm(1) == ACK_OK && router.armed);
+    start = now_ms;
+    for (t = 0; t < KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_STOP_MARGIN_MS + 1000u; t += 20) {
+        uint64_t before = now_ms;
+        kvm_display_input_pairing_tick(&input_pairing, now_ms, router.armed);
+        if (now_ms - before > worst) worst = now_ms - before;
+        if (now_ms - start < KVM_DISPLAY_INPUT_WINDOW_MS)
+            assert(kvm_display_input_pairing_blocks_guest(&input_pairing));
+        now_ms += 20;
+    }
+    assert(worst == 0 && central_cancel_calls == 0);
+    assert(input_pairing.state == KVM_DISPLAY_INPUT_CLOSED && router.armed);
 }
 
 static void begin_rpc_timeout_holds_guest_gate(void)
@@ -1123,6 +1162,7 @@ int main(void)
     input_pairing_allowed_with_unarmed_session();
     guest_pairing_refused_while_input_window_open();
     input_pairing_refused_and_ended_when_router_armed();
+    armed_window_never_blocks_the_worker();
     begin_rpc_timeout_holds_guest_gate();
     forget_gated_by_the_host_route();
     puts("test_hub_worker: all passed");

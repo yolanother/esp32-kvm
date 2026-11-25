@@ -205,24 +205,30 @@ static bool input_cancel_confirmed(kvm_display_input_pairing_t *p)
  * window possibly open: hold the guest gate and retry, until a confirmed
  * cancel or until the central's own timer has surely ended it. Requests are
  * serialized on the host loop, so a confirmed cancel always ran after any
- * abandoned begin or select. */
+ * abandoned begin or select. While the host has a guest armed no cancel is
+ * issued at all: the request can hold the worker for its whole timeout and
+ * host input would back up behind it. The window then stays "stopping"
+ * (guest gate closed) and the cancel runs once the route disarms, or the
+ * central's own window timer ends it first. */
 static void input_stop(kvm_display_input_pairing_t *p, uint64_t now_ms,
-                       uint64_t window_deadline_ms)
+                       uint64_t window_deadline_ms, bool host_armed)
 {
-    if (input_cancel_confirmed(p)) {
+    if (!host_armed && input_cancel_confirmed(p)) {
         p->stopping = false;
         return;
     }
     p->stopping = true;
     p->stop_deadline_ms = (window_deadline_ms > now_ms ? window_deadline_ms : now_ms) +
                           KVM_DISPLAY_INPUT_STOP_MARGIN_MS;
-    p->cancel_retry_ms = now_ms + KVM_DISPLAY_INPUT_CANCEL_RETRY_MS;
+    /* Deferred: try as soon as the route disarms; otherwise at the retry rate. */
+    p->cancel_retry_ms = host_armed ? now_ms : now_ms + KVM_DISPLAY_INPUT_CANCEL_RETRY_MS;
 }
 
-static void input_retry_stop(kvm_display_input_pairing_t *p, uint64_t now_ms)
+static void input_retry_stop(kvm_display_input_pairing_t *p, uint64_t now_ms, bool host_armed)
 {
     if (!p->stopping) return;
     if (now_ms >= p->stop_deadline_ms) p->stopping = false; /* the central's timer ended it */
+    else if (host_armed) return;                            /* never block the worker while armed */
     else if (input_cancel_confirmed(p)) p->stopping = false;
     else p->cancel_retry_ms = now_ms + KVM_DISPLAY_INPUT_CANCEL_RETRY_MS;
 }
@@ -282,7 +288,7 @@ bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
             input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, true, now_ms);
             /* A timed-out begin may still open the window later (sm_mitm=0). */
             if (op == KVM_DISPLAY_INPUT_OP_UNKNOWN)
-                input_stop(p, now_ms, now_ms + KVM_DISPLAY_INPUT_WINDOW_MS);
+                input_stop(p, now_ms, now_ms + KVM_DISPLAY_INPUT_WINDOW_MS, false);
             return false;
         }
         p->state = KVM_DISPLAY_INPUT_SCANNING;
@@ -295,6 +301,14 @@ bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
             return false;
         const kvm_display_input_scan_t *entry = &p->scan[request.scan_index];
         if (!entry->used) return false;
+        if (host_armed) {
+            /* The PC armed a guest since the list was shown: the host route
+               wins, as in tick. The window ends without a select. */
+            uint64_t window_deadline = p->deadline_ms;
+            input_busy(p, true, now_ms);
+            input_stop(p, now_ms, window_deadline, true);
+            return false;
+        }
         p->kind = entry->kind;
         copy_name(p->name, sizeof(p->name), entry->name, sizeof(entry->name));
         kvm_display_input_op_t op = p->ops.select ? p->ops.select(p->ops.context, request.scan_index)
@@ -303,7 +317,7 @@ bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
             /* Make sure the window is over; a timed-out select may still link
                later under a fresh central timer. */
             input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, true, now_ms);
-            input_stop(p, now_ms, now_ms + KVM_DISPLAY_INPUT_WINDOW_MS);
+            input_stop(p, now_ms, now_ms + KVM_DISPLAY_INPUT_WINDOW_MS, false);
             return false;
         }
         p->connecting = true;
@@ -316,9 +330,9 @@ bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
         if (input_window_open(p)) {
             uint64_t window_deadline = p->deadline_ms;
             input_result(p, KVM_DISPLAY_INPUT_REASON_CANCELLED, false, now_ms);
-            input_stop(p, now_ms, window_deadline);
+            input_stop(p, now_ms, window_deadline, host_armed);
         } else if (p->stopping) {
-            input_retry_stop(p, now_ms); /* the owner asked again: retry now */
+            input_retry_stop(p, now_ms, host_armed); /* the owner asked again: retry now */
         }
         if (p->stopping) return false; /* not closed until the central confirms */
         input_close(p);
@@ -381,14 +395,14 @@ void kvm_display_input_pairing_tick(kvm_display_input_pairing_t *p, uint64_t now
                but unarmed session leaves the window alone. */
             input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, false, now_ms);
             p->busy_cause = KVM_DISPLAY_INPUT_BUSY_HOST;
-            input_stop(p, now_ms, window_deadline);
+            input_stop(p, now_ms, window_deadline, true); /* cancel deferred: no RPC while armed */
         } else if (now_ms >= window_deadline) {
             input_result(p, KVM_DISPLAY_INPUT_REASON_TIMEOUT, false, now_ms);
-            input_stop(p, now_ms, window_deadline);
+            input_stop(p, now_ms, window_deadline, false);
         }
     } else if (p->state == KVM_DISPLAY_INPUT_RESULT) {
         if (p->stopping && (now_ms >= p->cancel_retry_ms || now_ms >= p->stop_deadline_ms))
-            input_retry_stop(p, now_ms);
+            input_retry_stop(p, now_ms, host_armed);
         if (!p->stopping && now_ms >= p->deadline_ms) input_close(p);
     } else if (p->state == KVM_DISPLAY_INPUT_DEVICES) {
         /* The list never opens a central window, so nothing needs cancelling. */

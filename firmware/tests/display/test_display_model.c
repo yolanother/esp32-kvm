@@ -323,10 +323,49 @@ static void input_pairing_tests(void)
     kvm_display_input_pairing_tick(&p, 2000, false);
     assert(cancel_calls == 0 && p.state == KVM_DISPLAY_INPUT_SCANNING);
     kvm_display_input_pairing_tick(&p, 2100, true);
-    assert(cancel_calls == 1 && p.state == KVM_DISPLAY_INPUT_RESULT &&
-           p.reason == KVM_DISPLAY_INPUT_REASON_BUSY && !p.stopping);
+    /* No cancel RPC from the worker while the PC is armed (it would stall host
+       input): the window is shown BUSY and stays "stopping", which keeps the
+       guest gate closed, until the central's own timer has ended it. */
+    assert(cancel_calls == 0 && p.state == KVM_DISPLAY_INPUT_RESULT &&
+           p.reason == KVM_DISPLAY_INPUT_REASON_BUSY && p.stopping);
+    assert(kvm_display_input_pairing_blocks_guest(&p));
     input_view(&p, 2100, &s, &v);
     assert(strcmp(v.detail, "PC is controlling a guest") == 0);
+    for (uint64_t t = 2200; t < 1000 + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_STOP_MARGIN_MS;
+         t += 500)
+        kvm_display_input_pairing_tick(&p, t, true);
+    assert(cancel_calls == 0 && p.stopping && kvm_display_input_pairing_blocks_guest(&p));
+    /* Even the owner's cancel tap does not call the central while armed. */
+    {
+        kvm_display_input_request_t c = {KVM_DISPLAY_INPUT_PAIR_CANCEL, 0, 0, p.window};
+        assert(!kvm_display_input_pairing_request(&p, c, 20000, true, false));
+        assert(cancel_calls == 0 && p.stopping);
+    }
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_STOP_MARGIN_MS,
+                                   true);
+    assert(cancel_calls == 0 && p.state == KVM_DISPLAY_INPUT_CLOSED);
+    /* The route disarms before the deadline: the deferred cancel runs then, once. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    kvm_display_input_pairing_tick(&p, 2000, true);
+    assert(cancel_calls == 0 && p.stopping);
+    kvm_display_input_pairing_tick(&p, 2100, false);
+    assert(cancel_calls == 1 && !p.stopping);
+    kvm_display_input_pairing_tick(&p, 2000 + KVM_DISPLAY_INPUT_RESULT_MS, false);
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED && cancel_calls == 1);
+    /* A row tapped while the PC is armed is refused with BUSY (no select RPC). */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    {
+        kvm_display_input_event_t e = scan_ev(2, -40, KVM_DISPLAY_INPUT_KEYBOARD, "K");
+        kvm_display_input_request_t sel = {KVM_DISPLAY_INPUT_PAIR_SELECT, 0, 2, p.window};
+        int before = select_calls;
+        kvm_display_input_pairing_event(&p, &e, 1100);
+        assert(!kvm_display_input_pairing_request(&p, sel, 1200, true, false));
+        assert(select_calls == before && cancel_calls == 0);
+        assert(p.state == KVM_DISPLAY_INPUT_RESULT && p.reason == KVM_DISPLAY_INPUT_REASON_BUSY &&
+               p.busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST && p.stopping);
+    }
 
     /* A begin whose RPC timed out may still open the window later: BUSY is
        shown, but the guest gate stays closed, cancel is retried (bounded rate)

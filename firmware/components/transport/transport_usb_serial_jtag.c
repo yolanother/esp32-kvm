@@ -13,8 +13,10 @@
  * The worker also owns the input-device pairing window: touch requests and
  * central pairing events update it, and it is never open beside a guest
  * pairing window (each refuses the other with BUSY) or while the host has a
- * guest armed (BEGIN refused, an open window ended); an open but unarmed host
- * session does not affect it. The same rules gate the input-device list
+ * guest armed (BEGIN and SELECT refused, an open window shown BUSY at once,
+ * its central cancel deferred until the route disarms so the worker never
+ * blocks on the central while the PC drives a guest); an open but unarmed
+ * host session does not affect it. The same rules gate the input-device list
  * behind the entry, whose confirmed forget is the worker's only other central
  * call; the stored names it lists come from doubtech_hid_central_stored().
  * Reconnecting stored devices is the central's own schedule. */
@@ -577,7 +579,8 @@ static void usb_worker(void *context)
         drain_central_events(time_ms);
         /* Hard deadline, unconfirmed-cancel retries and the host-armed rule,
            even without central events. An open, unarmed session (the PC app
-           just connected) leaves the window alone; the router arming ends it. */
+           just connected) leaves the window alone; the router arming ends it
+           (BUSY at once; no central RPC from here until the route disarms). */
         kvm_display_input_pairing_tick(&input_pairing, time_ms, router.armed);
         poll_foreign_guest_cancel(time_ms);
         /* Device input waiting: poll USB briefly so it is not held back 20 ms. */

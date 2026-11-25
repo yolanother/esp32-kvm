@@ -140,11 +140,15 @@ void kvm_display_input_pairing_device(kvm_display_input_pairing_t *pairing, uint
  *  untouched) while host_armed (the PC is driving a guest; an open, unarmed
  *  host session is fine) or guest_pairing is true. FORGET of a stored kind
  *  first arms a confirmation; the same kind again within
- *  KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS calls ops.forget once. A begin or select whose
- *  RPC timed out, or a cancel the central did not confirm, leaves the window
- *  "possibly open": a BUSY/failed result is shown, the guest gate stays closed
- *  and cancel is retried until confirmed or the stop deadline. Returns true
- *  when the request started, selected or cancelled something. */
+ *  KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS calls ops.forget once. SELECT while
+ *  host_armed is refused with BUSY (no select) and ends the window like tick.
+ *  A begin or select whose RPC timed out, or a cancel the central did not
+ *  confirm, leaves the window "possibly open": a BUSY/failed result is shown,
+ *  the guest gate stays closed and cancel is retried until confirmed or the
+ *  stop deadline. While host_armed no cancel RPC is issued (it would stall the
+ *  worker and host input): the stop waits for the route to disarm or the
+ *  central's own timer. Returns true when the request started, selected or
+ *  cancelled something. */
 bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *pairing,
                                        kvm_display_input_request_t request, uint64_t now_ms,
                                        bool host_armed, bool guest_pairing);
@@ -152,11 +156,16 @@ bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *pairing,
 void kvm_display_input_pairing_event(kvm_display_input_pairing_t *pairing,
                                      const kvm_display_input_event_t *event, uint64_t now_ms);
 /** Enforces the hard deadline and exclusivity: an open window past its
- *  deadline, or with the router now armed by the host, is cancelled on the
- *  central and shown as TIMED OUT / BUSY (an unarmed session opening does not
- *  touch it). Retries an unconfirmed cancel; a result past its time closes
- *  once the window is known to be over. The device list closes when idle and
- *  shows BUSY when the host arms (no central call); a stale confirm expires. */
+ *  deadline is cancelled on the central and shown as TIMED OUT; with the
+ *  router now armed by the host it is shown as BUSY ("PC is controlling a
+ *  guest") at once, but the cancel RPC is deferred until the route disarms
+ *  (or the central's own window timer plus the stop margin ends it), so the
+ *  worker never blocks on the central while the PC drives a guest. An unarmed
+ *  session opening does not touch it. Retries an unconfirmed cancel (never
+ *  while armed); a result past its time closes once the window is known to be
+ *  over, and until then guest pairing stays refused. The device list closes
+ *  when idle and shows BUSY when the host arms (no central call); a stale
+ *  confirm expires. */
 void kvm_display_input_pairing_tick(kvm_display_input_pairing_t *pairing, uint64_t now_ms,
                                     bool host_armed);
 /** True from BEGIN (or the device list opening) until the result is dismissed
