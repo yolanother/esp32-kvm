@@ -92,8 +92,6 @@ typedef struct {
     uint32_t last_forget_seq;
     uint32_t last_forget_generation;
     uint8_t last_forget_token[16];
-    bool (*arm_gate)(void *context, uint8_t slot);
-    void *arm_gate_context;
 } kvm_transport_core_t;
 
 /** Initializes a disarmed loopback core with a nonzero, caller-generated session. */
@@ -112,13 +110,6 @@ bool kvm_transport_core_session_open(const kvm_transport_core_t *core);
 /** Binds the one serialized router and monotonic clock before USB input. */
 void kvm_transport_core_bind_router(kvm_transport_core_t *core, kvm_router_t *router,
                                     kvm_transport_now_fn now, void *now_context);
-/** Runs before every well-formed host ARM reaches the router. A false return
- * refuses that ARM with NACK BUSY and leaves the router untouched, so the host
- * may retry. The device-input hub uses it to release its arm first. */
-typedef bool (*kvm_transport_arm_gate_fn)(void *context, uint8_t slot);
-/** Binds the optional ARM gate; NULL removes it. */
-void kvm_transport_core_bind_arm_gate(kvm_transport_core_t *core,
-                                      kvm_transport_arm_gate_fn gate, void *context);
 /** Binds serialized, bounded pairing operations from the USB worker. */
 void kvm_transport_core_bind_pairing(kvm_transport_core_t *core,
                                      kvm_transport_pairing_ops_t ops, void *context);

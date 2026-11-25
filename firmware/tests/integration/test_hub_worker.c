@@ -12,12 +12,23 @@
 #include <string.h>
 
 /* ---- fake guest channels ---- */
-typedef struct { bool ready, armed, fail_send; uint8_t keys[8]; uint8_t buttons; uint16_t consumer; } chan_t;
+typedef struct { bool ready, armed, fail_send, fail_release; uint8_t keys[8]; uint8_t buttons; uint16_t consumer; } chan_t;
 typedef struct { char op; uint8_t slot; kvm_router_input_t in; } op_t;
 static chan_t chan[4];
 static op_t ops[256];
 static int n_ops;
+static uint64_t now_ms;
+/* Stalled NimBLE host: every request waits out its 20 ms timeout and fails. */
+static bool rpc_timeout;
+static int rpc_calls;
 
+static bool stalled(void)
+{
+    rpc_calls++;
+    if (!rpc_timeout) return false;
+    now_ms += 20;
+    return true;
+}
 static void log_op(char op, uint8_t slot, const kvm_router_input_t *in)
 {
     assert(n_ops < 256);
@@ -28,11 +39,13 @@ static void log_op(char op, uint8_t slot, const kvm_router_input_t *in)
     n_ops++;
 }
 static void all_up(chan_t *c) { memset(c->keys, 0, 8); c->buttons = 0; c->consumer = 0; }
-static bool f_ready(void *ctx, uint8_t slot) { (void)ctx; return slot >= 1 && slot <= 3 && chan[slot].ready; }
+static bool chan_ready(uint8_t slot) { return slot >= 1 && slot <= 3 && chan[slot].ready; }
+static bool f_ready(void *ctx, uint8_t slot) { (void)ctx; return !stalled() && chan_ready(slot); }
 static bool f_arm(void *ctx, uint8_t slot)
 {
     (void)ctx;
-    if (!f_ready(NULL, slot) || chan[slot].armed) { log_op('a', slot, NULL); return false; }
+    if (stalled()) return false;
+    if (!chan_ready(slot) || chan[slot].armed) { log_op('a', slot, NULL); return false; }
     all_up(&chan[slot]);
     chan[slot].armed = true;
     log_op('A', slot, NULL);
@@ -41,24 +54,33 @@ static bool f_arm(void *ctx, uint8_t slot)
 static bool f_release(void *ctx, uint8_t slot)
 {
     (void)ctx;
+    if (stalled()) return false;
     log_op('R', slot, NULL);
     if (slot < 1 || slot > 3) return false;
     chan[slot].armed = false;
-    if (!chan[slot].ready) return false;
+    if (!chan[slot].ready || chan[slot].fail_release) return false;
     all_up(&chan[slot]);
     return true;
 }
 static bool f_send(void *ctx, uint8_t slot, const kvm_router_input_t *in)
 {
     (void)ctx;
-    if (!f_ready(NULL, slot) || !chan[slot].armed || chan[slot].fail_send) { log_op('s', slot, in); return false; }
+    if (stalled()) return false;
+    if (!chan_ready(slot) || !chan[slot].armed || chan[slot].fail_send) { log_op('s', slot, in); return false; }
     log_op('S', slot, in);
     if (in->kind == KVM_ROUTER_KEYBOARD) memcpy(chan[slot].keys, in->keyboard, 8);
     else if (in->kind == KVM_ROUTER_POINTER) chan[slot].buttons = in->buttons;
     else chan[slot].consumer = in->consumer;
     return true;
 }
-static void f_disconnect(void *ctx, uint8_t slot) { (void)ctx; log_op('D', slot, NULL); }
+/* Disconnecting drops the link: the slot is no longer ready. */
+static void f_disconnect(void *ctx, uint8_t slot)
+{
+    (void)ctx;
+    (void)stalled();
+    log_op('D', slot, NULL);
+    if (slot >= 1 && slot <= 3) { chan[slot].ready = false; chan[slot].armed = false; }
+}
 static kvm_router_output_t fake_output(void)
 {
     kvm_router_output_t o = {f_ready, f_release, f_arm, f_send, f_disconnect};
@@ -79,7 +101,6 @@ static int find_op(char op, uint8_t slot)
 /* ---- host frames (independent encoder, as in test_transport_router.c) ---- */
 static uint8_t reply[1024];
 static size_t reply_len;
-static uint64_t now_ms;
 static uint32_t crc(const uint8_t *p, size_t n)
 {
     uint32_t v = UINT32_MAX;
@@ -156,14 +177,16 @@ static void setup(void)
     for (int s = 1; s <= 3; s++) chan[s].ready = true;
     n_ops = 0;
     now_ms = 0;
+    rpc_timeout = false;
+    rpc_calls = 0;
     seq = 100;
     kvm_router_init(&router, kvm_hub_worker_router_output(), &worker);
     assert(kvm_router_set_capacity(&router, 3));
     kvm_hub_worker_init(&worker, &router, fake_output(), NULL);
+    kvm_hub_worker_set_clock(&worker, clock_ms, NULL);
     kvm_hub_queue_init(&queue, NULL, NULL, NULL);
     assert(kvm_transport_core_init(&core, "b", "1", SESSION, capture, NULL));
     kvm_transport_core_bind_router(&core, &router, clock_ms, NULL);
-    kvm_transport_core_bind_arm_gate(&core, kvm_hub_worker_arm_gate, &worker);
 }
 static void open_session(void)
 {
@@ -314,23 +337,143 @@ static void router_arm_yields_hub(void)
     assert(chan[1].keys[2] == 0 && chan[1].buttons == 0 && !chan[1].armed);
     assert(find_op('R', 1) >= 0 && find_op('R', 1) < find_op('A', 2));
 
-    /* Yield fails (ready slot refuses the all-up): the ARM is refused with
-     * NACK BUSY, the router is untouched, and a retry succeeds once it can. */
+    /* Yield fails (ready slot refuses the all-up): the host never sees BUSY.
+     * The hub's channel is released directly (all-up, disarm), its arm is
+     * abandoned, and the router arms. */
     setup();
     hub_holding_slot1();
     open_session();
     assert(host_switch(1) == ACK_OK);
-    uint32_t generation = router.generation;
     chan[1].fail_send = true;
     n_ops = 0;
-    uint32_t arm_seq = ++seq;
-    assert(host_arm_seq(1, arm_seq) == NACK(KVM_ROUTER_BUSY));
-    assert(!router.armed && router.slot == 1 && !router.fault && router.generation == generation);
-    assert(count_ops('A', 1) == 0 && count_ops('a', 1) == 0);
-    assert(worker.hub.armed_slot == 1); /* still held, retried by the next ARM */
+    assert(host_arm(1) == ACK_OK);
+    assert(router.armed && router.slot == 1 && !router.fault);
+    assert(worker.hub.armed_slot == 0 && chan[1].keys[2] == 0 && chan[1].buttons == 0);
+    assert(find_op('R', 1) >= 0 && find_op('R', 1) < find_op('A', 1));
+
+    /* Yield and the direct release both fail: the hub's slot is disconnected,
+     * the hub abandons it, and the router fails only that slot with its
+     * existing NOT_READY. Still never BUSY. */
+    setup();
+    hub_holding_slot1();
+    open_session();
+    assert(host_switch(1) == ACK_OK);
+    chan[1].fail_send = true;
+    chan[1].fail_release = true;
+    n_ops = 0;
+    assert(host_arm(1) == NACK(KVM_ROUTER_NOT_READY));
+    assert(!router.armed && worker.hub.armed_slot == 0 && count_ops('D', 1) >= 1);
+
+    /* Same failure on another slot: slot 2 is disconnected, slot 1 arms. */
+    setup();
+    assert(kvm_hub_worker_select(&worker, 2));
+    push(key_msg(4));
+    drain();
+    assert(chan[2].armed && chan[2].keys[2] == 4);
+    open_session();
+    assert(host_switch(1) == ACK_OK);
+    chan[2].fail_send = true;
+    chan[2].fail_release = true;
+    assert(host_arm(1) == ACK_OK && router.armed && router.slot == 1);
+    assert(count_ops('D', 2) == 1 && worker.hub.armed_slot == 0);
+}
+
+static void stale_or_replayed_arm_leaves_hub_alone(void)
+{
+    uint32_t arm_seq;
+    setup();
+    assert(kvm_hub_worker_select(&worker, 1)); /* before the session owns selection */
+    open_session();
+    assert(host_switch(1) == ACK_OK);
+    arm_seq = ++seq;
+    assert(host_arm_seq(1, arm_seq) == ACK_OK);
+    send_frame(KVM_MSG_RELEASE_ALL, SESSION, ++seq, router.generation, NULL, 0);
+    assert(last_result() == ACK_OK && !router.armed && router.slot == 0);
+    push(key_msg(4));
+    drain();
+    assert(worker.hub.armed_slot == 1 && chan[1].armed && chan[1].keys[2] == 4);
+
+    /* A replay of the earlier ARM gets its cached answer; the hub is untouched. */
+    n_ops = 0;
+    {
+        uint8_t p[5];
+        p[0] = 1; u32(p + 1, router.generation - 1);
+        send_frame(KVM_MSG_ARM, SESSION, arm_seq, router.generation - 1, p, 5);
+    }
+    assert(last_result() == ACK_OK);
+    assert(n_ops == 0 && worker.hub.armed_slot == 1 && chan[1].keys[2] == 4);
+
+    /* A stale-generation ARM is refused by the router before the hub yields. */
+    {
+        uint8_t p[5];
+        p[0] = 1; u32(p + 1, router.generation + 5);
+        send_frame(KVM_MSG_ARM, SESSION, ++seq, router.generation + 5, p, 5);
+    }
+    assert(last_result() == NACK(KVM_ROUTER_STALE_ROUTE));
+    assert(n_ops == 0 && worker.hub.armed_slot == 1 && chan[1].keys[2] == 4);
+
+    /* A wrong-slot ARM (router selected nothing) is refused the same way. */
+    assert(host_arm(2) == NACK(KVM_ROUTER_STALE_ROUTE));
+    assert(n_ops == 0 && worker.hub.armed_slot == 1 && chan[1].keys[2] == 4);
+}
+
+static void drain_bounded_when_rpc_times_out(void)
+{
+    uint8_t encoded[600];
+    uint8_t heartbeat[8];
+    size_t len;
+    setup();
+    hub_holding_slot1();
+    open_session(); /* lease starts at now_ms = 0 */
+    for (int i = 0; i < 10; i++) push(key_msg((uint8_t)(i % 2 ? 4 : 5)));
+    push(lost_msg());
+    push(key_msg(6));
+    assert(queue.count == 11 && queue.lost);
+
+    /* The NimBLE host stalls: each request takes its full 20 ms and fails. */
+    rpc_timeout = true;
+    rpc_calls = 0;
+    now_ms = 400;
+    u64(heartbeat, 1);
+    len = frame(encoded, KVM_MSG_HEARTBEAT, SESSION, ++seq, router.generation, heartbeat, 8);
+    kvm_hub_worker_iteration(&worker, &queue, &core, encoded, len);
+    /* The heartbeat was serviced before any device work, and the lease holds. */
+    assert(router.session_open && router.last_heartbeat_ms == 400);
+    /* At most one message's worth of requests ran, then the drain stopped. */
+    assert(rpc_calls >= 1 && rpc_calls <= 3 && now_ms - 400 <= 60);
+    assert(queue.count >= 9 && queue.lost); /* the rest, and the loss, stay queued */
+
+    /* Further stalled iterations never drop the loss, and keep the session. */
+    for (int i = 0; i < 4; i++) {
+        u64(heartbeat, (uint64_t)i + 2);
+        len = frame(encoded, KVM_MSG_HEARTBEAT, SESSION, ++seq, router.generation, heartbeat, 8);
+        kvm_hub_worker_iteration(&worker, &queue, &core, encoded, len);
+        assert(router.session_open);
+    }
+    assert(queue.lost);
+
+    /* Healthy again: everything drains, the loss included, nothing stays held. */
+    rpc_timeout = false;
+    for (int i = 0; i < 4; i++) kvm_hub_worker_iteration(&worker, &queue, &core, NULL, 0);
+    assert(!kvm_hub_queue_pending(&queue));
+    assert(chan[1].keys[2] == 6 || chan[1].keys[2] == 0);
+    push(lost_msg());
+    kvm_hub_worker_iteration(&worker, &queue, &core, NULL, 0);
+    assert(chan[1].keys[2] == 0 && chan[1].buttons == 0);
+}
+
+static void drain_stops_at_first_failed_request(void)
+{
+    setup();
+    hub_holding_slot1();
+    for (int i = 0; i < 6; i++) push(key_msg((uint8_t)(i % 2 ? 4 : 5)));
+    chan[1].fail_send = true; /* fails at once, no time passes */
+    drain();
+    assert(queue.count == 5); /* stopped after the first failed send */
     chan[1].fail_send = false;
-    assert(host_arm_seq(1, arm_seq) == ACK_OK); /* same-sequence retry */
-    assert(router.armed && worker.hub.armed_slot == 0 && chan[1].keys[2] == 0);
+    drain();
+    drain();
+    assert(!kvm_hub_queue_pending(&queue) && chan[1].armed && chan[1].keys[2] == 4);
 }
 
 static void router_release_rearms_hub(void)
@@ -522,6 +665,9 @@ int main(void)
     hub_input_routes_when_no_session();
     hub_dropped_while_router_armed();
     router_arm_yields_hub();
+    stale_or_replayed_arm_leaves_hub_alone();
+    drain_bounded_when_rpc_times_out();
+    drain_stops_at_first_failed_request();
     router_release_rearms_hub();
     queue_overflow_keeps_release();
     device_lost_sends_all_up();

@@ -8,7 +8,8 @@
  * The same serialized facts feed a fail-closed device screen projection.
  * The input hub runs in the same worker beside the router: the BLE central
  * starts here once the NimBLE host is synced, its callbacks only copy reports
- * into a bounded queue, and the worker drains that queue each iteration. */
+ * into a bounded queue, and the worker drains that queue each iteration after
+ * the host bytes and the lease tick, bounded to 20 ms of device work. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "transport_hub.h"
@@ -411,8 +412,9 @@ static void usb_worker(void *context)
         }
         poll_central_start(time_ms);
         drain_central_events();
-        kvm_hub_worker_drain(&hub_worker, &hub_queue);
-        atomic_store(&published_hub_target, hub_worker.hub.target);
+        /* Device input waiting: poll USB briefly so it is not held back 20 ms. */
+        TickType_t wait = pdMS_TO_TICKS(kvm_hub_queue_pending(&hub_queue) ? 2 : 20);
+        if (!wait) wait = 1;
         if (!connected) {
             if (was_connected) {
                 if (!display_pairing.local_owner) {
@@ -422,16 +424,16 @@ static void usb_worker(void *context)
                 kvm_transport_core_reset(&core);
             }
             was_connected = false;
+            kvm_hub_worker_iteration(&hub_worker, &hub_queue, NULL, NULL, 0);
+            atomic_store(&published_hub_target, hub_worker.hub.target);
             publish_status(false, guest_ready, paired_guests, slots);
-            vTaskDelay(pdMS_TO_TICKS(20));
+            vTaskDelay(wait);
             continue;
         }
         if (!was_connected) {
             (void)kvm_transport_core_init(&core, "esp32-kvm-s3", esp_app_get_description()->version,
                                           new_session(), send_binary, NULL);
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);
-            /* Every host ARM first makes the hub release its own arm. */
-            kvm_transport_core_bind_arm_gate(&core, kvm_hub_worker_arm_gate, &hub_worker);
             kvm_transport_core_bind_pairing(&core,
                 (kvm_transport_pairing_ops_t){
                     .begin = pair_begin, .cancel = pair_cancel, .reply = pair_reply,
@@ -444,16 +446,20 @@ static void usb_worker(void *context)
             }
             was_connected = true;
         }
-        int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(20));
+        int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), wait);
+        size_t host_bytes = 0;
         if (read > 0) {
             if (kvm_transport_diagnostics_requested(bytes, (size_t)read)) {
                 kvm_router_emergency_release(&router);
                 kvm_transport_core_reset(&core);
                 kvm_transport_diagnostics_dump();
                 was_connected = false;
-            } else kvm_transport_core_feed(&core, bytes, (size_t)read);
+            } else host_bytes = (size_t)read;
         }
-        kvm_transport_core_tick(&core);
+        /* Host bytes (heartbeats, ARM) and the router tick (lease) are served
+         * first; only then the time-bounded device drain runs. */
+        kvm_hub_worker_iteration(&hub_worker, &hub_queue, &core, bytes, host_bytes);
+        atomic_store(&published_hub_target, hub_worker.hub.target);
         if (plus) {
             (void)kvm_transport_core_device_select_request(&core,
                 kvm_display_next_ready_slot(visible_ready_mask(slots), router.slot));
@@ -494,6 +500,7 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     /* The hub and the router share the HID output; the router reaches it
      * through the hub worker so its arm and release keep the hub consistent. */
     kvm_hub_worker_init(&hub_worker, &router, kvm_router_hid_output(), NULL);
+    kvm_hub_worker_set_clock(&hub_worker, now_ms, NULL);
     kvm_router_init(&router, kvm_hub_worker_router_output(), &hub_worker);
     kvm_hub_queue_init(&hub_queue, hub_queue_lock, hub_queue_unlock, NULL);
     if (!kvm_router_set_capacity(&router, KVM_ROUTER_MAX_SLOTS)) {

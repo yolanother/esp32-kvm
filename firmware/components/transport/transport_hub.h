@@ -4,13 +4,16 @@
  * is the only caller of the hub and the router. Arbitration: the hub routes
  * device input to its own target while the router is not armed (no host
  * session, or a session that has not armed a guest) and drops it while the
- * router is armed. The hub yields (all-up, release) before any host ARM reaches
- * the router, and forgets its arm when the router releases that slot. */
+ * router is armed. The hub yields (all-up, release) at the moment the router
+ * actually arms (after every router check passed), never refusing the host's
+ * ARM, and forgets its arm when the router releases that slot. Device work is
+ * bounded per worker iteration so host heartbeats are never starved. */
 #ifndef ESP32_KVM_TRANSPORT_HUB_H
 #define ESP32_KVM_TRANSPORT_HUB_H
 
 #include "input_hub.h"
 #include "router.h"
+#include "transport_core.h"
 
 /** Ring depth for device reports. A pending device loss and the overflow
  * latest-state slots live outside the ring, so neither is ever dropped. */
@@ -18,6 +21,8 @@
 /** First and largest delay between central start attempts. */
 #define KVM_HUB_CENTRAL_BACKOFF_MIN_MS 100u
 #define KVM_HUB_CENTRAL_BACKOFF_MAX_MS 10000u
+/** Device work per worker iteration stops once this much time has passed. */
+#define KVM_HUB_DRAIN_BUDGET_MS 20u
 
 enum { KVM_HUB_MSG_INPUT = 1, KVM_HUB_MSG_LOST = 2 };
 
@@ -59,6 +64,10 @@ void kvm_hub_queue_init(kvm_hub_queue_t *queue, kvm_hub_lock_fn lock, kvm_hub_lo
 bool kvm_hub_queue_push(kvm_hub_queue_t *queue, const kvm_hub_msg_t *msg);
 /** Takes the next message in delivery order; false when empty. */
 bool kvm_hub_queue_pop(kvm_hub_queue_t *queue, kvm_hub_msg_t *out);
+/** True while any message (ring, tail state or loss) is waiting. */
+bool kvm_hub_queue_pending(kvm_hub_queue_t *queue);
+
+typedef uint64_t (*kvm_hub_clock_fn)(void *context);
 
 /** Worker-side hub state; only the USB worker touches it and the router. */
 typedef struct {
@@ -66,26 +75,41 @@ typedef struct {
     kvm_router_t *router;
     kvm_router_output_t output;
     void *context;
+    kvm_hub_clock_fn now;
+    void *now_context;
     bool select_pending;
     uint8_t select_target;
     kvm_hub_result_t last_result;
     uint32_t switch_failures;
+    /** Hub-side output requests in the current drain, and whether one failed. */
+    uint32_t requests;
+    bool request_failed;
 } kvm_hub_worker_t;
 
 /** Binds the hub to the real HID output. The router must be initialized with
  * kvm_hub_worker_router_output() and this worker as its context. */
 void kvm_hub_worker_init(kvm_hub_worker_t *worker, kvm_router_t *router,
                          kvm_router_output_t output, void *context);
-/** Router output that delegates to the worker's output: arming first makes the
- * hub yield, and releasing or disconnecting the hub's slot forgets its arm. */
+/** Monotonic milliseconds for the drain budget; without it only the count bounds a drain. */
+void kvm_hub_worker_set_clock(kvm_hub_worker_t *worker, kvm_hub_clock_fn now, void *context);
+/** Router output that delegates to the worker's output. Its arm runs only when
+ * kvm_router_arm has passed every check and is about to arm: the hub yields
+ * there, and if that fails its channel is released directly (disconnected when
+ * even that is uncertain) and abandoned, so the router's arm always proceeds.
+ * Releasing or disconnecting the hub's slot makes the hub forget its arm. */
 kvm_router_output_t kvm_hub_worker_router_output(void);
-/** Transport ARM gate: yields the hub before a host ARM reaches the router.
- * False (the hub could not release a ready slot) refuses the ARM with BUSY. */
-bool kvm_hub_worker_arm_gate(void *worker, uint8_t slot);
 /** Applies one message: INPUT through the hub, LOST as a device loss. */
 void kvm_hub_worker_message(kvm_hub_worker_t *worker, const kvm_hub_msg_t *msg);
-/** Drains at most KVM_HUB_QUEUE_DEPTH messages so the worker stays responsive. */
+/** Drains in delivery order and stops at whichever comes first: the queue is
+ * empty, KVM_HUB_QUEUE_DEPTH messages, KVM_HUB_DRAIN_BUDGET_MS elapsed, or a
+ * failed hub output request. Undelivered messages stay queued. */
 void kvm_hub_worker_drain(kvm_hub_worker_t *worker, kvm_hub_queue_t *queue);
+/** One worker iteration after the USB read: host bytes first (feed), then the
+ * router tick (lease, queued host input), then the bounded device drain. A
+ * NULL core skips the host part (USB disconnected). */
+void kvm_hub_worker_iteration(kvm_hub_worker_t *worker, kvm_hub_queue_t *queue,
+                              kvm_transport_core_t *core, const uint8_t *bytes,
+                              size_t length);
 /** Touch or PLUS selection. False when a host session owns selection; true when
  * the hub took the target or will retry it on the next device report. */
 bool kvm_hub_worker_select(kvm_hub_worker_t *worker, uint8_t target);
