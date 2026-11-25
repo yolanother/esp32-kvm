@@ -54,12 +54,15 @@ bool kvm_input_hub_set_target(kvm_input_hub_t *hub, uint8_t target, bool router_
  * clears local hub state and emits nothing. Keyboard reports with exactly Left Ctrl + Left Alt
  * (modifier byte 0x05) and a single newly pressed key select a target: 1 to 3 guests, 0 This
  * PC, Esc release all to This PC. The chord is swallowed whole, including the held key until
- * all non-modifier keys are up. Returns TARGET_CHANGED when the target changed, else SWALLOWED. */
+ * all non-modifier keys are up. Returns TARGET_CHANGED when the target changed, SWALLOWED otherwise, and
+ * SWITCH_FAILED when releasing a ready old target failed: the switch is retried once per later
+ * swallowed report; the report with all keys up releases the swallow, makes a final retry and
+ * then abandons the switch (held state and arm are kept), so a new chord always works. */
 kvm_hub_result_t kvm_input_hub_input(kvm_input_hub_t *hub, const kvm_router_input_t *input,
                                      bool router_armed);
 /** Sends all-up then releases the arm. The caller must invoke it BEFORE the router arms;
  * the hub cannot see the router slot. Returns true when nothing is left held or armed
-* (a dead slot counts as released), false when a ready slot failed and a retry is needed.
+ * (a dead slot counts as released), false when a ready slot failed and a retry is needed.
  * With router_armed it abandons local state without emitting and returns true. */
 bool kvm_input_hub_yield(kvm_input_hub_t *hub, bool router_armed);
 /** Sends all-up keyboard, zero pointer and zero consumer after an input device is lost.

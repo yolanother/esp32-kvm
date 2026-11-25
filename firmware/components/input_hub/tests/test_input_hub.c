@@ -679,8 +679,54 @@ static void switch_failure_is_reported_and_retried(void)
     assert(!hub.chord_latched);
 }
 
+static void failing_ready_target_never_kills_the_keyboard(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t mods = kbd(LCA, 0, 0);
+    kvm_router_input_t to2 = kbd(LCA, KEY_2, 0);
+    kvm_router_input_t to3 = kbd(LCA, KEY_1 + 2, 0);
+    kvm_router_input_t esc = kbd(LCA, KEY_ESC, 0);
+    kvm_router_input_t up = kbd(0, 0, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &mods, false);
+    f.send_ok = false;
+    assert(kvm_input_hub_input(&hub, &to2, false) == KVM_HUB_SWITCH_FAILED);
+    assert(kvm_input_hub_input(&hub, &to2, false) == KVM_HUB_SWITCH_FAILED);
+    assert(kvm_input_hub_input(&hub, &up, false) == KVM_HUB_SWITCH_FAILED);
+    assert(!hub.chord_latched && !hub.switch_pending && hub.target == 1 && hub.armed_slot == 1);
+    assert(kvm_input_hub_input(&hub, &to3, false) == KVM_HUB_SWITCH_FAILED);
+    assert(hub.pending_target == 3);
+    assert(kvm_input_hub_input(&hub, &up, false) == KVM_HUB_SWITCH_FAILED);
+    assert(!hub.chord_latched);
+    assert(kvm_input_hub_input(&hub, &esc, false) == KVM_HUB_SWITCH_FAILED && hub.pending_target == 0);
+    kvm_input_hub_input(&hub, &up, false);
+    f.send_ok = true;
+    assert(kvm_input_hub_input(&hub, &to2, false) == KVM_HUB_TARGET_CHANGED && hub.target == 2);
+    assert(kvm_input_hub_input(&hub, &up, false) == KVM_HUB_SWALLOWED && !hub.chord_latched);
+    assert(kvm_input_hub_input(&hub, &esc, false) == KVM_HUB_TARGET_CHANGED && hub.target == 0);
+}
+
+static void set_target_clears_pending_switch(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t mods = kbd(LCA, 0, 0);
+    kvm_router_input_t to2 = kbd(LCA, KEY_2, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &mods, false);
+    f.send_ok = false;
+    assert(kvm_input_hub_input(&hub, &to2, false) == KVM_HUB_SWITCH_FAILED && hub.switch_pending);
+    f.send_ok = true;
+    assert(kvm_input_hub_set_target(&hub, 3, false) && !hub.switch_pending && hub.target == 3);
+}
+
 int main(void)
 {
+    failing_ready_target_never_kills_the_keyboard();
+    set_target_clears_pending_switch();
     chord_to_selected_guest_releases_held_modifiers();
     esc_on_pc_emits_nothing();
     yield_while_router_armed_abandons_without_emitting();

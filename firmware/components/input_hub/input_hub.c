@@ -125,12 +125,14 @@ bool kvm_input_hub_set_target(kvm_input_hub_t *hub, uint8_t target, bool router_
         return true;
     }
     if (target == hub->target) {
+        hub->switch_pending = false;
         return true;
     }
     if (!send_all_up(hub) || !drop_arm(hub)) {
         return false;
     }
     hub->target = target;
+    hub->switch_pending = false;
     return true;
 }
 
@@ -207,8 +209,11 @@ static bool chord_input(kvm_input_hub_t *hub, const kvm_router_input_t *input,
                 }
             }
         }
-        if (no_keys(input->keyboard) && !hub->switch_pending) {
+        if (no_keys(input->keyboard)) {
+            /* All keys up always ends the swallow; an unresolved switch is abandoned (held
+             * state and arm are kept for device_lost or a new chord to retry). */
             hub->chord_latched = false;
+            hub->switch_pending = false;
         }
         return true;
     }
@@ -217,6 +222,7 @@ static bool chord_input(kvm_input_hub_t *hub, const kvm_router_input_t *input,
         return false;
     }
     hub->chord_latched = true;
+    hub->switch_pending = false; /* a fresh chord supersedes any stale pending target */
     *result = KVM_HUB_SWALLOWED;
     if (!apply_switch(hub, target)) {
         hub->switch_pending = true;
