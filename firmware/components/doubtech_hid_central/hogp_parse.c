@@ -108,7 +108,7 @@ typedef struct {
 
 /* Records one mouse-collection variable field; returns OK or a rejection. */
 static hogp_map_result_t mouse_field(mouse_acc_t *m, const globals_t *g, uint32_t flags, uint16_t page, uint16_t usage,
-                                     uint32_t off, uint32_t index) {
+                                     uint32_t off) {
     if (page == PAGE_BUTTON) {
         if (g->size != 1u) { return HOGP_MAP_UNSUPPORTED; }
         if (m->btn_count == 0u) {
@@ -117,7 +117,6 @@ static hogp_map_result_t mouse_field(mouse_acc_t *m, const globals_t *g, uint32_
             return HOGP_MAP_UNSUPPORTED;
         }
         m->btn_count++;
-        (void)index;
         return HOGP_MAP_OK;
     }
     if (page != PAGE_GENERIC_DESKTOP || (usage != USAGE_X && usage != USAGE_Y && usage != USAGE_WHEEL)) {
@@ -240,7 +239,7 @@ hogp_map_result_t hogp_mouse_map_from_descriptor(const uint8_t *map, size_t len,
                         resolve_usage(&l, &g, k, &page, &usage);
                         uint64_t off = (uint64_t)start + (uint64_t)k * g.size;
                         if (off > MAX_BIT_OFFSET) { return HOGP_MAP_UNSUPPORTED; }
-                        hogp_map_result_t r = mouse_field(&m, &g, uval, page, usage, (uint32_t)off, k);
+                        hogp_map_result_t r = mouse_field(&m, &g, uval, page, usage, (uint32_t)off);
                         if (r != HOGP_MAP_OK) { return r; }
                     }
                 }
@@ -288,11 +287,6 @@ bool hogp_parse_mouse_report(const hogp_mouse_map_t *map, const uint8_t *data, s
     if (map == NULL || data == NULL || buttons == NULL || dx == NULL || dy == NULL) { return false; }
     if (map->x_bits == 0u || map->x_bits > 16u || map->y_bits == 0u || map->y_bits > 16u) { return false; }
     if (map->has_wheel && (map->wheel_bits == 0u || map->wheel_bits > 8u)) { return false; }
-    if (map->has_id) {
-        if (len == 0u || data[0] != map->report_id) { return false; }
-        data++;
-        len--;
-    }
     uint32_t need_bits = map->button_bits;
     if ((uint32_t)map->x_off + map->x_bits > need_bits) { need_bits = (uint32_t)map->x_off + map->x_bits; }
     if ((uint32_t)map->y_off + map->y_bits > need_bits) { need_bits = (uint32_t)map->y_off + map->y_bits; }

@@ -16,7 +16,8 @@
 #define HOGP_MAP_MAX_GLOBAL_STACK 16u
 
 /** Where the relative mouse fields live inside one input report. Bit offsets
- * count from the first bit after the report ID byte (when has_id). Buttons
+ * count from the first bit of the notification payload, which never includes the
+ * report ID byte (see hogp_parse_mouse_report). Buttons
  * always start at bit 0; only the low 8 buttons are reported. */
 typedef struct {
     uint8_t report_id;
@@ -40,9 +41,15 @@ bool hogp_parse_boot_mouse(const uint8_t *data, size_t len, uint8_t *buttons, in
  * inconsistent. out is untouched unless OK. */
 hogp_map_result_t hogp_mouse_map_from_descriptor(const uint8_t *map, size_t len, hogp_mouse_map_t *out);
 
-/** Extracts buttons (low 8), signed axes and wheel from one notification. When
- * map->has_id the first byte must equal report_id and is skipped. Returns false
- * on a wrong id, a short report or an invalid map. wheel may be NULL. */
+/** Extracts buttons (low 8), signed axes and wheel from one notification payload.
+ * Contract: data is the bare payload of a Report characteristic notification and
+ * carries NO report ID byte. The ID is known from the characteristic's Report
+ * Reference descriptor (0x2908); the caller selects the characteristic whose
+ * reference ID equals map->report_id (when map->has_id). The boot keyboard and
+ * boot mouse parsers above also take the bare payload. Offsets in map are relative
+ * to the payload start. Returns false on a short payload or an invalid map; a
+ * payload wrongly prefixed with an ID byte cannot be detected and would shift
+ * every field. wheel may be NULL. */
 bool hogp_parse_mouse_report(const hogp_mouse_map_t *map, const uint8_t *data, size_t len, uint8_t *buttons,
                              int16_t *dx, int16_t *dy, int8_t *wheel);
 

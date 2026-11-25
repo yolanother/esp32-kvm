@@ -145,22 +145,26 @@ static void test_logitech_12bit(void) {
     int8_t w = 0;
     /* buttons 0x0005, X = -1 (0xFFF), Y = +2047 (0x7FF), wheel -1, pan 0 */
     const uint8_t a[8] = {0x02, 0x05, 0x00, 0xFF, 0xFF, 0x7F, 0xFF, 0x00};
-    CHECK(report_of(&m, a, 8, &b, &dx, &dy, &w));
+    CHECK(report_of(&m, a + 1, 7, &b, &dx, &dy, &w));
     CHECK(b == 5 && dx == -1 && dy == 2047 && w == -1);
     /* X = -2048 (0x800), Y = -1 (0xFFF), wheel +1 */
     const uint8_t c2[8] = {0x02, 0x00, 0x00, 0x00, 0xF8, 0xFF, 0x01, 0x00};
-    CHECK(report_of(&m, c2, 8, &b, &dx, &dy, &w));
+    CHECK(report_of(&m, c2 + 1, 7, &b, &dx, &dy, &w));
     CHECK(dx == -2048 && dy == -1 && w == 1);
     /* X = +1 (0x001), Y = -2 (0xFFE) */
     const uint8_t d[8] = {0x02, 0x00, 0x00, 0x01, 0xE0, 0xFF, 0x00, 0x00};
-    CHECK(report_of(&m, d, 8, &b, &dx, &dy, &w));
+    CHECK(report_of(&m, d + 1, 7, &b, &dx, &dy, &w));
     CHECK(dx == 1 && dy == -2);
     /* wrong id and short reports are rejected, never mis-scaled */
-    const uint8_t wrong[8] = {0x03, 0x00, 0x00, 0x01, 0xE0, 0xFF, 0x00, 0x00};
-    CHECK(!report_of(&m, wrong, 8, &b, &dx, &dy, &w));
-    CHECK(!report_of(&m, a, 6, &b, &dx, &dy, &w));
-    CHECK(report_of(&m, a, 7, &b, &dx, &dy, &w)); /* trailing AC Pan byte is optional */
-    CHECK(!report_of(&m, a, 0, &b, &dx, &dy, &w));
+    /* Payload is the bare notification (no ID byte; the ID comes from the Report Reference).
+     * Short payloads are rejected, never mis-scaled. A payload that still carries an ID byte is
+     * indistinguishable by content, so the contract is documented in the header. */
+    CHECK(!report_of(&m, a + 1, 5, &b, &dx, &dy, &w));
+    CHECK(report_of(&m, a + 1, 6, &b, &dx, &dy, &w));
+    CHECK(report_of(&m, a + 1, 7, &b, &dx, &dy, &w)); /* trailing AC Pan byte is optional */
+    CHECK(!report_of(&m, a + 1, 0, &b, &dx, &dy, &w));
+    /* with a leading ID byte the fields shift: the ID byte must not be what the parser reads as buttons */
+    CHECK(report_of(&m, a, 8, &b, &dx, &dy, &w) && b == 2); /* mis-parse is visible, hence the contract */
 }
 
 static void test_combo_and_rejections(void) {
