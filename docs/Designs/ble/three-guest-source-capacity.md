@@ -8,6 +8,23 @@ The integrated trial firmware now advertises `CAPS.max_connections = 3`, reports
 
 Bond removal compares the target token's retained peer identity with each connected peer before terminating a link. It must leave unrelated channels connected. Current NimBLE bond deletion and application NVS save remain separate operations, so a storage failure can leave the two stores temporarily inconsistent; production recovery of this failure requires its own verification.
 
+## Connection budget with the keyboard and mouse central (current)
+
+The four-activity figures above are the guests-only budget. The firmware now also runs a BLE central on the same NimBLE host for one board-owned keyboard and one mouse ([central.md](../doubtech-hid/central.md)), so `firmware/sdkconfig.defaults` is sized for both roles:
+
+| Setting | Guests only | With the central | Reason |
+|---|---:|---:|---|
+| `CONFIG_BT_NIMBLE_ROLE_CENTRAL` | n | y | scan, initiate, GATT client |
+| `CONFIG_BT_NIMBLE_MAX_CONNECTIONS` | 3 | 5 | 3 guest links + 1 keyboard + 1 mouse |
+| `CONFIG_BT_CTRL_BLE_MAX_ACT` | 4 | 8 | 5 links + advertising + scan/initiate + 1 spare |
+| `CONFIG_BT_NIMBLE_MAX_BONDS` | 8 | 12 | one shared store: 8 guests + 4 input identities (only 2 connect at once) |
+| `CONFIG_BT_NIMBLE_MAX_CCCDS` | 24 | 24 | only guests subscribe to the board |
+| `doubtech_hid_config_t.foreign_bond_reserve` | 0 | 4 | bonds in the shared store that are not guests' |
+| Guest bonds (retained table) | 8 | 8 | unchanged; `doubtech_hid_pairing_open` compares the NimBLE store against 8 plus the reserve |
+| Persistent input records | none | 2 (NVS `dthid_inputs`) | separate from the guests' `kvm_bonds` |
+
+The ranges were set from the ESP-IDF documentation and the NimBLE sources, not verified against the ESP32-S3 controller on a board. Free heap before and after, scan airtime and guest notify latency while an input device reconnects (risk R3), and three guests plus two input links together are owner-run gates in [the owner checklist](../doubtech-hid/owner-checklist-device-input.md). If the controller cannot sustain five links, the fallback is one input link at a time (keyboard first).
+
 ## Gates before claiming three usable guests
 
 1. Build and inspect the resolved ESP-IDF `sdkconfig` for three NimBLE connections, 24 CCCDs, and four controller activities. Run the integrated native link gate.

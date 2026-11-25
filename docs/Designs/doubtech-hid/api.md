@@ -252,9 +252,12 @@ while a guest window is open. The reverse is not enforced: this library does not
 know about the other role's window, so `doubtech_hid_pairing_open` (or a
 guest-initiated numeric comparison, which opens the window itself) still succeeds
 during an input pairing window. The application must not open both (the KVM
-touchscreen flow gates this). Guest bonding still requires an authenticated link,
-so a guest that pairs during that overlap is either authenticated by numeric
-comparison or rejected.
+touchscreen flow and the USB worker gate this: guest pairing is refused during an
+input window, and a guest window the library opens by itself during one is cancelled
+when its OPENED event reaches the worker, so the windows can briefly overlap).
+See [central.md](central.md) for exactly what is enforced. Guest bonding still
+requires an authenticated link, so a guest that pairs during that overlap is either
+authenticated by numeric comparison or rejected.
 
 ### `bool doubtech_hid_peer_is_guest(uint8_t address_type, const uint8_t address[6])`
 

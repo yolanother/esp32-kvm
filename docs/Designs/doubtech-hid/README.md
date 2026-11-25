@@ -8,7 +8,7 @@ It owns no USB, display or routing logic. The firmware that embeds it decides wh
 guest receives input.
 
 Quick start: [component README](../../../firmware/components/doubtech_hid/README.md).
-Function reference: [api.md](api.md). Wiring it into a firmware project:
+Function reference: [api.md](api.md). The device-owned keyboard and mouse client that shares this host: [central.md](central.md). Wiring it into a firmware project:
 [integration.md](integration.md).
 
 Current KVM firmware identity: configured in `firmware/main/main.c` as name "DoubTech HID", manufacturer "DoubTech", model "DoubTech HID", default bond namespace.
@@ -87,11 +87,15 @@ holding its own encryption state, subscriptions, protocol mode, held reports and
 disconnect flag. GATT reads and writes resolve the requesting connection handle, and a
 notification names exactly one handle.
 
-Capacity: the retained bond table holds `DOUBTECH_HID_MAX_BONDS` (8) opaque tokens. These
-limits require matching settings in `sdkconfig` (`firmware/sdkconfig.defaults`):
-`CONFIG_BT_NIMBLE_MAX_CONNECTIONS=3`, `CONFIG_BT_NIMBLE_MAX_BONDS=8`,
-`CONFIG_BT_NIMBLE_MAX_CCCDS=24`, `CONFIG_BT_CTRL_BLE_MAX_ACT=4` (three links plus one
-advertising activity). A fourth link is not accepted: the device stops advertising while
+Capacity: the retained bond table holds `DOUBTECH_HID_MAX_BONDS` (8) opaque tokens. The guest
+limits are three links and eight bonds. This repository also runs the central role on the same
+host (see [central.md](central.md)), so its `sdkconfig` (`firmware/sdkconfig.defaults`) is sized
+for both: `CONFIG_BT_NIMBLE_MAX_CONNECTIONS=5` (3 guests + keyboard + mouse),
+`CONFIG_BT_NIMBLE_MAX_BONDS=12` (8 guests + 4 input identities, one shared NimBLE store),
+`CONFIG_BT_NIMBLE_MAX_CCCDS=24`, `CONFIG_BT_CTRL_BLE_MAX_ACT=8` (5 links, advertising, scan/initiate,
+and a spare). A library user without a central needs only 3, 8, 24 and 4, with
+`foreign_bond_reserve` left at 0. The library itself still accepts at most three guest links
+and eight guest bonds; the extra NimBLE bonds are counted through `foreign_bond_reserve`. A fourth link is not accepted: the device stops advertising while
 three are connected and resumes after one drops. The controller's memory use and
 three-guest behavior on real hosts are gates recorded in
 [three-link capacity](../ble/three-guest-source-capacity.md); source tests do not
@@ -308,15 +312,14 @@ Known gaps:
 - Three simultaneous real hosts, interoperability and long-run behavior are recorded as
   physical gates elsewhere and are not shown by anything in this directory.
 
-## Future central role
+## The central role
 
-A central input client (the device connecting to a physical Bluetooth keyboard or mouse
-and forwarding it) does not exist; the product direction is described in
-[the device-owned input path](../hardware-primary/README.md). Reserved design points, so a later role does not need a
-rewrite: the opaque-token table and its store are role-independent and could be shared (a
-central role would add its own bonds to the same table and the eight-entry budget would be
-shared, so the limit would need revisiting); the report definitions in `core/hid_report.[ch]`
-(report IDs, lengths, usage ranges) are the common vocabulary a parser would target;
-the host-thread / request-bridge split would apply unchanged; and NimBLE needs its central
-role enabled (`CONFIG_BT_NIMBLE_ROLE_CENTRAL`, together with more controller activities) in
-addition to the peripheral role. None of this is built or tested.
+The central input client now exists as a separate component, `doubtech_hid_central`, documented in
+[central.md](central.md). It shares this library's NimBLE host, bond store and bond budget without being
+part of it: this library owns `nimble_port`, the host task and the guests' retained bond table, and
+exposes only four small things to it, `foreign_bond_reserve` (a config field),
+`doubtech_hid_host_synced`, `doubtech_hid_pairing_active` and `doubtech_hid_peer_is_guest`. The report
+definitions in `core/hid_report.[ch]` are the common vocabulary; the central maps device reports onto the
+same keyboard and mouse shapes the guests receive. How the application arbitrates device input against a
+PC app is in [the input hub](../input-hub/README.md). Known gap: this library's own bond deletions (for
+example forgetting a guest) are unaware of the central registry; they delete guest bonds only.

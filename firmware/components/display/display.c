@@ -476,6 +476,11 @@ esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn,
     return ESP_OK;
 }
 
+uint32_t kvm_display_stack_high_water_bytes(void)
+{
+    return display_task ? (uint32_t)uxTaskGetStackHighWaterMark(display_task) * sizeof(StackType_t) : 0u;
+}
+
 void kvm_display_post_status(const kvm_display_status_t *status)
 {
     if (!status) return;

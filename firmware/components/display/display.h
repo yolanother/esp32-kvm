@@ -25,5 +25,7 @@ esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn,
                             kvm_display_pair_fn pair_fn, kvm_display_target_fn target_fn);
 /** Copies the latest routing status for the display task without blocking the router. */
 void kvm_display_post_status(const kvm_display_status_t *status);
+/** Smallest amount of free display task stack seen so far, in bytes (0 when the panel task is not running). */
+uint32_t kvm_display_stack_high_water_bytes(void);
 
 #endif

@@ -7,6 +7,7 @@ ESP32 KVM shares a Windows host's physical keyboard and mouse with selected Blue
 This is a working trial build, not a released product. The pieces exist and have source-level tests:
 
 - Firmware (ESP-IDF, ESP32-S3): USB Serial/JTAG protocol transport, routing with a fail-local policy, a three-link BLE HID service with numeric-comparison pairing and eight stored bonds (the reusable [`doubtech_hid` library](firmware/components/doubtech_hid/README.md)), and a 240x240 status display (the Kconfig options default to off; `firmware/sdkconfig.defaults` turns on the Waveshare panel and CST816 touch for the validated board).
+- Device-owned input (new, host-tested only, never run on a board): the board itself pairs one Bluetooth keyboard and one mouse and routes them to a chosen guest with a Left Ctrl + Left Alt chord, with no PC app running. See [Pair a keyboard or mouse](#pair-a-keyboard-or-mouse) and [the owner checklist](docs/Designs/doubtech-hid/owner-checklist-device-input.md).
 - Desktop (Tauri 2, React/TypeScript): setup and guest-pairing wizard, dashboard and tray, per-guest key mapping and layout editors, a configurable switch shortcut, and the Windows capture adapter.
 - Release packaging of an app-only firmware image and an MSI (`tools/package_release.py`).
 
@@ -17,7 +18,7 @@ What is not established: the product requirements are in [the product spec](docs
 - `apps/desktop`: Tauri 2 native shell (`src-tauri`) with a React/TypeScript webview (`src`).
 - `apps/mac`: macOS command-line USB host client and its Swift capture helper (builds on a Mac; see `apps/mac/README.md`).
 - `crates/`: Rust libraries, each with its own tests: `input-core` (routing policy and fault handling; timing-critical routing belongs here, not in React), `platform-windows` (Windows capture and recovery adapter), `host-actor` (the verified USB session), `usb-transport`, `protocol` (the wire format; schema in `protocol/schema`), `edge-policy`, `topology-core`, `helper-session`, `update-core` and `update-runner`.
-- `firmware/main`: the ESP-IDF application entry point. `firmware/components/`: `board`, `transport`, `router`, `display` and the reusable `doubtech_hid` BLE HID library. `firmware/tests/`: portable C tests for the router, pairing, integration and display. `firmware/partitions.csv` and `firmware/sdkconfig.defaults` are the shared configuration.
+- `firmware/main`: the ESP-IDF application entry point. `firmware/components/`: `board`, `transport`, `router`, `display`, `input_hub` (device-input routing), and the reusable `doubtech_hid` (BLE HID guests) and `doubtech_hid_central` (BLE keyboard and mouse client) libraries. `firmware/tests/`: portable C tests for the router, pairing, integration and display. `firmware/partitions.csv` and `firmware/sdkconfig.defaults` are the shared configuration.
 - `tools/`: `firmware.ps1` (build, list ports, flash), `package_release.py`, probes and `tests/test-firmware-script.ps1`.
 - `tests/`: `vectors` (independent golden protocol vectors), `ci`, `release`, `fault`.
 - `docs/`: `spec` (product, architecture, protocol, validation), `design` (tokens and screen sources), `Designs` (one folder per feature, including [`doubtech-hid`](docs/Designs/doubtech-hid/README.md), `release`, `recovery`, `update` and `pairing`), `hardware`.
@@ -179,6 +180,8 @@ python -B -m unittest discover -s tests/release -v
 
 # C suites (Windows, MSVC, no board needed; not run by CI)
 pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/components/doubtech_hid/tests/run-msvc.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/components/doubtech_hid_central/tests/run-msvc.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/components/input_hub/tests/run-msvc.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/tests/pairing/run-msvc.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/tests/router/run-msvc.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/tests/integration/run-msvc.ps1
@@ -187,10 +190,28 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/tests/display/run-msvc.ps
 # Checks and script tests
 pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/components/doubtech_hid/tests/check-product-names.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/components/doubtech_hid/tests/check-api-docs.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File firmware/components/doubtech_hid_central/tests/check-product-names.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File tools/tests/test-firmware-script.ps1
 ```
 
-What CI runs (`.github/workflows/validation.yml`, on every push and pull request): `rust` (Windows, Rust 1.93.1: `cargo fmt --check`, clippy with warnings denied, the input-core fault suite, `cargo test --workspace`); `desktop` (Windows, Node 22.13.1: `npm ci`, `npx tsc --noEmit`, `npm run build`); `protocol-vectors` (regenerates the vectors and fails if they differ, then runs the protocol tests); `release-inputs` (Python 3.12: `tests/ci` and `tests/release`); and `firmware` (Ubuntu, ESP-IDF v5.5.1 for ESP32-S3: builds `firmware/`). The C suites, the check scripts, the desktop Node tests and `tools/tests/test-firmware-script.ps1` are not in CI. The CI firmware build is the independent build gate for the firmware. The C suites run only through the Windows MSVC scripts and are mock-based: they show source logic, not radio or hardware behavior.
+What CI runs (`.github/workflows/validation.yml`, on every push and pull request): `rust` (Windows, Rust 1.93.1: `cargo fmt --check`, clippy with warnings denied, the input-core fault suite, `cargo test --workspace`); `desktop` (Windows, Node 22.13.1: `npm ci`, `npx tsc --noEmit`, `npm run build`); `protocol-vectors` (regenerates the vectors and fails if they differ, then runs the protocol tests); `release-inputs` (Python 3.12: `tests/ci` and `tests/release`); and `firmware` (Ubuntu, ESP-IDF v5.5.1 for ESP32-S3: builds `firmware/`). The C suites, the check scripts, the desktop Node tests and `tools/tests/test-firmware-script.ps1` are not in CI. The CI firmware build is the independent build gate for the firmware. The C suites run only through the Windows MSVC scripts and are mock-based: they show source logic, not radio or hardware behavior. This includes the new `doubtech_hid_central` and `input_hub` suites: they are not in CI either. `check-product-names.ps1` (under `doubtech_hid`) scans both `doubtech_hid` and `doubtech_hid_central`; `check-api-docs.ps1` checks both public headers against `docs/Designs/doubtech-hid/api.md` and `central.md`.
+
+### Pair a keyboard or mouse
+
+The board can own one Bluetooth keyboard and one mouse itself, so you can type into a guest with the PC app closed. **This feature is built and tested on the host only; nothing in it has been run on a board.** Design: [central.md](docs/Designs/doubtech-hid/central.md), [input hub](docs/Designs/input-hub/README.md). The hardware checklist, with a PASS/FAIL line per item, is [owner-checklist-device-input.md](docs/Designs/doubtech-hid/owner-checklist-device-input.md).
+
+Before any of it works, **you must flash the new firmware first** (the build in `firmware/build` does not reach the board by itself):
+
+1. Quit the desktop app from the tray (**Quit and release**); it owns the serial port.
+2. `pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 build`, then `... tools/firmware.ps1 flash -Port COM4`. **Never erase flash**; the script never does, so your guest bonds survive. If `firmware/sdkconfig` is left from an older build, delete that generated file first so the larger BLE budget applies.
+
+Then, on the touchscreen (needs at least one paired guest, no armed PC route and no open guest pairing window):
+
+1. Tap the keyboard button left of the gear to open **INPUT DEVICES**, then **ADD KEYBOARD OR MOUSE**.
+2. Put the keyboard or mouse in pairing mode and tap its row (the four strongest are listed) within 30 seconds. A keyboard may show **TYPE ON KEYBOARD** and six digits: type them on the keyboard and press Enter. A device the board cannot use shows **NOT SUPPORTED** (a keyboard needs boot protocol; mice are boot mice or simple wheel mice).
+3. The device reconnects by itself after a reboot or a drop. Tap a paired row twice to forget it. Pairing shows **BUSY** only while the PC app has a guest armed or guest pairing is open; having the PC app connected is fine.
+
+Select where input goes with the chord Left Ctrl + Left Alt + 1, 2 or 3 (guest), 0 (This PC, which does nothing yet) or Esc (release all). While the PC app has a guest armed, the PC app wins and the board's own devices are ignored. With no PC app the screen shows the normal view with a dimmed This PC card and a `USB off` badge.
 
 ### Recovery
 

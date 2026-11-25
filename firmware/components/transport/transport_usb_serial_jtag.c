@@ -30,6 +30,8 @@
 #include "doubtech_hid_central.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -52,6 +54,7 @@
 
 #define KVM_USB_BUFFER_SIZE 1024
 #define KVM_USB_TASK_STACK 6144 /* worker also starts the central (NVS load) */
+#define KVM_HEALTH_LOG_MS 30000u /* period of the Health log line */
 
 static kvm_transport_core_t core;
 static kvm_router_t router;
@@ -484,6 +487,7 @@ static void usb_worker(void *context)
     bool guest_ready = false;
     uint8_t paired_guests = 0;
     uint64_t last_ready_ms = 0;
+    uint64_t last_health_ms = 0;
     bool ready_sampled = false;
     kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS] = {0};
     for (;;) {
@@ -505,6 +509,15 @@ static void usb_worker(void *context)
         }
         bool connected = usb_serial_jtag_is_connected();
         uint64_t time_ms = now_ms(NULL);
+        if (time_ms - last_health_ms >= KVM_HEALTH_LOG_MS || time_ms < last_health_ms) {
+            last_health_ms = time_ms;
+            /* Owner checklist: free heap and the smallest free stack seen by the two busiest tasks. */
+            ESP_LOGI("esp32-kvm", "Health: free=%u min_free=%u internal_min_free=%u usb_worker_stack_min=%u display_stack_min=%u",
+                     (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
+                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)),
+                     (unsigned)kvm_display_stack_high_water_bytes());
+        }
         if (drain_pairing_events()) ready_sampled = false;
         kvm_display_pairing_expire(&display_pairing, time_ms);
         if (!(button_bits & 2u)) drain_pairing_touch(time_ms);

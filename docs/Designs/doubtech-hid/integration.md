@@ -71,7 +71,10 @@ What they are for:
   connections (the earlier one-connection bring-up used 8). It was not derived from a
   formula here, so keep it unless you measure otherwise.
 - `BT_CTRL_BLE_MAX_ACT=4`: three connections plus one advertising activity.
-- `MEM_ALLOC_MODE_INTERNAL`: keep radio buffers in internal RAM, not PSRAM.
+- This repository's firmware also runs the central role (`ROLE_CENTRAL=y`) and uses
+  `MAX_CONNECTIONS=5`, `MAX_BONDS=12` and `BT_CTRL_BLE_MAX_ACT=8` with
+  `foreign_bond_reserve = 4`; see [central.md](central.md). The values above are the minimum for a
+  guests-only integration.- `MEM_ALLOC_MODE_INTERNAL`: keep radio buffers in internal RAM, not PSRAM.
 
 Also needed in the partition table: a data partition of type `nvs` (this repository's
 `firmware/partitions.csv` has a 16 KiB one at `0x9000`). The service initializes NVS and
