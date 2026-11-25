@@ -83,7 +83,8 @@ static void input_pairing_tests(void)
     input_reset(&p);
     input_view(&p, 1000, &s, &v);
     assert(v.screen == KVM_DISPLAY_ACTIVE && v.show_guest_settings && v.show_input_entry);
-    assert(kvm_display_input_touch_action(&s, 160, 214, &a, &row) && a == KVM_DISPLAY_INPUT_PAIR_BEGIN);
+    /* The entry opens the input-device list (forget rows and "Add"). */
+    assert(kvm_display_input_touch_action(&s, 160, 214, &a, &row) && a == KVM_DISPLAY_INPUT_DEVICES_OPEN);
     assert(kvm_display_pair_touch_action(&s, 210, 214, &guest_action) &&
            guest_action == KVM_DISPLAY_PAIR_BEGIN);
     assert(!kvm_display_input_touch_action(&s, 210, 214, &a, &row)); /* the gear stays guest pairing */
@@ -489,6 +490,166 @@ static void input_pairing_tests(void)
     assert(!kvm_display_input_pairing_blocks_guest(NULL));
 }
 
+/* ---- Input-device list: forget a keyboard or mouse with a confirm tap ---- */
+static int forget_calls, last_forget;
+static kvm_display_input_op_t forget_result = KVM_DISPLAY_INPUT_OP_OK;
+static kvm_display_input_op_t fake_forget(void *c, uint8_t kind)
+{ (void)c; forget_calls++; last_forget = kind; return forget_result; }
+
+static void devices_reset(kvm_display_input_pairing_t *p)
+{
+    input_reset(p);
+    forget_calls = 0;
+    last_forget = -1;
+    forget_result = KVM_DISPLAY_INPUT_OP_OK;
+    p->ops.forget = fake_forget;
+    kvm_display_input_pairing_device(p, KVM_DISPLAY_INPUT_KEYBOARD, true, "K380");
+    kvm_display_input_pairing_device(p, KVM_DISPLAY_INPUT_MOUSE, false, NULL);
+}
+static kvm_display_input_request_t devices_open_req(void)
+{
+    kvm_display_input_request_t r = {KVM_DISPLAY_INPUT_DEVICES_OPEN, 0, 0, 0};
+    return r;
+}
+static bool devices_tap(kvm_display_input_pairing_t *p, uint16_t x, uint16_t y, uint64_t now,
+                        bool host_armed, bool guest_pairing)
+{
+    kvm_display_status_t s;
+    kvm_display_view_t v;
+    kvm_display_input_request_t r;
+    input_view(p, now, &s, &v);
+    return input_touch_request(&s, x, y, &r) &&
+           kvm_display_input_pairing_request(p, r, now, host_armed, guest_pairing);
+}
+
+static void input_devices_tests(void)
+{
+    kvm_display_input_pairing_t p;
+    kvm_display_status_t s;
+    kvm_display_view_t v;
+    kvm_display_input_request_t r = {0};
+    kvm_display_input_action_t a = KVM_DISPLAY_INPUT_PAIR_CANCEL;
+    uint8_t row = 0;
+
+    /* The entry opens the list; nothing reaches the central. */
+    devices_reset(&p);
+    assert(devices_tap(&p, 160, 214, 1000, false, false));
+    assert(p.state == KVM_DISPLAY_INPUT_DEVICES && begin_calls == 0 && forget_calls == 0);
+    assert(kvm_display_input_pairing_blocks_guest(&p));
+    input_view(&p, 1000, &s, &v);
+    assert(v.screen == KVM_DISPLAY_INPUT_PAIR && strcmp(v.title, "INPUT DEVICES") == 0);
+    assert(v.input_row_count == 3 && v.input_cancel);
+    assert(strcmp(v.input_rows[0], "KEYBOARD: K380") == 0);
+    assert(strcmp(v.input_rows[1], "MOUSE: not paired") == 0);
+    assert(strcmp(v.input_rows[2], "ADD KEYBOARD OR MOUSE") == 0);
+    assert(!v.show_input_entry && !v.show_guest_settings);
+
+    /* First tap on a paired row asks for confirmation; nothing is forgotten. */
+    assert(devices_tap(&p, 120, 64, 1100, false, false));
+    assert(forget_calls == 0);
+    input_view(&p, 1100, &s, &v);
+    assert(strcmp(v.title, "FORGET K380?") == 0);
+    assert(strcmp(v.input_rows[0], "TAP AGAIN TO FORGET") == 0);
+    assert(strcmp(v.footer, "Tap again within 5s") == 0);
+    /* The second tap within 5 s forgets that kind. */
+    assert(devices_tap(&p, 120, 64, 1100 + KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS - 1, false, false));
+    assert(forget_calls == 1 && last_forget == KVM_DISPLAY_INPUT_KEYBOARD);
+    input_view(&p, 6200, &s, &v);
+    assert(p.state == KVM_DISPLAY_INPUT_DEVICES && strcmp(v.title, "INPUT DEVICES") == 0);
+    assert(strcmp(v.input_rows[0], "KEYBOARD: not paired") == 0);
+    assert(strcmp(v.footer, "KEYBOARD FORGOTTEN") == 0);
+    /* An unpaired row does nothing. */
+    assert(!devices_tap(&p, 120, 64, 6300, false, false) && forget_calls == 1);
+    assert(!devices_tap(&p, 120, 108, 6300, false, false) && forget_calls == 1);
+
+    /* A second tap after 5 s only asks again. */
+    devices_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    assert(devices_tap(&p, 120, 64, 1000, false, false));
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS, false);
+    input_view(&p, 1000 + KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS, &s, &v);
+    assert(strcmp(v.title, "INPUT DEVICES") == 0 && strcmp(v.input_rows[0], "KEYBOARD: K380") == 0);
+    assert(devices_tap(&p, 120, 64, 1000 + KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS, false, false));
+    assert(forget_calls == 0);
+    /* A confirm for one kind is not a confirm for the other. */
+    kvm_display_input_pairing_device(&p, KVM_DISPLAY_INPUT_MOUSE, true, "MX");
+    assert(devices_tap(&p, 120, 108, 7000, false, false) && forget_calls == 0);
+    assert(devices_tap(&p, 120, 108, 7100, false, false) && forget_calls == 1 &&
+           last_forget == KVM_DISPLAY_INPUT_MOUSE);
+
+    /* A refused forget says so and keeps the device listed. */
+    devices_reset(&p);
+    forget_result = KVM_DISPLAY_INPUT_OP_REFUSED;
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    assert(devices_tap(&p, 120, 64, 1000, false, false));
+    assert(!devices_tap(&p, 120, 64, 1200, false, false) && forget_calls == 1);
+    input_view(&p, 1200, &s, &v);
+    assert(strcmp(v.footer, "FORGET FAILED, RETRY") == 0 && strcmp(v.input_rows[0], "KEYBOARD: K380") == 0);
+
+    /* "Add keyboard or mouse" starts the pairing window from the list. */
+    devices_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    assert(devices_tap(&p, 120, 152, 1100, false, false));
+    assert(begin_calls == 1 && p.state == KVM_DISPLAY_INPUT_SCANNING);
+    assert(p.stored_mask == (1u << KVM_DISPLAY_INPUT_KEYBOARD)); /* kept across the window */
+
+    /* The close control leaves the list without touching the central. */
+    devices_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    assert(devices_tap(&p, 210, 20, 1100, false, false));
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED && cancel_calls == 0);
+
+    /* Gating: never while the PC drives a guest or a guest window is open. */
+    devices_reset(&p);
+    assert(!kvm_display_input_pairing_request(&p, devices_open_req(), 1000, true, false));
+    assert(p.state == KVM_DISPLAY_INPUT_RESULT && p.busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST);
+    devices_reset(&p);
+    assert(!kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, true));
+    assert(p.busy_cause == KVM_DISPLAY_INPUT_BUSY_GUEST);
+    devices_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    assert(devices_tap(&p, 120, 64, 1000, false, false));
+    assert(!devices_tap(&p, 120, 64, 1100, true, false) && forget_calls == 0);
+    assert(p.state == KVM_DISPLAY_INPUT_RESULT && p.busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST);
+    devices_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    assert(devices_tap(&p, 120, 64, 1000, false, false));
+    assert(!devices_tap(&p, 120, 64, 1100, false, true) && forget_calls == 0);
+    /* The host arming while the list shows closes it (no central call). */
+    devices_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    kvm_display_input_pairing_tick(&p, 1100, true);
+    assert(p.state == KVM_DISPLAY_INPUT_RESULT && cancel_calls == 0 && forget_calls == 0);
+    /* The model refuses the touches too while armed or beside a guest window. */
+    devices_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    input_view(&p, 1000, &s, &v);
+    s.armed = true; s.guest_ready = true;
+    assert(!(kvm_display_input_touch_action(&s, 120, 64, &a, &row) &&
+             kvm_display_input_request(&s, a, row, &r)));
+    s.armed = false; s.pairing_state = KVM_DISPLAY_PAIRING_WAITING; s.pairing_deadline_ms = 9000;
+    assert(!(kvm_display_input_touch_action(&s, 120, 64, &a, &row) &&
+             kvm_display_input_request(&s, a, row, &r)));
+    /* A stale window's tap is ignored. */
+    s.pairing_state = 0;
+    assert(kvm_display_input_touch_action(&s, 120, 64, &a, &row) &&
+           kvm_display_input_request(&s, a, row, &r) && a == KVM_DISPLAY_INPUT_FORGET);
+    r.window++;
+    assert(!kvm_display_input_pairing_request(&p, r, 1100, false, false));
+
+    /* An idle list closes itself. */
+    devices_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, devices_open_req(), 1000, false, false));
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_DEVICES_IDLE_MS - 1, false);
+    assert(p.state == KVM_DISPLAY_INPUT_DEVICES);
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_DEVICES_IDLE_MS, false);
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED);
+    /* Stored names survive the close and project into every snapshot. */
+    input_view(&p, 40000, &s, &v);
+    assert(s.input_dev_stored == (1u << KVM_DISPLAY_INPUT_KEYBOARD) &&
+           strcmp(s.input_dev_names[0], "K380") == 0);
+}
+
 int main(void)
 {
     kvm_display_status_t status = {0};
@@ -799,5 +960,6 @@ int main(void)
     kvm_display_pairing_clear(&pairing);
     assert(pairing.state == KVM_DISPLAY_PAIRING_CLOSED && !pairing.local_owner);
     input_pairing_tests();
+    input_devices_tests();
     return 0;
 }

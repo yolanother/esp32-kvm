@@ -3,14 +3,27 @@
  * host frames go through the transport core, device reports through the hub
  * queue, and both share one fake HID output that models a guest channel (an
  * armed channel refuses a second arm; release disarms and sends all-up). It
- * checks arbitration, yield-before-arm, queue overflow and device loss. */
+ * checks arbitration, yield-before-arm, queue overflow and device loss (per
+ * kind, through the same central-report conversion the worker uses). */
 #include "transport_core.h"
 #include "transport_hub.h"
+#include "router_hid_bridge.h"
 #include "display_pairing.h"
 #include "router.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+
+/* router_hid_bridge.c links against the NimBLE-host request wrappers; this
+ * test only uses its central-report conversion, so the wrappers are inert. */
+bool doubtech_hid_request_ready_slot(uint8_t slot) { (void)slot; return false; }
+bool doubtech_hid_request_arm_slot(uint8_t slot) { (void)slot; return false; }
+bool doubtech_hid_request_release_slot(uint8_t slot) { (void)slot; return false; }
+bool doubtech_hid_request_keyboard_slot(uint8_t slot, const uint8_t keys[8]) { (void)slot; (void)keys; return false; }
+bool doubtech_hid_request_mouse_slot(uint8_t slot, uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
+{ (void)slot; (void)buttons; (void)dx; (void)dy; (void)wheel; (void)pan; return false; }
+bool doubtech_hid_request_consumer_slot(uint8_t slot, uint16_t usage) { (void)slot; (void)usage; return false; }
+esp_err_t doubtech_hid_request_disconnect_slot(uint8_t slot) { (void)slot; return ESP_FAIL; }
 
 /* ---- fake guest channels ---- */
 typedef struct { bool ready, armed, fail_send, fail_release; uint8_t keys[8]; uint8_t buttons; uint16_t consumer; } chan_t;
@@ -232,11 +245,28 @@ static kvm_hub_msg_t pointer_msg(uint8_t buttons, int16_t dx)
     m.input.dx = dx;
     return m;
 }
-static kvm_hub_msg_t lost_msg(void)
+/* A loss of one device kind: KVM_ROUTER_KEYBOARD or KVM_ROUTER_POINTER. */
+static kvm_hub_msg_t lost_kind_msg(kvm_router_input_kind_t kind)
 {
     kvm_hub_msg_t m;
     memset(&m, 0, sizeof m);
     m.type = KVM_HUB_MSG_LOST;
+    m.input.kind = kind;
+    return m;
+}
+/* A whole loss (any other kind): everything held is released. */
+static kvm_hub_msg_t lost_msg(void) { return lost_kind_msg(KVM_ROUTER_CONSUMER); }
+/* The message the worker queues for a central report, as central_input does. */
+static kvm_hub_msg_t central_msg(uint8_t kind, bool lost, uint8_t key, uint8_t buttons)
+{
+    doubtech_hid_central_input_t in;
+    kvm_hub_msg_t m;
+    memset(&in, 0, sizeof in);
+    in.kind = kind;
+    in.lost = lost;
+    in.keys[2] = key;
+    in.buttons = buttons;
+    assert(kvm_router_hid_central_msg(&in, &m));
     return m;
 }
 static void push(kvm_hub_msg_t m) { assert(kvm_hub_queue_push(&queue, &m)); }
@@ -429,7 +459,7 @@ static void drain_bounded_when_rpc_times_out(void)
     for (int i = 0; i < 10; i++) push(key_msg((uint8_t)(i % 2 ? 4 : 5)));
     push(lost_msg());
     push(key_msg(6));
-    assert(queue.count == 11 && queue.lost);
+    assert(queue.count == 11 && queue.lost_mask);
 
     /* The NimBLE host stalls: each request takes its full 20 ms and fails. */
     rpc_timeout = true;
@@ -442,7 +472,7 @@ static void drain_bounded_when_rpc_times_out(void)
     assert(router.session_open && router.last_heartbeat_ms == 400);
     /* At most one message's worth of requests ran, then the drain stopped. */
     assert(rpc_calls >= 1 && rpc_calls <= 3 && now_ms - 400 <= 60);
-    assert(queue.count >= 9 && queue.lost); /* the rest, and the loss, stay queued */
+    assert(queue.count >= 9 && queue.lost_mask); /* the rest, and the loss, stay queued */
 
     /* Further stalled iterations never drop the loss, and keep the session. */
     for (int i = 0; i < 4; i++) {
@@ -451,7 +481,7 @@ static void drain_bounded_when_rpc_times_out(void)
         kvm_hub_worker_iteration(&worker, &queue, &core, encoded, len);
         assert(router.session_open);
     }
-    assert(queue.lost);
+    assert(queue.lost_mask);
 
     /* Healthy again: everything drains, the loss included, nothing stays held. */
     rpc_timeout = false;
@@ -585,6 +615,73 @@ static void device_lost_sends_all_up(void)
     drain();
     drain();
     assert(chan[1].keys[2] == 0 && chan[1].buttons == 0);
+}
+
+/* A paired keyboard drops (asleep, out of range) while a key is held: the
+ * central's lost report reaches the hub through the same conversion and queue
+ * the worker uses, and only what that device could hold is released. */
+static void central_disconnect_releases_held_input_per_kind(void)
+{
+    kvm_hub_msg_t m;
+    setup();
+    assert(kvm_hub_worker_select(&worker, 1));
+    push(central_msg(DOUBTECH_HID_CENTRAL_KEYBOARD, false, 4, 0));
+    push(central_msg(DOUBTECH_HID_CENTRAL_MOUSE, false, 0, 1));
+    drain();
+    assert(chan[1].keys[2] == 4 && chan[1].buttons == 1 && worker.hub.armed_slot == 1);
+    n_ops = 0;
+    push(central_msg(DOUBTECH_HID_CENTRAL_KEYBOARD, true, 0, 0));
+    drain();
+    /* All keys up on the target; the still-connected mouse keeps its drag. */
+    assert(chan[1].keys[2] == 0 && chan[1].buttons == 1 && chan[1].armed);
+    assert(count_ops('S', 1) == 1 && ops[0].in.kind == KVM_ROUTER_KEYBOARD);
+    /* The mouse drops too: its button is released. */
+    push(central_msg(DOUBTECH_HID_CENTRAL_MOUSE, true, 0, 0));
+    drain();
+    assert(chan[1].buttons == 0);
+    /* The keyboard reconnects and types again on the same target. */
+    push(central_msg(DOUBTECH_HID_CENTRAL_KEYBOARD, false, 9, 0));
+    drain();
+    assert(chan[1].keys[2] == 9);
+
+    /* Both losses queued behind a full ring: each is delivered once, in its place. */
+    kvm_hub_queue_init(&queue, NULL, NULL, NULL);
+    for (int i = 0; i < 4; i++) push(key_msg(4));
+    push(lost_kind_msg(KVM_ROUTER_POINTER));
+    push(key_msg(5));
+    push(lost_kind_msg(KVM_ROUTER_KEYBOARD));
+    push(pointer_msg(2, 0));
+    int n = 0, kb_at = -1, ptr_at = -1, losses = 0;
+    while (kvm_hub_queue_pop(&queue, &m)) {
+        if (m.type == KVM_HUB_MSG_LOST) {
+            losses++;
+            if (m.input.kind == KVM_ROUTER_KEYBOARD) kb_at = n;
+            if (m.input.kind == KVM_ROUTER_POINTER) ptr_at = n;
+        }
+        n++;
+    }
+    assert(n == 8 && losses == 2 && ptr_at == 4 && kb_at == 6);
+
+    /* A keyboard lost behind a full ring of key presses still ends all-up,
+     * and a button press queued before the loss is not discarded by it. */
+    setup();
+    assert(kvm_hub_worker_select(&worker, 1));
+    push(pointer_msg(1, 0));
+    for (int i = 0; i < 15; i++) push(key_msg(4));
+    push(key_msg(6));
+    push(central_msg(DOUBTECH_HID_CENTRAL_KEYBOARD, true, 0, 0));
+    drain();
+    drain();
+    assert(chan[1].keys[2] == 0 && chan[1].buttons == 1);
+
+    /* While the host route is armed a loss emits nothing on any slot. */
+    setup();
+    open_session();
+    assert(host_switch(2) == ACK_OK && host_arm(2) == ACK_OK);
+    n_ops = 0;
+    push(central_msg(DOUBTECH_HID_CENTRAL_KEYBOARD, true, 0, 0));
+    drain();
+    assert(n_ops == 0);
 }
 
 static void select_retries_on_later_input(void)
@@ -806,6 +903,41 @@ static void begin_rpc_timeout_holds_guest_gate(void)
     assert(host_pair_begin() == ACK_OK && guest_begin_calls == 1);
 }
 
+/* Forget from the device list, gated the way the worker gates it: allowed
+ * with an open, unarmed session; refused (central untouched) once the host
+ * arms a guest, and the open list closes on the next tick. */
+static int central_forget_calls;
+static kvm_display_input_op_t central_forget(void *c, uint8_t kind)
+{ (void)c; (void)kind; central_forget_calls++; return KVM_DISPLAY_INPUT_OP_OK; }
+static void forget_gated_by_the_host_route(void)
+{
+    kvm_display_input_request_t open = {KVM_DISPLAY_INPUT_DEVICES_OPEN, 0, 0, 0};
+    kvm_display_input_request_t forget = {KVM_DISPLAY_INPUT_FORGET, 0, 0, 0};
+    input_setup();
+    central_forget_calls = 0;
+    input_pairing.ops.forget = central_forget;
+    kvm_display_input_pairing_device(&input_pairing, KVM_DISPLAY_INPUT_KEYBOARD, true, "K380");
+    open_session();
+    assert(kvm_display_input_pairing_request(&input_pairing, open, now_ms, router.armed, false));
+    forget.window = input_pairing.window;
+    assert(kvm_display_input_pairing_request(&input_pairing, forget, now_ms, router.armed, false));
+    assert(kvm_display_input_pairing_request(&input_pairing, forget, now_ms + 100, router.armed, false));
+    assert(central_forget_calls == 1 && !(input_pairing.stored_mask & (1u << KVM_DISPLAY_INPUT_KEYBOARD)));
+    /* The PC app arms a guest while the list is open: the list closes as BUSY. */
+    kvm_display_input_pairing_device(&input_pairing, KVM_DISPLAY_INPUT_KEYBOARD, true, "K380");
+    assert(host_switch(1) == ACK_OK && host_arm(1) == ACK_OK && router.armed);
+    assert(!kvm_display_input_pairing_request(&input_pairing, forget, now_ms + 200, router.armed, false));
+    assert(central_forget_calls == 1 && input_pairing.state == KVM_DISPLAY_INPUT_RESULT &&
+           input_pairing.busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST);
+    input_setup();
+    open_session();
+    assert(kvm_display_input_pairing_request(&input_pairing, open, now_ms, router.armed, false));
+    assert(host_switch(2) == ACK_OK && host_arm(2) == ACK_OK);
+    kvm_display_input_pairing_tick(&input_pairing, now_ms + 20, router.armed);
+    assert(input_pairing.state == KVM_DISPLAY_INPUT_RESULT && central_cancel_calls == 0);
+    assert(router.armed && router.slot == 2);
+}
+
 static void central_backoff_is_bounded(void)
 {
     assert(kvm_hub_central_backoff_ms(0) == KVM_HUB_CENTRAL_BACKOFF_MIN_MS);
@@ -825,6 +957,7 @@ int main(void)
     router_release_rearms_hub();
     queue_overflow_keeps_release();
     device_lost_sends_all_up();
+    central_disconnect_releases_held_input_per_kind();
     select_retries_on_later_input();
     switch_failed_is_counted_and_retried();
     slot_lost_and_emergency();
@@ -833,6 +966,7 @@ int main(void)
     guest_pairing_refused_while_input_window_open();
     input_pairing_refused_and_ended_when_router_armed();
     begin_rpc_timeout_holds_guest_gate();
+    forget_gated_by_the_host_route();
     puts("test_hub_worker: all passed");
     return 0;
 }

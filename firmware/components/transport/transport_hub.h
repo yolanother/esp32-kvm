@@ -26,7 +26,10 @@
 
 enum { KVM_HUB_MSG_INPUT = 1, KVM_HUB_MSG_LOST = 2 };
 
-/** One device report (INPUT) or one device loss (LOST, input ignored). */
+/** One device report (INPUT) or one device loss (LOST). For LOST only
+ * input.kind is read: KVM_ROUTER_KEYBOARD is a lost keyboard (its keys and
+ * consumer usage are released), KVM_ROUTER_POINTER a lost mouse (its buttons);
+ * any other kind releases everything. */
 typedef struct {
     uint8_t type;
     kvm_router_input_t input;
@@ -39,14 +42,15 @@ typedef void (*kvm_hub_lock_fn)(void *context);
  * motion is evicted to make room for anything else. With no motion to evict the
  * queue enters tail mode: every later message keeps only the newest state per
  * kind (pointer motion accumulates), so the final key, button and consumer state
- * always arrives and order is kept. A LOST message is a flag outside the ring,
- * delivered after the reports queued before it and before any later ones. */
+ * always arrives and order is kept. A LOST message is a flag per lost kind
+ * outside the ring, each delivered once, after the reports queued before it
+ * and before any later ones; it supersedes only the tail states it releases. */
 typedef struct {
     kvm_hub_msg_t ring[KVM_HUB_QUEUE_DEPTH];
     bool motion[KVM_HUB_QUEUE_DEPTH];
     uint8_t count;
-    bool lost;
-    uint8_t lost_after;
+    uint8_t lost_mask;      /* bit (1 << kind): keyboard, pointer, or 2 for a whole loss */
+    uint8_t lost_after[3];  /* ring position each pending loss is delivered at */
     bool tail;
     bool tail_has[3];
     kvm_router_input_t tail_input[3];
@@ -98,7 +102,8 @@ void kvm_hub_worker_set_clock(kvm_hub_worker_t *worker, kvm_hub_clock_fn now, vo
  * even that is uncertain) and abandoned, so the router's arm always proceeds.
  * Releasing or disconnecting the hub's slot makes the hub forget its arm. */
 kvm_router_output_t kvm_hub_worker_router_output(void);
-/** Applies one message: INPUT through the hub, LOST as a device loss. */
+/** Applies one message: INPUT through the hub, LOST as a loss of that device
+ * kind (kvm_input_hub_device_lost_kind). */
 void kvm_hub_worker_message(kvm_hub_worker_t *worker, const kvm_hub_msg_t *msg);
 /** Drains in delivery order and stops at whichever comes first: the queue is
  * empty, KVM_HUB_QUEUE_DEPTH messages, KVM_HUB_DRAIN_BUDGET_MS elapsed, or a

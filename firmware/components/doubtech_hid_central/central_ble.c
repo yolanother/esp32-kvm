@@ -12,7 +12,14 @@
  * link_closed is the single place that reports PAIR_FAILED and DISCONNECTED.
  * The lost input is reported once, by whichever comes first: link_abort (a
  * forget or failure of a ready link) or link_closed. Discovery errors terminate
- * the link; an unfinished pairing deletes the bond it created. */
+ * the link; an unfinished pairing deletes the bond it created.
+ *
+ * Stored devices reconnect on the pure schedule in central_gatt.h: from start
+ * (the host is synced by then), after every closed stored link and after a
+ * pairing window or a forget, one evaluation runs on the host loop and either
+ * starts one attempt, arms the reconnect timer, or stops it. A stored link
+ * that cannot finish its connect or close within a guard time is dropped so a
+ * wedged procedure never blocks the schedule; later events miss its generation. */
 #include "doubtech_hid_central.h"
 
 #include <string.h>
@@ -34,18 +41,20 @@
 #include "host/ble_uuid.h"
 #include "nimble/nimble_port.h"
 #include "os/os_mbuf.h"
+#include "sdkconfig.h"
 
 _Static_assert(DOUBTECH_HID_CENTRAL_KEYBOARD == DTHID_INPUT_KEYBOARD, "kind values must match the registry");
 _Static_assert(DOUBTECH_HID_CENTRAL_MOUSE == DTHID_INPUT_MOUSE, "kind values must match the registry");
 _Static_assert(CENTRAL_SCAN_NAME_BYTES == DTHID_INPUT_NAME_BYTES, "scan and record names share a size");
+_Static_assert(DOUBTECH_HID_CENTRAL_NAME_BYTES == DTHID_INPUT_NAME_BYTES, "public and record names share a size");
 
 #define LINK_COUNT 2u                /* one keyboard and one mouse */
-#define CONNECT_TIMEOUT_MS 10000     /* one connection attempt */
+#define CONNECT_TIMEOUT_MS ((int32_t)CENTRAL_RECONNECT_ATTEMPT_MS) /* one connection attempt */
 #define PAIR_COMPLETE_MS 30000u      /* select to PAIRED, passkey typing included */
 #define RPC_TIMEOUT_MS 200u
 #define SCAN_ITVL 0x0060u            /* 60 ms */
 #define SCAN_WINDOW 0x0030u          /* 30 ms: half duty keeps guest airtime */
-#define CLOSE_GUARD_MS 5000u         /* a pairing link that does not close by then is dropped */
+#define CLOSE_GUARD_MS 5000u         /* a link that does not close by then is dropped */
 #define REASON(name) DOUBTECH_HID_CENTRAL_REASON_##name
 
 static const char *tag = "dthid-central";
@@ -62,6 +71,7 @@ typedef struct {
     bool announced;     /* CONNECTED was reported */
     uint8_t fail_reason;
     uint8_t kind_hint, allowed, kind; /* kind: resolved by discovery (0 until then) */
+    ble_npl_time_t guard_at; /* stored link: drop it if still connecting or closing then */
     ble_addr_t addr;
     ble_addr_t peer_id; /* identity address once encrypted (bond owner) */
     char name[DTHID_INPUT_NAME_BYTES];
@@ -102,6 +112,17 @@ static volatile bool kind_connected[3];
 static link_t links[LINK_COUNT];
 static uint16_t next_gen = 1;
 static struct ble_npl_callout pair_timer;
+/* Reconnect schedule (host thread) and its timer, immediate kick and link guard. */
+static central_reconnect_t reconnect;
+static struct ble_npl_callout reconnect_timer;
+static struct ble_npl_event reconnect_event;
+static struct ble_npl_callout guard_timer;
+/* Stored devices as other tasks may read them (doubtech_hid_central_stored). */
+static struct ble_npl_mutex stored_lock;
+static struct {
+    bool stored;
+    char name[DTHID_INPUT_NAME_BYTES];
+} published[3];
 
 static const struct ble_gap_conn_params conn_params = {
     .scan_itvl = SCAN_ITVL,
@@ -176,6 +197,39 @@ static uint8_t free_kinds(void)
     return mask;
 }
 
+static ble_addr_t record_addr(const dthid_input_record_t *record)
+{
+    ble_addr_t addr = {.type = record->addr_type};
+    memcpy(addr.val, record->addr, sizeof(addr.val));
+    return addr;
+}
+
+/* Copies the registry's names for doubtech_hid_central_stored; host thread,
+ * after every registry change. */
+static void publish_registry(void)
+{
+    if (ble_npl_mutex_pend(&stored_lock, BLE_NPL_TIME_FOREVER) != BLE_NPL_OK) return;
+    for (uint8_t kind = DTHID_INPUT_KEYBOARD; kind <= DTHID_INPUT_MOUSE; ++kind) {
+        dthid_input_record_t record;
+        published[kind].stored = central_registry_get(&registry, (dthid_input_kind_t)kind, &record);
+        memset(published[kind].name, 0, sizeof(published[kind].name));
+        if (published[kind].stored) {
+            memcpy(published[kind].name, record.name, sizeof(published[kind].name));
+            published[kind].name[sizeof(published[kind].name) - 1] = '\0';
+        }
+    }
+    ble_npl_mutex_release(&stored_lock);
+}
+
+static uint32_t now_ms(void) { return ble_npl_time_ticks_to_ms32(ble_npl_time_get()); }
+
+/* Runs one reconnect evaluation on the host loop soon, outside the caller's
+ * frame (a queued event is never queued twice). */
+static void reconnect_kick(void)
+{
+    if (started) ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &reconnect_event);
+}
+
 /* ---- links --------------------------------------------------------------- */
 
 static void *link_arg(const link_t *link)
@@ -217,6 +271,7 @@ static void pair_end(void)
     pair.scan_deferred = false;
     pair.link = -1;
     central_scan_clear(&pair.list);
+    reconnect_kick(); /* stored devices resume once the window is over */
 }
 
 static int start_scan(void)
@@ -246,6 +301,8 @@ static void link_release_input(link_t *link)
 static void link_closed(link_t *link)
 {
     bool was_pairing = link->pairing;
+    bool was_ready = link->announced;
+    uint8_t kind = link_kind(link);
     link_release_input(link);
     if (was_pairing && link->bonded) delete_bond_if_ours(&link->peer_id, "the unfinished"); /* never a guest's */
     if (link->announced) {
@@ -259,23 +316,60 @@ static void link_closed(link_t *link)
     link->conn_handle = BLE_HS_CONN_HANDLE_NONE;
     if (was_pairing) pair_end();
     if (pair.phase == PAIR_SCANNING && pair.scan_deferred && start_scan() == 0) pair.scan_deferred = false;
+    if (!was_pairing && valid_kind(kind)) {
+        /* A ready device that dropped (asleep) is retried at once; an attempt
+         * that never got ready waits the gap. A forgotten kind is not retried. */
+        if (was_ready) central_reconnect_link_lost(&reconnect, kind, now_ms());
+        else central_reconnect_attempt_failed(&reconnect, kind, now_ms());
+    }
+    reconnect_kick(); /* the initiator or a link slot is free again */
+}
+
+/* Arms the guard timer for the earliest stored link that is connecting or
+ * closing (pairing links are guarded by the window timer). */
+static void guard_arm(void)
+{
+    ble_npl_time_t now = ble_npl_time_get();
+    bool any = false;
+    ble_npl_time_t wait = 0;
+    for (size_t i = 0; i < LINK_COUNT; ++i) {
+        const link_t *link = &links[i];
+        if (link->pairing || (link->phase != LINK_CONNECTING && link->phase != LINK_CLOSING)) continue;
+        int32_t left = (int32_t)(link->guard_at - now);
+        ble_npl_time_t ticks = left > 0 ? (ble_npl_time_t)left : 1u;
+        if (!any || ticks < wait) wait = ticks;
+        any = true;
+    }
+    if (any) (void)ble_npl_callout_reset(&guard_timer, wait);
+    else ble_npl_callout_stop(&guard_timer);
+}
+
+static void guard_link(link_t *link, uint32_t ms)
+{
+    if (link->pairing) return;
+    link->guard_at = ble_npl_time_get() + ble_npl_time_ms_to_ticks32(ms);
+    guard_arm();
 }
 
 /* Fails or cancels a link: releases its input (lost when it was READY, so a
  * forget of a connected device lets the hub drop held keys), stops further
  * notifications, then cancels the connect or terminates the connection. The
- * closing event finishes the cleanup; a pairing link that does not close within
- * CLOSE_GUARD_MS is dropped by the window timer, and a terminate that cannot
- * be issued drops the link at once, so the window and sm_mitm never wedge. */
+ * closing event finishes the cleanup; a link that does not close within
+ * CLOSE_GUARD_MS is dropped (a pairing link by the window timer, a stored link
+ * by the guard timer, after which the schedule reconnects it), and a terminate
+ * that cannot be issued drops the link at once, so the window, sm_mitm and the
+ * reconnect schedule never wedge. The device stops counting as connected now. */
 static void link_abort(link_t *link, uint8_t reason, bool silent)
 {
     if (link->phase == LINK_FREE || link->phase == LINK_CLOSING) return;
     link->fail_reason = reason;
     link->silent = silent;
     link_release_input(link);
+    if (link->announced) kind_connected[link->kind] = false; /* DISCONNECTED follows at close */
     link_phase_t was = link->phase;
     link->phase = LINK_CLOSING;
     if (link->pairing) (void)ble_npl_callout_reset(&pair_timer, ble_npl_time_ms_to_ticks32(CLOSE_GUARD_MS));
+    else guard_link(link, CLOSE_GUARD_MS);
     if (was == LINK_CONNECTING) {
         if (ble_gap_conn_cancel() != 0) link_closed(link); /* nothing pending: no event follows */
         return;
@@ -313,6 +407,7 @@ static void link_ready(link_t *link)
             return;
         }
         registry = next;
+        publish_registry();
         link->pairing = false;
         emit(DTHID_CENTRAL_PAIRED, 0, link->kind, link->name, 0, 0, 0);
         pair_end();
@@ -551,8 +646,9 @@ static void on_enc_change(link_t *link, const struct ble_gap_event *event)
         return;
     }
     /* A scanned private address can resolve to a guest's identity (its bond then
-     * encrypted this link): never adopt it as an input device, never mark it ours. */
-    if (link->pairing && peer_is_guest(&desc.peer_id_addr)) {
+     * encrypted this link): never adopt it as an input device, never mark it ours.
+     * A stored link is held to the same rule: a stale record never reconnects a guest. */
+    if (peer_is_guest(&desc.peer_id_addr)) {
         link_abort(link, REASON(CAPACITY), false);
         return;
     }
@@ -698,6 +794,85 @@ static void pair_timeout_on_host(struct ble_npl_event *event)
     }
 }
 
+/* A stored link still connecting past its attempt, or closing past the close
+ * guard: give up on it (cancel or terminate once more) and drop it, so the
+ * schedule can reconnect. Later events for the slot miss its generation. */
+static void guard_on_host(struct ble_npl_event *event)
+{
+    (void)event;
+    ble_npl_time_t now = ble_npl_time_get();
+    for (size_t i = 0; i < LINK_COUNT; ++i) {
+        link_t *link = &links[i];
+        if (link->pairing || (link->phase != LINK_CONNECTING && link->phase != LINK_CLOSING)) continue;
+        if ((int32_t)(now - link->guard_at) < 0) continue;
+        ESP_LOGW(tag, "input link did not %s in time; dropping it",
+                 link->phase == LINK_CONNECTING ? "connect" : "close");
+        if (link->phase == LINK_CONNECTING) {
+            (void)ble_gap_conn_cancel();
+        } else if (link->conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            (void)ble_gap_terminate(link->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
+        if (!link->fail_reason) link->fail_reason = REASON(TIMEOUT);
+        link_closed(link);
+    }
+    guard_arm();
+}
+
+static void reconnect_facts(central_reconnect_facts_t *f)
+{
+    memset(f, 0, sizeof(*f));
+    for (uint8_t kind = DTHID_INPUT_KEYBOARD; kind <= DTHID_INPUT_MOUSE; ++kind) {
+        dthid_input_record_t record;
+        f->stored[kind] = central_registry_get(&registry, (dthid_input_kind_t)kind, &record);
+        if (f->stored[kind]) {
+            ble_addr_t addr = record_addr(&record);
+            f->guest[kind] = peer_is_guest(&addr);
+        }
+    }
+    for (size_t i = 0; i < LINK_COUNT; ++i) {
+        if (links[i].phase == LINK_FREE) continue;
+        f->links++;
+        if (links[i].phase == LINK_CONNECTING) f->connecting = true;
+        uint8_t kind = link_kind(&links[i]);
+        if (valid_kind(kind)) f->linked[kind] = true;
+    }
+    if (ble_gap_conn_active()) f->connecting = true; /* one initiator, whoever holds it */
+    f->pairing = pair.phase != PAIR_IDLE;
+    /* Guests keep their full share: the central only uses what is left. */
+    f->link_budget = central_reconnect_link_budget(CONFIG_BT_NIMBLE_MAX_CONNECTIONS, DOUBTECH_HID_MAX_CONNECTIONS,
+                                                   LINK_COUNT);
+}
+
+/* One schedule evaluation (timer, kick): start at most one attempt, then arm
+ * the timer for the next step or stop it. A connect that cannot start (busy
+ * controller, no memory, host not synced) is an ordinary failed attempt. */
+static void reconnect_on_host(struct ble_npl_event *event)
+{
+    (void)event;
+    if (!started) return;
+    for (int round = 0; round < 3; ++round) {
+        central_reconnect_facts_t facts;
+        reconnect_facts(&facts);
+        uint32_t now = now_ms();
+        central_reconnect_action_t act = central_reconnect_next(&reconnect, now, &facts);
+        if (act.step == CENTRAL_RECONNECT_NONE) {
+            ble_npl_callout_stop(&reconnect_timer);
+            return;
+        }
+        if (act.step == CENTRAL_RECONNECT_WAIT) {
+            ble_npl_time_t ticks = ble_npl_time_ms_to_ticks32(act.delay_ms);
+            (void)ble_npl_callout_reset(&reconnect_timer, ticks ? ticks : 1u);
+            return;
+        }
+        esp_err_t result = central_connect_stored(act.kind);
+        if (result != ESP_OK) {
+            ESP_LOGD(tag, "reconnect of kind %u not started: %d", act.kind, result);
+            central_reconnect_attempt_failed(&reconnect, act.kind, now);
+        }
+    }
+    (void)ble_npl_callout_reset(&reconnect_timer, ble_npl_time_ms_to_ticks32(CENTRAL_RECONNECT_GAP_MS));
+}
+
 static bool infer_address_type(void) { return ble_hs_id_infer_auto(0, &own_addr_type) == 0; }
 
 static esp_err_t pair_begin_on_host(void)
@@ -805,11 +980,12 @@ static esp_err_t forget_on_host(uint8_t kind)
     esp_err_t result = central_store_save(store_ns, &next);
     if (result != ESP_OK) return result;
     registry = next;
+    publish_registry();
     for (size_t i = 0; i < LINK_COUNT; ++i)
         if (links[i].phase != LINK_FREE && !links[i].pairing && link_kind(&links[i]) == kind)
             link_abort(&links[i], 0, true); /* reports the lost input, then DISCONNECTED */
-    ble_addr_t addr = {.type = record.addr_type};
-    memcpy(addr.val, record.addr, sizeof(addr.val));
+    reconnect_kick(); /* the kind is no longer stored: its retries stop */
+    ble_addr_t addr = record_addr(&record);
     /* A combo device keeps its bond for the other kind; a guest's bond is never touched. */
     if (central_bond_deletable(peer_is_guest(&addr), registry_has_addr(&addr))) {
         int rc = ble_store_util_delete_peer(&addr);
@@ -825,6 +1001,9 @@ esp_err_t central_connect_stored(uint8_t kind)
     if (pair.phase != PAIR_IDLE) return ESP_ERR_INVALID_STATE;
     dthid_input_record_t record;
     if (!central_registry_get(&registry, (dthid_input_kind_t)kind, &record)) return ESP_ERR_NOT_FOUND;
+    ble_addr_t addr = record_addr(&record);
+    if (peer_is_guest(&addr)) return ESP_ERR_INVALID_STATE; /* a stale record: never connect a guest */
+    if (ble_gap_conn_active()) return ESP_ERR_INVALID_STATE; /* one outgoing attempt at a time */
     for (size_t i = 0; i < LINK_COUNT; ++i)
         if (links[i].phase != LINK_FREE && (links[i].phase == LINK_CONNECTING || link_kind(&links[i]) == kind))
             return ESP_ERR_INVALID_STATE;
@@ -833,15 +1012,19 @@ esp_err_t central_connect_stored(uint8_t kind)
     if (!link) return ESP_ERR_NO_MEM;
     link->kind_hint = kind;
     link->allowed = CENTRAL_KIND_BIT(kind);
-    link->addr.type = record.addr_type;
-    memcpy(link->addr.val, record.addr, sizeof(link->addr.val));
+    link->addr = addr;
     memcpy(link->name, record.name, sizeof(link->name));
+    link->name[sizeof(link->name) - 1] = '\0';
     link->phase = LINK_CONNECTING;
     int rc = ble_gap_connect(own_addr_type, &link->addr, CONNECT_TIMEOUT_MS, &conn_params, gap_event, link_arg(link));
     if (rc != 0) {
         link->phase = LINK_FREE;
+        if (rc == BLE_HS_ENOMEM) return ESP_ERR_NO_MEM;
         return rc == BLE_HS_EALREADY || rc == BLE_HS_EBUSY || rc == BLE_HS_EDONE ? ESP_ERR_INVALID_STATE : ESP_FAIL;
     }
+    /* The attempt's CONNECT event normally ends it; if that never arrives the
+     * guard drops the link so the schedule is never stuck behind it. */
+    guard_link(link, CENTRAL_RECONNECT_ATTEMPT_MS + CLOSE_GUARD_MS);
     return ESP_OK;
 }
 
@@ -921,17 +1104,26 @@ esp_err_t doubtech_hid_central_start(const doubtech_hid_central_config_t *cfg)
     memset(&loaded, 0, sizeof(loaded));
     esp_err_t result = central_store_load(ns, &loaded);
     if (result != ESP_OK) return result;
-    if (ble_npl_mutex_init(&rpc.lock) != BLE_NPL_OK || ble_npl_sem_init(&rpc.done, 0) != BLE_NPL_OK) return ESP_FAIL;
+    if (ble_npl_mutex_init(&rpc.lock) != BLE_NPL_OK || ble_npl_sem_init(&rpc.done, 0) != BLE_NPL_OK ||
+        ble_npl_mutex_init(&stored_lock) != BLE_NPL_OK)
+        return ESP_FAIL;
     ble_npl_event_init(&rpc.event, rpc_on_host, NULL);
-    if (ble_npl_callout_init(&pair_timer, nimble_port_get_dflt_eventq(), pair_timeout_on_host, NULL) != 0)
+    ble_npl_event_init(&reconnect_event, reconnect_on_host, NULL);
+    struct ble_npl_eventq *queue = nimble_port_get_dflt_eventq();
+    if (ble_npl_callout_init(&pair_timer, queue, pair_timeout_on_host, NULL) != 0 ||
+        ble_npl_callout_init(&reconnect_timer, queue, reconnect_on_host, NULL) != 0 ||
+        ble_npl_callout_init(&guard_timer, queue, guard_on_host, NULL) != 0)
         return ESP_FAIL;
     memcpy(store_ns, ns, strlen(ns) + 1);
     config = *cfg;
     config.store_namespace = store_ns;
     registry = loaded;
+    publish_registry();
     pair.phase = PAIR_IDLE;
     pair.link = -1;
+    central_reconnect_init(&reconnect, now_ms()); /* stored devices are due at once */
     started = true;
+    reconnect_kick(); /* the first evaluation runs on the host loop */
     return ESP_OK;
 }
 
@@ -948,3 +1140,16 @@ esp_err_t doubtech_hid_central_forget(uint8_t kind)
 }
 
 bool doubtech_hid_central_connected(uint8_t kind) { return valid_kind(kind) && kind_connected[kind]; }
+
+bool doubtech_hid_central_stored(uint8_t kind, char name[DOUBTECH_HID_CENTRAL_NAME_BYTES])
+{
+    if (name) name[0] = '\0';
+    if (!started || !valid_kind(kind)) return false;
+    /* Held only for a copy on either side, so waiting never blocks for long; a
+     * timed-out read would misreport a stored device as absent. */
+    if (ble_npl_mutex_pend(&stored_lock, BLE_NPL_TIME_FOREVER) != BLE_NPL_OK) return false;
+    bool stored = published[kind].stored;
+    if (stored && name) memcpy(name, published[kind].name, DOUBTECH_HID_CENTRAL_NAME_BYTES);
+    ble_npl_mutex_release(&stored_lock);
+    return stored;
+}

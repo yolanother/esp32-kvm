@@ -143,4 +143,60 @@ bool central_gatt_notify(const central_gatt_t *m, uint16_t handle, const uint8_t
  * when the link was ready (input may be held downstream). */
 bool central_gatt_disconnect(central_gatt_t *m, doubtech_hid_central_input_t *out);
 
+/* ---- Stored-device reconnect schedule ------------------------------------
+ * Pure cadence for reconnecting the stored keyboard and mouse: one connection
+ * attempt of CENTRAL_RECONNECT_ATTEMPT_MS (the ble_gap_connect duration), then
+ * CENTRAL_RECONNECT_GAP_MS before that kind is tried again, so advertising and
+ * guest notifications keep their airtime. At most one outgoing attempt runs at
+ * a time (keyboard first on a tie), none while an input pairing window is
+ * open, never to an identity that is a guest's, and never beyond the central
+ * links the connection budget leaves after the guest reserve. A ready link
+ * that drops (a keyboard gone to sleep) is retried at once, then on the same
+ * cadence. The adapter owns the timer; times are wrapping milliseconds. */
+
+#define CENTRAL_RECONNECT_ATTEMPT_MS 10000u
+#define CENTRAL_RECONNECT_GAP_MS 15000u
+
+typedef enum {
+    CENTRAL_RECONNECT_NONE,    /* nothing to reconnect: stop the timer */
+    CENTRAL_RECONNECT_WAIT,    /* evaluate again after delay_ms (or on the next link event) */
+    CENTRAL_RECONNECT_CONNECT  /* start one attempt for kind now */
+} central_reconnect_step_t;
+
+typedef struct {
+    central_reconnect_step_t step;
+    uint8_t kind;
+    uint32_t delay_ms;
+} central_reconnect_action_t;
+
+/** Earliest next attempt per kind (index DOUBTECH_HID_CENTRAL_KEYBOARD / _MOUSE). */
+typedef struct {
+    uint32_t due_ms[3];
+} central_reconnect_t;
+
+/** What the adapter knows right now, indexed by kind. */
+typedef struct {
+    bool stored[3];      /* a record exists for the kind */
+    bool guest[3];       /* the stored identity is a guest's: never connect to it */
+    bool linked[3];      /* a link of the kind exists (connecting, encrypting, ready or closing) */
+    bool pairing;        /* an input pairing window (scan or pairing link) is open */
+    bool connecting;     /* an outgoing connection attempt is pending */
+    uint8_t links;       /* central links in use, any phase */
+    uint8_t link_budget; /* central links the connection budget allows */
+} central_reconnect_facts_t;
+
+/** Both kinds due at now_ms (the boot attempt after the central starts). */
+void central_reconnect_init(central_reconnect_t *r, uint32_t now_ms);
+/** The next step for the given facts. */
+central_reconnect_action_t central_reconnect_next(const central_reconnect_t *r, uint32_t now_ms,
+                                                  const central_reconnect_facts_t *facts);
+/** An attempt ended without a ready link (timed out, failed before ready, or
+ * could not start, e.g. ENOMEM or EBUSY): that kind waits the gap. */
+void central_reconnect_attempt_failed(central_reconnect_t *r, uint8_t kind, uint32_t now_ms);
+/** A ready link of that kind dropped: it is due again at once. */
+void central_reconnect_link_lost(central_reconnect_t *r, uint8_t kind, uint32_t now_ms);
+/** Central links left for input devices: max_connections less the guests'
+ * reserve, capped at the central's own link count (0 when none are left). */
+uint8_t central_reconnect_link_budget(unsigned max_connections, unsigned guest_reserve, unsigned central_links);
+
 #endif

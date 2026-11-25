@@ -723,8 +723,94 @@ static void set_target_clears_pending_switch(void)
     assert(kvm_input_hub_set_target(&hub, 3, false) && !hub.switch_pending && hub.target == 3);
 }
 
+/* Hub on target 1 holding key 4, button 1 and a consumer usage. */
+static void hold_everything(kvm_input_hub_t *hub, fake_t *f)
+{
+    kvm_router_input_t in = key(4);
+    kvm_router_input_t drag, vol;
+    setup(hub, f);
+    kvm_input_hub_set_target(hub, 1, false);
+    kvm_input_hub_input(hub, &in, false);
+    memset(&drag, 0, sizeof drag);
+    drag.kind = KVM_ROUTER_POINTER;
+    drag.buttons = 1;
+    kvm_input_hub_input(hub, &drag, false);
+    memset(&vol, 0, sizeof vol);
+    vol.kind = KVM_ROUTER_CONSUMER;
+    vol.consumer = 0xE9;
+    kvm_input_hub_input(hub, &vol, false);
+    f->count = 0;
+}
+
+static void keyboard_lost_releases_only_keyboard_state(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    hold_everything(&hub, &f);
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_KEYBOARD, false);
+    assert(f.count == 2);
+    assert(is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && f.calls[0].slot == 1);
+    assert(is_all_up(&f.calls[1], KVM_ROUTER_CONSUMER) && f.calls[1].input.consumer == 0);
+    assert(hub.keys[2] == 0 && hub.consumer == 0);
+    /* The mouse is still connected and still holds its button: untouched, armed. */
+    assert(hub.buttons == 1 && hub.armed_slot == 1);
+}
+
+static void mouse_lost_releases_only_buttons(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t chord = kbd(LCA, KEY_2, 0);
+    hold_everything(&hub, &f);
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_POINTER, false);
+    assert(f.count == 1 && is_all_up(&f.calls[0], KVM_ROUTER_POINTER) && f.calls[0].slot == 1);
+    assert(hub.buttons == 0 && hub.keys[2] == 4 && hub.consumer == 0xE9 && hub.armed_slot == 1);
+    /* Chord tracking belongs to the keyboard: a held key still blocks a chord. */
+    assert(kvm_input_hub_input(&hub, &chord, false) != KVM_HUB_TARGET_CHANGED);
+}
+
+static void kind_loss_with_nothing_held_releases_the_arm(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    hold_everything(&hub, &f);
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_KEYBOARD, false);
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_POINTER, false);
+    assert(hub.keys[2] == 0 && hub.buttons == 0 && hub.consumer == 0 && hub.armed_slot == 1);
+    /* A later loss with nothing held drops the arm, as device_lost does. */
+    f.count = 0;
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_POINTER, false);
+    assert(hub.armed_slot == 0 && f.calls[f.count - 1].kind == CALL_RELEASE);
+    /* Router armed: abandon without emitting. */
+    hold_everything(&hub, &f);
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_POINTER, true);
+    assert(f.count == 0 && hub.armed_slot == 0 && hub.keys[2] == 0);
+    /* Any other kind is a whole loss, exactly as kvm_input_hub_device_lost. */
+    hold_everything(&hub, &f);
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_CONSUMER, false);
+    assert(f.count == 3 && hub.keys[2] == 0 && hub.buttons == 0 && hub.consumer == 0);
+}
+
+static void keyboard_lost_resets_chord_tracking(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t held_a = kbd(0, 4, 0);
+    kvm_router_input_t chord = kbd(LCA, KEY_1, 0);
+    setup(&hub, &f);
+    kvm_input_hub_input(&hub, &held_a, false);
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_KEYBOARD, false);
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED);
+    kvm_input_hub_device_lost_kind(&hub, KVM_ROUTER_KEYBOARD, false);
+    assert(!hub.chord_latched);
+}
+
 int main(void)
 {
+    keyboard_lost_releases_only_keyboard_state();
+    mouse_lost_releases_only_buttons();
+    kind_loss_with_nothing_held_releases_the_arm();
+    keyboard_lost_resets_chord_tracking();
     failing_ready_target_never_kills_the_keyboard();
     set_target_clears_pending_switch();
     chord_to_selected_guest_releases_held_modifiers();

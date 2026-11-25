@@ -54,6 +54,10 @@ void kvm_display_pairing_clear(kvm_display_pairing_t *pairing);
 /** Interval between cancel retries while a stop is unconfirmed (each retry is
  *  one bounded RPC, so this keeps host heartbeats served). */
 #define KVM_DISPLAY_INPUT_CANCEL_RETRY_MS 1000u
+/** The second tap on a device row forgets it only within this time. */
+#define KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS 5000u
+/** The device list closes after this long without a touch. */
+#define KVM_DISPLAY_INPUT_DEVICES_IDLE_MS 30000u
 
 /** Outcome of a central operation as the worker saw it. UNKNOWN: the request
  *  timed out and may still run on the NimBLE host later (window possibly open). */
@@ -77,13 +81,16 @@ typedef struct {
     uint8_t reason;
 } kvm_display_input_event_t;
 
-/** Central operations; the worker binds doubtech_hid_central_pair_*. cancel
- *  returns true only when the central confirmed it ran (the window is over). */
+/** Central operations; the worker binds doubtech_hid_central_pair_* and
+ *  doubtech_hid_central_forget. cancel returns true only when the central
+ *  confirmed it ran (the window is over). forget (after context, so older
+ *  initializers stay valid) may be NULL: forgetting is then refused. */
 typedef struct {
     kvm_display_input_op_t (*begin)(void *context);
     kvm_display_input_op_t (*select)(void *context, uint8_t scan_index);
     bool (*cancel)(void *context);
     void *context;
+    kvm_display_input_op_t (*forget)(void *context, uint8_t kind);
 } kvm_display_input_ops_t;
 
 typedef struct {
@@ -111,14 +118,27 @@ typedef struct {
     uint8_t kind;
     char name[24];
     kvm_display_input_scan_t scan[KVM_DISPLAY_INPUT_SCAN_MAX];
+    /* The stored devices (kept across windows) and the DEVICES list state. */
+    uint8_t stored_mask;        /* bit (1 << kind) */
+    char stored_names[2][24];   /* [0] keyboard, [1] mouse */
+    uint8_t confirm_kind;       /* awaiting the confirm tap, 0 none */
+    uint64_t confirm_until_ms;
+    uint8_t notice, notice_kind;
 } kvm_display_input_pairing_t;
 
 /** Starts closed, bound to the central operations. */
 void kvm_display_input_pairing_init(kvm_display_input_pairing_t *pairing,
                                     kvm_display_input_ops_t ops);
-/** Applies one touch request. BEGIN is refused with a BUSY result (the central
+/** Records whether a device of that kind is stored and its name (NULL or
+ *  empty for none); the worker refreshes it from the central. */
+void kvm_display_input_pairing_device(kvm_display_input_pairing_t *pairing, uint8_t kind,
+                                      bool stored, const char *name);
+/** Applies one touch request. BEGIN (from closed or the device list),
+ *  DEVICES_OPEN and FORGET are refused with a BUSY result (the central
  *  untouched) while host_armed (the PC is driving a guest; an open, unarmed
- *  host session is fine) or guest_pairing is true. A begin or select whose
+ *  host session is fine) or guest_pairing is true. FORGET of a stored kind
+ *  first arms a confirmation; the same kind again within
+ *  KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS calls ops.forget once. A begin or select whose
  *  RPC timed out, or a cancel the central did not confirm, leaves the window
  *  "possibly open": a BUSY/failed result is shown, the guest gate stays closed
  *  and cancel is retried until confirmed or the stop deadline. Returns true
@@ -133,16 +153,18 @@ void kvm_display_input_pairing_event(kvm_display_input_pairing_t *pairing,
  *  deadline, or with the router now armed by the host, is cancelled on the
  *  central and shown as TIMED OUT / BUSY (an unarmed session opening does not
  *  touch it). Retries an unconfirmed cancel; a result past its time closes
- *  once the window is known to be over. */
+ *  once the window is known to be over. The device list closes when idle and
+ *  shows BUSY when the host arms (no central call); a stale confirm expires. */
 void kvm_display_input_pairing_tick(kvm_display_input_pairing_t *pairing, uint64_t now_ms,
                                     bool host_armed);
-/** True from BEGIN until the result is dismissed and the central window is
- *  known closed: no guest window may open. */
+/** True from BEGIN (or the device list opening) until the result is dismissed
+ *  and the central window is known closed: no guest window may open. */
 bool kvm_display_input_pairing_blocks_guest(const kvm_display_input_pairing_t *pairing);
 /** Records a guest pairing request refused for the input window (shown as BUSY). */
 void kvm_display_input_pairing_guest_refused(kvm_display_input_pairing_t *pairing, uint64_t now_ms);
 /** Writes the input_pair_* snapshot fields: at most four rows, strongest RSSI
- *  first (ties by scan index), each with its stable central scan index. */
+ *  first (ties by scan index), each with its stable central scan index; and
+ *  the input_dev_* fields (stored devices, a still-valid confirm, the notice). */
 void kvm_display_input_pairing_status(const kvm_display_input_pairing_t *pairing, uint64_t now_ms,
                                       kvm_display_status_t *status);
 

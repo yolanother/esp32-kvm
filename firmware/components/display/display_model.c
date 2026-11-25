@@ -30,7 +30,7 @@ static bool input_entry_available(const kvm_display_status_t *s)
 static bool input_screen_shown(const kvm_display_status_t *s)
 {
     return s->input_pair_state >= KVM_DISPLAY_INPUT_SCANNING &&
-           s->input_pair_state <= KVM_DISPLAY_INPUT_RESULT &&
+           s->input_pair_state <= KVM_DISPLAY_INPUT_DEVICES &&
            !s->recovery_required && !s->updating && !s->fault &&
            !(s->armed && !s->guest_ready);
 }
@@ -39,6 +39,62 @@ static const char *input_kind_text(uint8_t kind)
 {
     return kind == KVM_DISPLAY_INPUT_KEYBOARD ? "KEYBOARD" :
            kind == KVM_DISPLAY_INPUT_MOUSE ? "MOUSE" : "DEVICE";
+}
+
+/* The device list's own actions: the entry's gate, minus the closed state. */
+static bool input_list_usable(const kvm_display_status_t *s)
+{
+    return s->input_pair_state == KVM_DISPLAY_INPUT_DEVICES && s->touch_available &&
+           !s->armed && guest_pairing_idle(s) && input_screen_shown(s);
+}
+
+static bool input_dev_stored(const kvm_display_status_t *s, uint8_t kind)
+{
+    return (s->input_dev_stored & (1u << kind)) != 0;
+}
+
+/* The stored device's name, or its kind when it advertised none. */
+static const char *input_dev_label(const kvm_display_status_t *s, uint8_t kind)
+{
+    const char *name = s->input_dev_names[kind - 1u];
+    return name[0] ? name : input_kind_text(kind);
+}
+
+/* Joins up to three parts into dst, truncating to fit (a long name is cut,
+ * the row label dots it). */
+static void join_text(char *dst, size_t n, const char *a, const char *b, const char *c)
+{
+    const char *parts[3] = {a, b, c};
+    size_t at = 0;
+    for (unsigned i = 0; i < 3u; ++i)
+        for (const char *p = parts[i]; p && *p && at + 1u < n; ++p) dst[at++] = *p;
+    dst[at] = '\0';
+}
+
+static void make_devices_view(const kvm_display_status_t *s, kvm_display_view_t *v)
+{
+    COPY_TEXT(v->title, "INPUT DEVICES");
+    COPY_TEXT(v->footer, "Tap a device to forget");
+    v->input_row_count = KVM_DISPLAY_INPUT_DEVICE_ROWS;
+    for (uint8_t kind = KVM_DISPLAY_INPUT_KEYBOARD; kind <= KVM_DISPLAY_INPUT_MOUSE; ++kind) {
+        char *row = v->input_rows[kind - 1u];
+        const char *name = s->input_dev_names[kind - 1u];
+        if (!input_dev_stored(s, kind))
+            join_text(row, sizeof(v->input_rows[0]), input_kind_text(kind), ": not paired", NULL);
+        else if (s->input_dev_confirm == kind)
+            COPY_TEXT(v->input_rows[kind - 1u], "TAP AGAIN TO FORGET");
+        else
+            join_text(row, sizeof(v->input_rows[0]), input_kind_text(kind), ": ", name[0] ? name : "paired");
+    }
+    COPY_TEXT(v->input_rows[KVM_DISPLAY_INPUT_ADD_ROW], "ADD KEYBOARD OR MOUSE");
+    if (s->input_dev_confirm == KVM_DISPLAY_INPUT_KEYBOARD || s->input_dev_confirm == KVM_DISPLAY_INPUT_MOUSE) {
+        join_text(v->title, sizeof(v->title), "FORGET ", input_dev_label(s, s->input_dev_confirm), "?");
+        COPY_TEXT(v->footer, "Tap again within 5s");
+    } else if (s->input_dev_notice == KVM_DISPLAY_INPUT_NOTICE_FORGOTTEN) {
+        snprintf(v->footer, sizeof(v->footer), "%s FORGOTTEN", input_kind_text(s->input_dev_notice_kind));
+    } else if (s->input_dev_notice == KVM_DISPLAY_INPUT_NOTICE_FAILED) {
+        COPY_TEXT(v->footer, "FORGET FAILED, RETRY");
+    }
 }
 
 static void make_input_view(const kvm_display_status_t *s, uint64_t now_ms,
@@ -59,6 +115,9 @@ static void make_input_view(const kvm_display_status_t *s, uint64_t now_ms,
     v->input_cancel = s->touch_available;
     COPY_TEXT(v->title, "ADD KEYBOARD/MOUSE");
     switch (s->input_pair_state) {
+    case KVM_DISPLAY_INPUT_DEVICES:
+        make_devices_view(s, v);
+        break;
     case KVM_DISPLAY_INPUT_SCANNING:
         snprintf(v->footer, sizeof(v->footer), "%llus remaining", remaining);
         if (s->input_pair_connecting) {
@@ -287,7 +346,7 @@ bool kvm_display_input_touch_action(const kvm_display_status_t *s,
             x < KVM_DISPLAY_INPUT_ENTRY_X || x >= KVM_DISPLAY_INPUT_ENTRY_X + KVM_DISPLAY_INPUT_ENTRY_SIZE ||
             y < KVM_DISPLAY_INPUT_ENTRY_Y || y >= KVM_DISPLAY_INPUT_ENTRY_Y + KVM_DISPLAY_INPUT_ENTRY_SIZE)
             return false;
-        *action = KVM_DISPLAY_INPUT_PAIR_BEGIN;
+        *action = KVM_DISPLAY_INPUT_DEVICES_OPEN;
         *row = 0;
         return true;
     }
@@ -296,6 +355,15 @@ bool kvm_display_input_touch_action(const kvm_display_status_t *s,
         y < KVM_DISPLAY_INPUT_CANCEL_H) {
         *action = KVM_DISPLAY_INPUT_PAIR_CANCEL;
         *row = 0;
+        return true;
+    }
+    if (s->input_pair_state == KVM_DISPLAY_INPUT_DEVICES) {
+        if (x < KVM_DISPLAY_INPUT_ROW_X || x >= KVM_DISPLAY_INPUT_ROW_X + KVM_DISPLAY_INPUT_ROW_W ||
+            y < KVM_DISPLAY_INPUT_ROW_Y) return false;
+        uint32_t index = (uint32_t)(y - KVM_DISPLAY_INPUT_ROW_Y) / KVM_DISPLAY_INPUT_ROW_H;
+        if (index >= KVM_DISPLAY_INPUT_DEVICE_ROWS) return false;
+        *action = index == KVM_DISPLAY_INPUT_ADD_ROW ? KVM_DISPLAY_INPUT_PAIR_BEGIN : KVM_DISPLAY_INPUT_FORGET;
+        *row = index == KVM_DISPLAY_INPUT_ADD_ROW ? 0 : (uint8_t)index;
         return true;
     }
     if (s->input_pair_state != KVM_DISPLAY_INPUT_SCANNING || s->input_pair_connecting ||
@@ -317,8 +385,15 @@ bool kvm_display_input_request(const kvm_display_status_t *s,
     memset(request, 0, sizeof(*request));
     if (!s || !s->touch_available) return false;
     switch (action) {
-    case KVM_DISPLAY_INPUT_PAIR_BEGIN:
+    case KVM_DISPLAY_INPUT_DEVICES_OPEN:
         if (!input_entry_available(s)) return false;
+        break;
+    case KVM_DISPLAY_INPUT_PAIR_BEGIN:
+        if (!input_entry_available(s) && !input_list_usable(s)) return false;
+        break;
+    case KVM_DISPLAY_INPUT_FORGET:
+        if (!input_list_usable(s) || row >= 2u || !input_dev_stored(s, (uint8_t)(row + 1u))) return false;
+        request->row = row;
         break;
     case KVM_DISPLAY_INPUT_PAIR_SELECT:
         if (!input_screen_shown(s) || s->input_pair_state != KVM_DISPLAY_INPUT_SCANNING ||

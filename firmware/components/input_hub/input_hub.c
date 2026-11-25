@@ -47,37 +47,53 @@ static bool slot_dead(const kvm_input_hub_t *hub, uint8_t slot)
     return hub->output.ready == NULL || !hub->output.ready(hub->context, slot);
 }
 
-/* Sends all-up keyboard and zero pointer to the armed slot, plus zero consumer when held.
- * Each part clears its held state only when its send succeeds. Never sends to an unarmed
- * slot. A dead slot has its held state abandoned and counts as success. Returns true when
- * nothing is left held. */
-static bool send_all_up(kvm_input_hub_t *hub)
+#define UP_KEYS 1u
+#define UP_POINTER 2u
+#define UP_CONSUMER 4u
+#define UP_ALL (UP_KEYS | UP_POINTER | UP_CONSUMER)
+
+static void clear_parts(kvm_input_hub_t *hub, unsigned parts)
+{
+    if (parts & UP_KEYS) memset(hub->keys, 0, sizeof hub->keys);
+    if (parts & UP_POINTER) hub->buttons = 0;
+    if (parts & UP_CONSUMER) hub->consumer = 0;
+}
+
+/* Sends the selected all-up parts to the armed slot: keyboard all-up and zero pointer
+ * always, zero consumer only when held. Each part clears its held state only when its
+ * send succeeds. Never sends to an unarmed slot. A dead slot has the selected held state
+ * abandoned and counts as success. Returns true when none of the selected state is left. */
+static bool send_up(kvm_input_hub_t *hub, unsigned parts)
 {
     kvm_router_input_t up;
     uint8_t slot = hub->armed_slot;
     bool ok = true;
     if (slot == 0 || slot_dead(hub, slot)) {
-        clear_held(hub);
+        clear_parts(hub, parts);
         return true;
     }
     if (hub->output.send == NULL) {
         return false;
     }
-    memset(&up, 0, sizeof up);
-    up.kind = KVM_ROUTER_KEYBOARD;
-    if (hub->output.send(hub->context, slot, &up)) {
-        memset(hub->keys, 0, sizeof hub->keys);
-    } else {
-        ok = false;
+    if (parts & UP_KEYS) {
+        memset(&up, 0, sizeof up);
+        up.kind = KVM_ROUTER_KEYBOARD;
+        if (hub->output.send(hub->context, slot, &up)) {
+            memset(hub->keys, 0, sizeof hub->keys);
+        } else {
+            ok = false;
+        }
     }
-    memset(&up, 0, sizeof up);
-    up.kind = KVM_ROUTER_POINTER;
-    if (hub->output.send(hub->context, slot, &up)) {
-        hub->buttons = 0;
-    } else {
-        ok = false;
+    if (parts & UP_POINTER) {
+        memset(&up, 0, sizeof up);
+        up.kind = KVM_ROUTER_POINTER;
+        if (hub->output.send(hub->context, slot, &up)) {
+            hub->buttons = 0;
+        } else {
+            ok = false;
+        }
     }
-    if (hub->consumer != 0) {
+    if ((parts & UP_CONSUMER) && hub->consumer != 0) {
         memset(&up, 0, sizeof up);
         up.kind = KVM_ROUTER_CONSUMER;
         if (hub->output.send(hub->context, slot, &up)) {
@@ -87,11 +103,13 @@ static bool send_all_up(kvm_input_hub_t *hub)
         }
     }
     if (!ok && slot_dead(hub, slot)) {
-        clear_held(hub);
+        clear_parts(hub, parts);
         return true;
     }
     return ok;
 }
+
+static bool send_all_up(kvm_input_hub_t *hub) { return send_up(hub, UP_ALL); }
 
 /* Releases the arm; keeps armed_slot when a ready slot's release is uncertain. */
 static bool drop_arm(kvm_input_hub_t *hub)
@@ -293,6 +311,35 @@ void kvm_input_hub_device_lost(kvm_input_hub_t *hub, bool router_armed)
     hub->switch_pending = false;
     was_held = held(hub);
     if (send_all_up(hub) && !was_held) {
+        (void)drop_arm(hub);
+    }
+}
+
+void kvm_input_hub_device_lost_kind(kvm_input_hub_t *hub, kvm_router_input_kind_t kind,
+                                    bool router_armed)
+{
+    bool was_held;
+    unsigned parts;
+    if (kind == KVM_ROUTER_KEYBOARD) {
+        parts = UP_KEYS | UP_CONSUMER;
+    } else if (kind == KVM_ROUTER_POINTER) {
+        parts = UP_POINTER;
+    } else {
+        kvm_input_hub_device_lost(hub, router_armed);
+        return;
+    }
+    if (router_armed) {
+        clear_local(hub);
+        return;
+    }
+    if (parts & UP_KEYS) {
+        /* Chord tracking belongs to the keyboard that went away. */
+        memset(hub->raw_keys, 0, sizeof hub->raw_keys);
+        hub->chord_latched = false;
+        hub->switch_pending = false;
+    }
+    was_held = held(hub);
+    if (send_up(hub, parts) && !was_held) {
         (void)drop_arm(hub);
     }
 }

@@ -101,15 +101,22 @@ static void copy_name(char *dst, size_t dst_size, const char *src, size_t src_si
     dst[n] = '\0';
 }
 
+/* Closes the screen; the bound ops, window counter, guest-busy hint and the
+ * stored devices (refreshed by the worker) survive. */
 static void input_close(kvm_display_input_pairing_t *p)
 {
     kvm_display_input_ops_t ops = p->ops;
     uint32_t window = p->window;
     uint64_t busy = p->guest_busy_until_ms;
+    uint8_t stored = p->stored_mask;
+    char names[2][24];
+    memcpy(names, p->stored_names, sizeof(names));
     memset(p, 0, sizeof(*p));
     p->ops = ops;
     p->window = window;
     p->guest_busy_until_ms = busy;
+    p->stored_mask = stored;
+    memcpy(p->stored_names, names, sizeof(names));
 }
 
 static void input_result(kvm_display_input_pairing_t *p, uint8_t reason, bool refused,
@@ -122,7 +129,60 @@ static void input_result(kvm_display_input_pairing_t *p, uint8_t reason, bool re
     p->busy_cause = KVM_DISPLAY_INPUT_BUSY_CENTRAL;
     p->passkey = 0;
     p->deadline_ms = now_ms + KVM_DISPLAY_INPUT_RESULT_MS;
+    p->confirm_kind = 0;
+    p->notice = KVM_DISPLAY_INPUT_NOTICE_NONE;
     memset(p->scan, 0, sizeof(p->scan));
+}
+
+/* Never while the PC drives a guest or beside a guest window: BUSY with the cause. */
+static void input_busy(kvm_display_input_pairing_t *p, bool host_armed, uint64_t now_ms)
+{
+    input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, false, now_ms);
+    p->busy_cause = host_armed ? KVM_DISPLAY_INPUT_BUSY_HOST : KVM_DISPLAY_INPUT_BUSY_GUEST;
+}
+
+static bool input_kind(uint8_t kind)
+{
+    return kind == KVM_DISPLAY_INPUT_KEYBOARD || kind == KVM_DISPLAY_INPUT_MOUSE;
+}
+
+void kvm_display_input_pairing_device(kvm_display_input_pairing_t *p, uint8_t kind,
+                                      bool stored, const char *name)
+{
+    if (!p || !input_kind(kind)) return;
+    char *dst = p->stored_names[kind - 1u];
+    if (stored) {
+        p->stored_mask |= (uint8_t)(1u << kind);
+        if (name) copy_name(dst, sizeof(p->stored_names[0]), name, sizeof(p->stored_names[0]));
+        else dst[0] = '\0';
+    } else {
+        p->stored_mask &= (uint8_t)~(1u << kind);
+        dst[0] = '\0';
+    }
+}
+
+/* FORGET on the device list: the first tap arms a confirmation, the same kind
+ * again within the confirm time forgets it through the central. */
+static bool input_forget(kvm_display_input_pairing_t *p, uint8_t kind, uint64_t now_ms)
+{
+    p->deadline_ms = now_ms + KVM_DISPLAY_INPUT_DEVICES_IDLE_MS;
+    if (p->confirm_kind != kind || now_ms >= p->confirm_until_ms) {
+        p->confirm_kind = kind;
+        p->confirm_until_ms = now_ms + KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS;
+        p->notice = KVM_DISPLAY_INPUT_NOTICE_NONE;
+        return true;
+    }
+    p->confirm_kind = 0;
+    kvm_display_input_op_t op = p->ops.forget ? p->ops.forget(p->ops.context, kind)
+                                              : KVM_DISPLAY_INPUT_OP_REFUSED;
+    p->notice_kind = kind;
+    if (op != KVM_DISPLAY_INPUT_OP_OK) {
+        p->notice = KVM_DISPLAY_INPUT_NOTICE_FAILED; /* still listed until the central says otherwise */
+        return false;
+    }
+    p->notice = KVM_DISPLAY_INPUT_NOTICE_FORGOTTEN;
+    kvm_display_input_pairing_device(p, kind, false, NULL);
+    return true;
 }
 
 static bool input_window_open(const kvm_display_input_pairing_t *p)
@@ -175,14 +235,39 @@ bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
 {
     if (!p) return false;
     switch (request.action) {
-    case KVM_DISPLAY_INPUT_PAIR_BEGIN: {
+    case KVM_DISPLAY_INPUT_DEVICES_OPEN:
         if (p->state != KVM_DISPLAY_INPUT_CLOSED) return false;
         input_close(p);
         if (++p->window == 0) p->window = 1;
         if (host_armed || guest_pairing) {
-            /* Never while the PC drives a guest or beside a guest window. */
-            input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, false, now_ms);
-            p->busy_cause = host_armed ? KVM_DISPLAY_INPUT_BUSY_HOST : KVM_DISPLAY_INPUT_BUSY_GUEST;
+            input_busy(p, host_armed, now_ms);
+            return false;
+        }
+        p->state = KVM_DISPLAY_INPUT_DEVICES;
+        p->deadline_ms = now_ms + KVM_DISPLAY_INPUT_DEVICES_IDLE_MS;
+        return true;
+    case KVM_DISPLAY_INPUT_FORGET: {
+        if (p->state != KVM_DISPLAY_INPUT_DEVICES || request.window != p->window || request.row >= 2u)
+            return false;
+        if (host_armed || guest_pairing) {
+            input_busy(p, host_armed, now_ms);
+            return false;
+        }
+        uint8_t kind = (uint8_t)(request.row + 1u);
+        if (!(p->stored_mask & (1u << kind))) return false;
+        return input_forget(p, kind, now_ms);
+    }
+    case KVM_DISPLAY_INPUT_PAIR_BEGIN: {
+        /* From closed, or the device list's "Add" row of the current window. */
+        if (p->state == KVM_DISPLAY_INPUT_DEVICES) {
+            if (request.window != p->window) return false;
+        } else if (p->state != KVM_DISPLAY_INPUT_CLOSED) {
+            return false;
+        }
+        input_close(p);
+        if (++p->window == 0) p->window = 1;
+        if (host_armed || guest_pairing) {
+            input_busy(p, host_armed, now_ms);
             return false;
         }
         kvm_display_input_op_t op = p->ops.begin ? p->ops.begin(p->ops.context)
@@ -300,6 +385,11 @@ void kvm_display_input_pairing_tick(kvm_display_input_pairing_t *p, uint64_t now
         if (p->stopping && (now_ms >= p->cancel_retry_ms || now_ms >= p->stop_deadline_ms))
             input_retry_stop(p, now_ms);
         if (!p->stopping && now_ms >= p->deadline_ms) input_close(p);
+    } else if (p->state == KVM_DISPLAY_INPUT_DEVICES) {
+        /* The list never opens a central window, so nothing needs cancelling. */
+        if (host_armed) input_busy(p, true, now_ms);
+        else if (now_ms >= p->deadline_ms) input_close(p);
+        else if (p->confirm_kind && now_ms >= p->confirm_until_ms) p->confirm_kind = 0;
     }
 }
 
@@ -337,6 +427,14 @@ void kvm_display_input_pairing_status(const kvm_display_input_pairing_t *p, uint
     s->input_pair_deadline_ms = input_window_open(p) ? p->deadline_ms : 0;
     s->input_pair_stopping = p->state == KVM_DISPLAY_INPUT_RESULT && p->stopping;
     s->input_pair_busy_cause = p->state == KVM_DISPLAY_INPUT_RESULT ? p->busy_cause : 0;
+    s->input_dev_stored = p->stored_mask;
+    for (unsigned i = 0; i < 2u; ++i)
+        copy_name(s->input_dev_names[i], sizeof(s->input_dev_names[i]), p->stored_names[i],
+                  sizeof(p->stored_names[i]));
+    bool devices = p->state == KVM_DISPLAY_INPUT_DEVICES;
+    s->input_dev_confirm = devices && p->confirm_kind && now_ms < p->confirm_until_ms ? p->confirm_kind : 0;
+    s->input_dev_notice = devices ? p->notice : KVM_DISPLAY_INPUT_NOTICE_NONE;
+    s->input_dev_notice_kind = devices ? p->notice_kind : 0;
     if (p->state != KVM_DISPLAY_INPUT_SCANNING || p->connecting) return;
     /* Selection sort of the used entries: strongest first, at most four. */
     bool taken[KVM_DISPLAY_INPUT_SCAN_MAX] = {false};

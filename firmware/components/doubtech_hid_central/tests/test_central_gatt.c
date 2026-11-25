@@ -3,7 +3,9 @@
  * databases: boot keyboard, boot mouse, a wheel mouse through its report map
  * (with and without a report ID), unsupported devices (reason 1), capacity
  * (reason 5), an injected error in every discovery state, and the lost input a
- * ready link reports when it closes. */
+ * ready link reports when it closes. Also drives the stored-device reconnect
+ * schedule: 10 s attempts 15 s apart, one at a time, none during a pairing
+ * scan, never to a guest identity, within the connection budget. */
 #include <stdio.h>
 #include <string.h>
 
@@ -507,8 +509,202 @@ static void test_abort_from_ready_reports_lost_once(void)
     CHECK(!central_gatt_disconnect(&m, &in));
 }
 
+/* ---- stored-device reconnect schedule ---- */
+
+static central_reconnect_facts_t facts_both_stored(void)
+{
+    central_reconnect_facts_t f;
+    memset(&f, 0, sizeof f);
+    f.stored[KB] = f.stored[MOUSE] = true;
+    f.link_budget = 2;
+    return f;
+}
+
+/* Starts the attempt the schedule asked for: the link now exists and is connecting. */
+static void start_attempt(central_reconnect_facts_t *f, uint8_t kind)
+{
+    f->linked[kind] = true;
+    f->connecting = true;
+    f->links++;
+}
+
+static void end_attempt(central_reconnect_facts_t *f, uint8_t kind)
+{
+    f->linked[kind] = false;
+    f->connecting = false;
+    f->links--;
+}
+
+static void test_reconnect_boot_one_attempt_at_a_time(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    central_reconnect_init(&r, 1000);
+    /* Boot: the keyboard goes first, at once. */
+    central_reconnect_action_t a = central_reconnect_next(&r, 1000, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
+    start_attempt(&f, KB);
+    /* The mouse is due too, but one outgoing attempt at a time. */
+    a = central_reconnect_next(&r, 1000, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms > 0);
+    CHECK(central_reconnect_next(&r, 1000 + CENTRAL_RECONNECT_ATTEMPT_MS - 1, &f).step != CENTRAL_RECONNECT_CONNECT);
+    /* The 10 s attempt times out: the mouse takes its turn, the keyboard waits 15 s. */
+    uint32_t t = 1000 + CENTRAL_RECONNECT_ATTEMPT_MS;
+    end_attempt(&f, KB);
+    central_reconnect_attempt_failed(&r, KB, t);
+    a = central_reconnect_next(&r, t, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == MOUSE);
+}
+_Static_assert(CENTRAL_RECONNECT_ATTEMPT_MS == 10000u && CENTRAL_RECONNECT_GAP_MS == 15000u,
+               "spec: 10 s attempts, 15 s apart");
+
+static void test_reconnect_retries_after_gap(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    f.stored[MOUSE] = false;
+    central_reconnect_init(&r, 0);
+    uint32_t t = 0;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
+        CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
+        start_attempt(&f, KB);
+        t += CENTRAL_RECONNECT_ATTEMPT_MS;
+        end_attempt(&f, KB);
+        central_reconnect_attempt_failed(&r, KB, t);
+        a = central_reconnect_next(&r, t, &f);
+        CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms == CENTRAL_RECONNECT_GAP_MS);
+        CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS - 1, &f).step == CENTRAL_RECONNECT_WAIT);
+        t += CENTRAL_RECONNECT_GAP_MS;
+    }
+    /* A connect the controller refused (ENOMEM, EBUSY) is a normal retry too. */
+    central_reconnect_attempt_failed(&r, KB, t);
+    CHECK(central_reconnect_next(&r, t, &f).step == CENTRAL_RECONNECT_WAIT);
+    CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS, &f).step == CENTRAL_RECONNECT_CONNECT);
+}
+
+static void test_reconnect_stops_when_forgotten_or_connected(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    central_reconnect_init(&r, 0);
+    f.stored[KB] = f.stored[MOUSE] = false; /* forgotten */
+    CHECK(central_reconnect_next(&r, 0, &f).step == CENTRAL_RECONNECT_NONE);
+    CHECK(central_reconnect_next(&r, 999999u, &f).step == CENTRAL_RECONNECT_NONE);
+    /* Both connected: nothing to do either. */
+    f = facts_both_stored();
+    f.linked[KB] = f.linked[MOUSE] = true;
+    f.links = 2;
+    CHECK(central_reconnect_next(&r, 0, &f).step == CENTRAL_RECONNECT_NONE);
+    /* Only the mouse forgotten: only the keyboard is ever attempted. */
+    f = facts_both_stored();
+    f.stored[MOUSE] = false;
+    for (uint32_t t = 0; t < 120000u; t += 5000u) {
+        central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
+        CHECK(a.step != CENTRAL_RECONNECT_CONNECT || a.kind == KB);
+    }
+}
+
+static void test_reconnect_resumes_after_disconnect(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    f.stored[MOUSE] = false;
+    central_reconnect_init(&r, 0);
+    CHECK(central_reconnect_next(&r, 0, &f).step == CENTRAL_RECONNECT_CONNECT);
+    start_attempt(&f, KB);
+    f.connecting = false; /* connected and ready */
+    CHECK(central_reconnect_next(&r, 50000u, &f).step == CENTRAL_RECONNECT_NONE);
+    /* The keyboard went to sleep: the first attempt is immediate, then the usual cadence. */
+    end_attempt(&f, KB);
+    central_reconnect_link_lost(&r, KB, 60000u);
+    central_reconnect_action_t a = central_reconnect_next(&r, 60000u, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
+    start_attempt(&f, KB);
+    end_attempt(&f, KB);
+    central_reconnect_attempt_failed(&r, KB, 70000u);
+    a = central_reconnect_next(&r, 70000u, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms == CENTRAL_RECONNECT_GAP_MS);
+    CHECK(central_reconnect_next(&r, 85000u, &f).step == CENTRAL_RECONNECT_CONNECT);
+}
+
+static void test_reconnect_never_during_pairing_scan(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    central_reconnect_init(&r, 0);
+    f.pairing = true;
+    for (uint32_t t = 0; t <= 2u * DOUBTECH_HID_CENTRAL_PAIR_WINDOW_MS; t += 1000u) {
+        central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
+        CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms > 0);
+    }
+    /* The window ended: the overdue keyboard goes at once. */
+    f.pairing = false;
+    central_reconnect_action_t a = central_reconnect_next(&r, 61000u, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_CONNECT && a.kind == KB);
+}
+
+static void test_reconnect_never_to_a_guest_identity(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    central_reconnect_init(&r, 0);
+    f.guest[KB] = true; /* a stale record that now names a guest's identity */
+    for (uint32_t t = 0; t < 200000u; t += 2500u) {
+        central_reconnect_action_t a = central_reconnect_next(&r, t, &f);
+        CHECK(a.step != CENTRAL_RECONNECT_CONNECT || a.kind == MOUSE);
+    }
+    f.guest[MOUSE] = true;
+    CHECK(central_reconnect_next(&r, 0, &f).step == CENTRAL_RECONNECT_NONE);
+}
+
+static void test_reconnect_respects_the_connection_budget(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    central_reconnect_init(&r, 0);
+    /* The guest reserve leaves no central link (for example a smaller budget). */
+    f.link_budget = 0;
+    CHECK(central_reconnect_next(&r, 0, &f).step == CENTRAL_RECONNECT_WAIT);
+    /* One link allowed and in use by the (connected) mouse: the keyboard waits. */
+    f.link_budget = 1;
+    f.linked[MOUSE] = true;
+    f.links = 1;
+    CHECK(central_reconnect_next(&r, 0, &f).step == CENTRAL_RECONNECT_WAIT);
+    f.link_budget = 2;
+    CHECK(central_reconnect_next(&r, 0, &f).step == CENTRAL_RECONNECT_CONNECT);
+    /* The budget from the configured connection count, less the guest reserve. */
+    CHECK(central_reconnect_link_budget(5, 3, 2) == 2);
+    CHECK(central_reconnect_link_budget(4, 3, 2) == 1);
+    CHECK(central_reconnect_link_budget(3, 3, 2) == 0);
+    CHECK(central_reconnect_link_budget(2, 3, 2) == 0);
+    CHECK(central_reconnect_link_budget(9, 3, 2) == 2);
+}
+
+static void test_reconnect_clock_wraps(void)
+{
+    central_reconnect_t r;
+    central_reconnect_facts_t f = facts_both_stored();
+    f.stored[MOUSE] = false;
+    uint32_t t = 0xFFFFF000u;
+    central_reconnect_init(&r, t);
+    CHECK(central_reconnect_next(&r, t, &f).step == CENTRAL_RECONNECT_CONNECT);
+    central_reconnect_attempt_failed(&r, KB, t);
+    central_reconnect_action_t a = central_reconnect_next(&r, t + 1000u, &f);
+    CHECK(a.step == CENTRAL_RECONNECT_WAIT && a.delay_ms == CENTRAL_RECONNECT_GAP_MS - 1000u);
+    CHECK(central_reconnect_next(&r, t + CENTRAL_RECONNECT_GAP_MS, &f).step == CENTRAL_RECONNECT_CONNECT);
+}
+
 int main(void)
 {
+    test_reconnect_boot_one_attempt_at_a_time();
+    test_reconnect_retries_after_gap();
+    test_reconnect_stops_when_forgotten_or_connected();
+    test_reconnect_resumes_after_disconnect();
+    test_reconnect_never_during_pairing_scan();
+    test_reconnect_never_to_a_guest_identity();
+    test_reconnect_respects_the_connection_budget();
+    test_reconnect_clock_wraps();
     test_report_map_too_long();
     test_abort_from_ready_reports_lost_once();
     test_boot_keyboard_happy_path();

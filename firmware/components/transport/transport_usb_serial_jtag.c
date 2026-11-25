@@ -14,7 +14,10 @@
  * central pairing events update it, and it is never open beside a guest
  * pairing window (each refuses the other with BUSY) or while the host has a
  * guest armed (BEGIN refused, an open window ended); an open but unarmed host
- * session does not affect it. */
+ * session does not affect it. The same rules gate the input-device list
+ * behind the entry, whose confirmed forget is the worker's only other central
+ * call; the stored names it lists come from doubtech_hid_central_stored().
+ * Reconnecting stored devices is the central's own schedule. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "transport_hub.h"
@@ -131,7 +134,14 @@ static void drain_central_events(uint64_t time_ms)
         case DTHID_CENTRAL_PASSKEY: copy.type = KVM_DISPLAY_INPUT_EVENT_PASSKEY; break;
         case DTHID_CENTRAL_PAIRED: copy.type = KVM_DISPLAY_INPUT_EVENT_PAIRED; break;
         case DTHID_CENTRAL_PAIR_FAILED: copy.type = KVM_DISPLAY_INPUT_EVENT_FAILED; break;
-        default: continue; /* CONNECTED/DISCONNECTED: the status polls connected() */
+        case DTHID_CENTRAL_CONNECTED:
+        case DTHID_CENTRAL_DISCONNECTED:
+            /* Status: publish_status reads doubtech_hid_central_connected() every
+             * iteration, which changes before these events are sent, so the
+             * KB/MS badge follows at once. Held input was already released
+             * through the LOST report on the hub queue. */
+            continue;
+        default: continue;
         }
         copy.index = event.index;
         copy.kind = event.kind;
@@ -156,6 +166,21 @@ static kvm_display_input_op_t central_pair_select(void *context, uint8_t index)
 { (void)context; return central_op(doubtech_hid_central_pair_select(index)); }
 static bool central_pair_cancel(void *context)
 { (void)context; return doubtech_hid_central_pair_cancel() == ESP_OK; }
+/* The central saves the registry, drops the link (lost input, then
+ * DISCONNECTED) and stops that kind's reconnects. */
+static kvm_display_input_op_t central_forget(void *context, uint8_t kind)
+{ (void)context; return central_op(doubtech_hid_central_forget(kind)); }
+
+/* The stored devices for the device list, read from the central's published
+ * copy (cheap; any task) before touches are applied and the status is built. */
+static void refresh_input_devices(void)
+{
+    for (uint8_t kind = DOUBTECH_HID_CENTRAL_KEYBOARD; kind <= DOUBTECH_HID_CENTRAL_MOUSE; ++kind) {
+        char name[DOUBTECH_HID_CENTRAL_NAME_BYTES];
+        bool stored = doubtech_hid_central_stored(kind, name);
+        kvm_display_input_pairing_device(&input_pairing, kind, stored, name);
+    }
+}
 
 /* A guest window the worker did not open, cancelled for the input window;
  * the cancel RPC is retried (once a second) until it succeeds, the guest
@@ -524,6 +549,7 @@ static void usb_worker(void *context)
             plus = false;
         }
         poll_central_start(time_ms);
+        refresh_input_devices();
         if (!(button_bits & 2u)) drain_input_touch(time_ms);
         drain_central_events(time_ms);
         /* Hard deadline, unconfirmed-cancel retries and the host-armed rule,
@@ -613,7 +639,7 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     central_event_queue = xQueueCreate(16, sizeof(doubtech_hid_central_event_t));
     input_touch_queue = xQueueCreate(4, sizeof(kvm_display_input_request_t));
     kvm_display_input_pairing_init(&input_pairing, (kvm_display_input_ops_t){
-        central_pair_begin, central_pair_select, central_pair_cancel, NULL});
+        central_pair_begin, central_pair_select, central_pair_cancel, NULL, central_forget});
     if (!pairing_queue || !pairing_touch_queue || !target_touch_queue || !central_event_queue ||
         !input_touch_queue) {
         delete_queues();

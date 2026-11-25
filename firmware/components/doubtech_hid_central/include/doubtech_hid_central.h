@@ -30,6 +30,8 @@
 
 /** Most scan results one pairing window lists (deduplicated by address). */
 #define DOUBTECH_HID_CENTRAL_MAX_SCAN_RESULTS 8
+/** Size of every device name buffer (event names, doubtech_hid_central_stored), NUL included. */
+#define DOUBTECH_HID_CENTRAL_NAME_BYTES 24
 /** Length of the scan window opened by doubtech_hid_central_pair_begin. */
 #define DOUBTECH_HID_CENTRAL_PAIR_WINDOW_MS 30000u
 
@@ -66,7 +68,7 @@ typedef struct {
     doubtech_hid_central_event_type_t type;
     uint8_t index;
     uint8_t kind;
-    char name[24];
+    char name[DOUBTECH_HID_CENTRAL_NAME_BYTES];
     int8_t rssi;
     uint32_t passkey;
     uint8_t reason;
@@ -82,8 +84,17 @@ typedef struct {
 
 /** Loads the stored devices and prepares the host-loop bridge. Returns
  * ESP_ERR_INVALID_STATE before doubtech_hid_host_synced() or on a second call,
- * ESP_ERR_INVALID_ARG for a NULL config or an invalid namespace. It connects
- * nothing by itself. */
+ * ESP_ERR_INVALID_ARG for a NULL config or an invalid namespace.
+ *
+ * Reconnect: from then on the stored keyboard and mouse are connected by their
+ * identity address in 10 s attempts, 15 s apart, one attempt at a time (the
+ * keyboard first), until connected or forgotten. None runs while an input
+ * pairing window is open (they resume when it ends), none to an identity that
+ * is a guest's, and none beyond the connection budget left after the guests'
+ * DOUBTECH_HID_MAX_CONNECTIONS. A connected device that drops (asleep, out of
+ * range) is retried at once, then on the same cadence; a connect the
+ * controller refuses is an ordinary retry. Each connection reports CONNECTED
+ * once input flows and DISCONNECTED when it closes. */
 esp_err_t doubtech_hid_central_start(const doubtech_hid_central_config_t *config);
 
 /** Opens a 30 s scan for HID keyboards and mice with sm_mitm cleared for the
@@ -104,10 +115,18 @@ esp_err_t doubtech_hid_central_pair_cancel(void);
  * CONNECTED, or PAIR_FAILED. Replacing a stored kind requires forget first. */
 esp_err_t doubtech_hid_central_pair_select(uint8_t index);
 
-/** Disconnects and removes the stored device of that kind and its bond.
+/** Removes the stored device of that kind (the record is saved first), then
+ * disconnects its link (a connected device reports its lost input once, then
+ * DISCONNECTED) and stops its reconnect attempts. Its NimBLE bond is deleted
+ * unless the address is a guest's or still stored for the other kind.
  * ESP_ERR_NOT_FOUND when none is stored. */
 esp_err_t doubtech_hid_central_forget(uint8_t kind);
-/** True while a device of that kind is connected and delivering input; any task. */
+/** True while a device of that kind is connected and delivering input; any task.
+ * It turns true just before CONNECTED and false as soon as the link is lost or
+ * being closed (before DISCONNECTED arrives). */
 bool doubtech_hid_central_connected(uint8_t kind);
+/** True when a device of that kind is stored; copies its NUL-terminated name
+ * (possibly empty) into name when not NULL. False before start. Any task. */
+bool doubtech_hid_central_stored(uint8_t kind, char name[DOUBTECH_HID_CENTRAL_NAME_BYTES]);
 
 #endif

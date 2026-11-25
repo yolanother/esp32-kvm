@@ -68,5 +68,13 @@ bool kvm_input_hub_yield(kvm_input_hub_t *hub, bool router_armed);
 /** Sends all-up keyboard, zero pointer and zero consumer after an input device is lost.
  * With router_armed it only abandons local state and emits nothing. */
 void kvm_input_hub_device_lost(kvm_input_hub_t *hub, bool router_armed);
+/** Releases only what one lost input device could hold, so the other device keeps
+ * working: KVM_ROUTER_KEYBOARD (a keyboard) sends all-up keyboard plus zero
+ * consumer when held and resets chord tracking; KVM_ROUTER_POINTER (a mouse)
+ * sends zero pointer state. Any other kind is a whole loss, exactly like
+ * kvm_input_hub_device_lost. The arm is released when nothing at all was held,
+ * and with router_armed it only abandons local state and emits nothing. */
+void kvm_input_hub_device_lost_kind(kvm_input_hub_t *hub, kvm_router_input_kind_t kind,
+                                    bool router_armed);
 
 #endif

@@ -53,7 +53,14 @@ static void ring_remove(kvm_hub_queue_t *q, uint8_t index)
     memmove(&q->ring[index], &q->ring[index + 1u], after * sizeof q->ring[0]);
     memmove(&q->motion[index], &q->motion[index + 1u], after * sizeof q->motion[0]);
     q->count--;
-    if (q->lost && index < q->lost_after) q->lost_after--;
+    for (unsigned k = 0; k < 3; k++)
+        if ((q->lost_mask & (1u << k)) && index < q->lost_after[k]) q->lost_after[k]--;
+}
+
+/* The loss slot of a LOST message: keyboard, pointer, or 2 for a whole loss. */
+static unsigned lost_slot(kvm_router_input_kind_t kind)
+{
+    return kind == KVM_ROUTER_KEYBOARD || kind == KVM_ROUTER_POINTER ? (unsigned)kind : 2u;
 }
 
 static void ring_append(kvm_hub_queue_t *q, const kvm_hub_msg_t *msg, bool motion)
@@ -80,11 +87,19 @@ bool kvm_hub_queue_push(kvm_hub_queue_t *q, const kvm_hub_msg_t *msg)
     q_lock(q);
     if (msg->type == KVM_HUB_MSG_LOST) {
         /* Delivered after everything queued now and before anything queued later.
-         * Tail states are older than the loss, which releases them anyway. */
-        q->lost = true;
-        q->lost_after = q->count;
-        memset(q->tail_has, 0, sizeof q->tail_has);
-        q->last_buttons = 0;
+         * Tail states of the kinds it releases are older than the loss, which
+         * releases them anyway; another device's tail states stay. */
+        unsigned slot = lost_slot(msg->input.kind);
+        q->lost_mask |= (uint8_t)(1u << slot);
+        q->lost_after[slot] = q->count;
+        if (slot != KVM_ROUTER_POINTER) {
+            q->tail_has[KVM_ROUTER_KEYBOARD] = false;
+            q->tail_has[KVM_ROUTER_CONSUMER] = false;
+        }
+        if (slot != KVM_ROUTER_KEYBOARD) {
+            q->tail_has[KVM_ROUTER_POINTER] = false;
+            q->last_buttons = 0;
+        }
         q_unlock(q);
         return true;
     }
@@ -124,16 +139,19 @@ bool kvm_hub_queue_pop(kvm_hub_queue_t *q, kvm_hub_msg_t *out)
     bool found = false;
     if (!q || !out) return false;
     q_lock(q);
-    if (q->lost && q->lost_after == 0) {
+    for (unsigned k = 0; k < 3 && !found; k++) {
+        if (!(q->lost_mask & (1u << k)) || q->lost_after[k] != 0) continue;
         memset(out, 0, sizeof *out);
         out->type = KVM_HUB_MSG_LOST;
-        q->lost = false;
+        out->input.kind = (kvm_router_input_kind_t)k; /* 2 (consumer) is a whole loss */
+        q->lost_mask &= (uint8_t)~(1u << k);
         found = true;
-    } else if (q->count) {
+    }
+    if (!found && q->count) {
         *out = q->ring[0];
         ring_remove(q, 0);
         found = true;
-    } else if (q->tail) {
+    } else if (!found && q->tail) {
         for (unsigned i = 0; i < 3 && !found; i++) {
             unsigned kind = (unsigned)tail_order[i];
             if (!q->tail_has[kind]) continue;
@@ -154,7 +172,7 @@ bool kvm_hub_queue_pending(kvm_hub_queue_t *q)
     bool pending;
     if (!q) return false;
     q_lock(q);
-    pending = q->count != 0 || q->lost || q->tail;
+    pending = q->count != 0 || q->lost_mask != 0 || q->tail;
     q_unlock(q);
     return pending;
 }
@@ -292,7 +310,7 @@ void kvm_hub_worker_message(kvm_hub_worker_t *w, const kvm_hub_msg_t *msg)
 {
     bool armed = w->router->armed;
     if (msg->type == KVM_HUB_MSG_LOST) {
-        kvm_input_hub_device_lost(&w->hub, armed);
+        kvm_input_hub_device_lost_kind(&w->hub, msg->input.kind, armed);
         return;
     }
     if (msg->type != KVM_HUB_MSG_INPUT) return;

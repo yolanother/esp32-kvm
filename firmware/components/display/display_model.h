@@ -54,13 +54,30 @@ typedef struct {
     uint64_t input_pair_deadline_ms;   /* hard window deadline (scan, connect, passkey) */
     bool input_pair_stopping;          /* RESULT: the central window is not confirmed closed yet */
     uint8_t input_pair_busy_cause;     /* RESULT BUSY: KVM_DISPLAY_INPUT_BUSY_* */
+    /* Stored input devices, for the DEVICES list (filled in every snapshot). */
+    uint8_t input_dev_stored;          /* bit (1 << kind) per stored keyboard / mouse */
+    char input_dev_names[2][25];       /* [0] keyboard, [1] mouse; empty when unnamed */
+    uint8_t input_dev_confirm;         /* DEVICES: kind awaiting the confirm tap, 0 none */
+    uint8_t input_dev_notice;          /* DEVICES footer: KVM_DISPLAY_INPUT_NOTICE_* */
+    uint8_t input_dev_notice_kind;     /* the kind the notice is about */
 } kvm_display_status_t;
 
-/** Input-device pairing screen states (kvm_display_status_t.input_pair_state). */
+/** Input-device screen states (kvm_display_status_t.input_pair_state). DEVICES
+ *  is the list behind the entry: one row per kind (tap twice to forget) and
+ *  "Add keyboard or mouse", which opens the pairing window. */
 typedef enum {
     KVM_DISPLAY_INPUT_CLOSED = 0, KVM_DISPLAY_INPUT_SCANNING = 1,
-    KVM_DISPLAY_INPUT_PASSKEY = 2, KVM_DISPLAY_INPUT_RESULT = 3
+    KVM_DISPLAY_INPUT_PASSKEY = 2, KVM_DISPLAY_INPUT_RESULT = 3,
+    KVM_DISPLAY_INPUT_DEVICES = 4
 } kvm_display_input_state_t;
+
+/** DEVICES footer notices. */
+#define KVM_DISPLAY_INPUT_NOTICE_NONE 0u
+#define KVM_DISPLAY_INPUT_NOTICE_FORGOTTEN 1u
+#define KVM_DISPLAY_INPUT_NOTICE_FAILED 2u
+/** DEVICES rows: keyboard, mouse, then "Add keyboard or mouse". */
+#define KVM_DISPLAY_INPUT_DEVICE_ROWS 3u
+#define KVM_DISPLAY_INPUT_ADD_ROW 2u
 
 /** Device kinds, equal to DOUBTECH_HID_CENTRAL_KEYBOARD / _MOUSE. */
 #define KVM_DISPLAY_INPUT_KEYBOARD 1u
@@ -78,16 +95,20 @@ typedef enum {
 #define KVM_DISPLAY_INPUT_BUSY_HOST 1u     /* the PC app is controlling a guest (router armed) */
 #define KVM_DISPLAY_INPUT_BUSY_GUEST 2u    /* a guest pairing window is open */
 
-/** Touch actions on the input-device pairing screen. */
+/** Touch actions on the input-device screens. DEVICES_OPEN (the entry) shows
+ *  the list; FORGET (row 0 keyboard, 1 mouse) asks to confirm, and the same
+ *  row tapped again within KVM_DISPLAY_INPUT_FORGET_CONFIRM_MS forgets it;
+ *  BEGIN (the list's "Add" row) opens the pairing window; CANCEL closes. */
 typedef enum {
-    KVM_DISPLAY_INPUT_PAIR_BEGIN, KVM_DISPLAY_INPUT_PAIR_SELECT, KVM_DISPLAY_INPUT_PAIR_CANCEL
+    KVM_DISPLAY_INPUT_PAIR_BEGIN, KVM_DISPLAY_INPUT_PAIR_SELECT, KVM_DISPLAY_INPUT_PAIR_CANCEL,
+    KVM_DISPLAY_INPUT_DEVICES_OPEN, KVM_DISPLAY_INPUT_FORGET
 } kvm_display_input_action_t;
 
 /** A touch captured with the window and the central scan index it showed, so a
  *  stale or re-sorted list can never select a different device. */
 typedef struct {
     kvm_display_input_action_t action;
-    uint8_t row;         /* displayed row (SELECT) */
+    uint8_t row;         /* displayed row (SELECT; FORGET: 0 keyboard, 1 mouse) */
     uint8_t scan_index;  /* the central's scan index of that row (SELECT) */
     uint32_t window;
 } kvm_display_input_request_t;
@@ -164,14 +185,18 @@ bool kvm_display_pair_request(const kvm_display_status_t *status, uint64_t now_m
 bool kvm_display_pair_touch_action(const kvm_display_status_t *status,
                                    uint16_t x, uint16_t y,
                                    kvm_display_pair_action_t *action);
-/** Maps a press to an input-device pairing action: the entry beside the guest
- *  settings (BEGIN), a displayed device row (SELECT, *row is the displayed
- *  row) or the close control (CANCEL). False for any other press. */
+/** Maps a press to an input-device action: the entry beside the guest
+ *  settings (DEVICES_OPEN), on the list a device row (FORGET, *row 0 keyboard
+ *  or 1 mouse) or the "Add" row (BEGIN), a displayed scan row (SELECT, *row is
+ *  the displayed row) or the close control (CANCEL). False for any other press. */
 bool kvm_display_input_touch_action(const kvm_display_status_t *status,
                                     uint16_t x, uint16_t y,
                                     kvm_display_input_action_t *action, uint8_t *row);
 /** Validates an input action against the displayed snapshot and captures the
- *  window and, for SELECT, the central scan index of that displayed row. */
+ *  window and, for SELECT, the central scan index of that displayed row. The
+ *  list's actions (FORGET, BEGIN from the list) are refused while the host has
+ *  a guest armed or a guest pairing window is open; FORGET also needs a stored
+ *  device on that row. */
 bool kvm_display_input_request(const kvm_display_status_t *status,
                                kvm_display_input_action_t action, uint8_t row,
                                kvm_display_input_request_t *request);
