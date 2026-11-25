@@ -26,7 +26,7 @@ bool doubtech_hid_request_consumer_slot(uint8_t slot, uint16_t usage) { (void)sl
 esp_err_t doubtech_hid_request_disconnect_slot(uint8_t slot) { (void)slot; return ESP_FAIL; }
 
 /* ---- fake guest channels ---- */
-typedef struct { bool ready, armed, fail_send, fail_release; uint8_t keys[8]; uint8_t buttons; uint16_t consumer; } chan_t;
+typedef struct { bool ready, armed, fail_send, fail_release, fail_arm; uint8_t keys[8]; uint8_t buttons; uint16_t consumer; } chan_t;
 typedef struct { char op; uint8_t slot; kvm_router_input_t in; } op_t;
 static chan_t chan[4];
 static op_t ops[256];
@@ -34,11 +34,16 @@ static int n_ops;
 static uint64_t now_ms;
 /* Stalled NimBLE host: every request waits out its 20 ms timeout and fails. */
 static bool rpc_timeout;
+/* Busy request bridge: an earlier request timed out and still holds the host
+ * loop, so every request (ready included) is refused at once with no effect
+ * on any channel and no disconnect (hid_guest_rpc.c request(), rpc.busy). */
+static bool rpc_busy;
 static int rpc_calls;
 
 static bool stalled(void)
 {
     rpc_calls++;
+    if (rpc_busy) return true;
     if (!rpc_timeout) return false;
     now_ms += 20;
     return true;
@@ -59,7 +64,7 @@ static bool f_arm(void *ctx, uint8_t slot)
 {
     (void)ctx;
     if (stalled()) return false;
-    if (!chan_ready(slot) || chan[slot].armed) { log_op('a', slot, NULL); return false; }
+    if (!chan_ready(slot) || chan[slot].armed || chan[slot].fail_arm) { log_op('a', slot, NULL); return false; }
     all_up(&chan[slot]);
     chan[slot].armed = true;
     log_op('A', slot, NULL);
@@ -192,6 +197,7 @@ static void setup(void)
     n_ops = 0;
     now_ms = 0;
     rpc_timeout = false;
+    rpc_busy = false;
     rpc_calls = 0;
     seq = 100;
     kvm_router_init(&router, kvm_hub_worker_router_output(), &worker);
@@ -750,6 +756,117 @@ static void slot_lost_and_emergency(void)
     assert(worker.last_result == KVM_HUB_FORWARDED && chan[1].armed && chan[1].keys[2] == 6);
 }
 
+/* ready() false only because the request bridge is busy (an earlier request
+ * timed out and still holds the host loop; no disconnect): the guest channel is
+ * still armed and still holds the keys. The hub must keep its arm and held
+ * state instead of forgetting them, resend the dropped release once the bridge
+ * answers, and a later host ARM of that slot must succeed with nothing held. */
+static void busy_bridge_keeps_hub_arm_and_host_arm_succeeds(void)
+{
+    setup();
+    hub_holding_slot1();
+    rpc_busy = true;
+    push(key_msg(0));        /* key-up: dropped, the bridge refused */
+    push(pointer_msg(0, 0)); /* button-up: dropped */
+    push(lost_msg());        /* and both devices are lost */
+    drain();
+    drain();
+    assert(chan[1].armed && chan[1].keys[2] == 4); /* the channel saw none of it */
+    assert(worker.hub.armed_slot == 1 && worker.hub.dirty); /* the hub still knows it holds it */
+    rpc_busy = false;
+    /* The host arms that slot before the hub's next drain: the hub yields first. */
+    open_session();
+    assert(host_switch(1) == ACK_OK);
+    assert(host_arm(1) == ACK_OK && router.armed && !router.fault);
+    assert(chan[1].armed && chan[1].keys[2] == 0 && chan[1].buttons == 0);
+    assert(worker.hub.armed_slot == 0);
+    drain(); /* the queued device reports are dropped: the host owns the output */
+    assert(chan[1].keys[2] == 0 && chan[1].buttons == 0 && router.armed);
+
+    /* The busy spell ends with no host ARM: the next drain resends the held
+     * state, then delivers the queued loss. Nothing stays pressed. */
+    setup();
+    hub_holding_slot1();
+    rpc_busy = true;
+    push(key_msg(0));
+    push(lost_msg());
+    drain();
+    assert(chan[1].keys[2] == 4 && worker.hub.armed_slot == 1);
+    rpc_busy = false;
+    drain();
+    assert(chan[1].keys[2] == 0 && chan[1].buttons == 0 && !kvm_hub_queue_pending(&queue));
+    assert(!worker.hub.dirty && worker.hub.keys[2] == 0 && worker.hub.buttons == 0);
+}
+
+/* The router's arm finds the channel already armed by an arm nobody tracks:
+ * the router output releases the slot and retries the arm exactly once, so the
+ * host ARM is not refused (a NACK ends the host session). */
+static void host_arm_recovers_a_stale_channel_arm(void)
+{
+    setup();
+    open_session();
+    assert(host_switch(1) == ACK_OK);
+    chan[1].armed = true;
+    chan[1].keys[2] = 4;
+    n_ops = 0;
+    assert(host_arm(1) == ACK_OK && router.armed && !router.fault);
+    assert(chan[1].armed && chan[1].keys[2] == 0);
+    assert(count_ops('a', 1) == 1 && count_ops('A', 1) == 1);
+    assert(find_op('a', 1) < find_op('R', 1) && find_op('R', 1) < find_op('A', 1));
+    /* A slot that cannot arm at all still fails, after one retry only. */
+    setup();
+    open_session();
+    assert(host_switch(2) == ACK_OK);
+    chan[2].fail_arm = true;
+    n_ops = 0;
+    assert(host_arm(2) == NACK(KVM_ROUTER_NOT_READY));
+    assert(count_ops('a', 2) == 2 && count_ops('A', 2) == 0);
+}
+
+/* A slot known disconnected (slot sample, DISCONNECTED event) is still
+ * abandoned without any request; a busy spell keeps later reports queued in
+ * order, so a chord typed during it still switches once the bridge answers. */
+static void disconnected_slot_still_abandons(void)
+{
+    kvm_hub_msg_t chord = key_msg(0x1f); /* Left Ctrl + Left Alt + 2 */
+    chord.input.keyboard[0] = 0x05;
+    setup();
+    hub_holding_slot1();
+    n_ops = 0;
+    chan[1].ready = false;
+    chan[1].armed = false;                   /* the link dropped */
+    kvm_hub_worker_set_live(&worker, 0x06);  /* and the slot sample says so */
+    assert(worker.hub.armed_slot == 0 && n_ops == 0);
+    push(lost_msg());
+    drain();
+    assert(n_ops == 0 && worker.hub.keys[2] == 0);
+
+    setup();
+    hub_holding_slot1();
+    n_ops = 0;
+    kvm_hub_worker_slot_lost(&worker, 1);    /* DISCONNECTED event */
+    assert(worker.hub.armed_slot == 0 && !(worker.hub.live_mask & 1u) && n_ops == 0);
+    chan[1].armed = false;                   /* it reconnects with a fresh channel */
+    kvm_hub_worker_set_live(&worker, 0x07);
+    push(key_msg(9));
+    drain();
+    assert(chan[1].armed && chan[1].keys[2] == 9 && worker.hub.armed_slot == 1);
+
+    setup();
+    hub_holding_slot1();
+    rpc_busy = true;
+    push(key_msg(0));
+    push(chord);
+    push(key_msg(0));
+    drain();
+    drain();
+    assert(queue.count == 2 && worker.hub.target == 1); /* waiting, not dropped */
+    rpc_busy = false;
+    drain();
+    assert(chan[1].keys[2] == 0 && !chan[1].armed && worker.hub.target == 2);
+    assert(!kvm_hub_queue_pending(&queue));
+}
+
 /* ---- input-device pairing beside the router and guest pairing ---- */
 static kvm_display_input_pairing_t input_pairing;
 static int central_begin_calls, central_cancel_calls, guest_begin_calls;
@@ -961,6 +1078,9 @@ int main(void)
     select_retries_on_later_input();
     switch_failed_is_counted_and_retried();
     slot_lost_and_emergency();
+    busy_bridge_keeps_hub_arm_and_host_arm_succeeds();
+    host_arm_recovers_a_stale_channel_arm();
+    disconnected_slot_still_abandons();
     central_backoff_is_bounded();
     input_pairing_allowed_with_unarmed_session();
     guest_pairing_refused_while_input_window_open();

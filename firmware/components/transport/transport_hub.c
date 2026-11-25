@@ -229,16 +229,22 @@ static void hub_disconnect(void *context, uint8_t slot)
     if (w->output.disconnect) w->output.disconnect(w->context, slot);
 }
 
-/* Releases whatever the hub holds no matter what: yield (all-up, release); if a
- * ready slot refuses, release its channel directly (disarm and all-up), and
- * disconnect it when even that is uncertain. The hub ends with nothing armed. */
-static void hub_force_release(kvm_hub_worker_t *w, bool router_armed)
+/* Ends the hub's arm for certain: release its channel directly (disarm and
+ * all-up) and disconnect the slot when even that is not confirmed. Either way
+ * the channel is no longer armed, so the hub may forget the arm. */
+static void hub_reset_slot(kvm_hub_worker_t *w)
 {
-    uint8_t slot;
-    if (kvm_input_hub_yield(&w->hub, router_armed)) return;
-    slot = w->hub.armed_slot;
+    uint8_t slot = w->hub.armed_slot;
     if (!hub_release(w, slot)) hub_disconnect(w, slot);
     hub_abandon(w);
+}
+
+/* Releases whatever the hub holds no matter what: yield (all-up, release); if
+ * that is not confirmed, reset the slot. The hub ends with nothing armed. */
+static void hub_force_release(kvm_hub_worker_t *w, bool router_armed)
+{
+    if (kvm_input_hub_yield(&w->hub, router_armed)) return;
+    hub_reset_slot(w);
 }
 
 void kvm_hub_worker_init(kvm_hub_worker_t *w, kvm_router_t *router, kvm_router_output_t output,
@@ -279,12 +285,17 @@ static bool shim_release(void *context, uint8_t slot)
  * stale or replayed ARM never gets here and never disturbs the hub. The hub
  * must not refuse the host (a NACK ends the host session), so a failed yield
  * falls back to a forced release and the arm proceeds; if the slot is lost in
- * the process the router reports its usual NOT_READY for that slot. */
+ * the process the router reports its usual NOT_READY for that slot. An arm
+ * the channel refuses may be a stale arm nobody tracks (an armed channel
+ * refuses a second arm): release the slot (all-up, disarm) and retry once. */
 static bool shim_arm(void *context, uint8_t slot)
 {
     kvm_hub_worker_t *w = context;
     if (w->hub.armed_slot != 0) hub_force_release(w, false);
-    return w->output.arm && w->output.arm(w->context, slot);
+    if (!w->output.arm) return false;
+    if (w->output.arm(w->context, slot)) return true;
+    if (w->output.release) (void)w->output.release(w->context, slot);
+    return w->output.arm(w->context, slot);
 }
 
 static bool shim_send(void *context, uint8_t slot, const kvm_router_input_t *input)
@@ -319,16 +330,24 @@ void kvm_hub_worker_message(kvm_hub_worker_t *w, const kvm_hub_msg_t *msg)
     w->last_result = kvm_input_hub_input(&w->hub, &msg->input, armed);
     if (w->last_result == KVM_HUB_SWITCH_FAILED) w->switch_failures++;
     if (w->last_result == KVM_HUB_DROPPED_NOT_READY && w->hub.armed_slot != 0 &&
-        w->hub.armed_slot == w->hub.target && hub_ready(w, w->hub.target)) {
-        /* A send failed on a ready slot the hub holds: its channel was disarmed
-         * underneath it (guest suspend) or is failing. Release the channel (all-up,
-         * disarm) and forget the arm so the next report re-arms cleanly. */
-        (void)hub_release(w, w->hub.armed_slot);
-        hub_abandon(w);
-    }
+        w->hub.armed_slot == w->hub.target && hub_ready(w, w->hub.target))
+        hub_reset_slot(w); /* a ready slot refused the send */
     /* A keyboard chord is newer than a pending touch selection. */
     if (w->last_result == KVM_HUB_TARGET_CHANGED || w->last_result == KVM_HUB_SWITCH_FAILED)
         w->select_pending = false;
+}
+
+/* Resends what a refused or not-ready request left behind (the hub is dirty).
+ * False only while the armed slot is live but not answering (bridge busy):
+ * the drain then waits, keeping later reports queued and in order. A ready
+ * slot that refuses the resend is reset instead, so it never blocks. */
+static bool hub_flush(kvm_hub_worker_t *w, bool armed)
+{
+    if (kvm_input_hub_flush(&w->hub, armed)) return true;
+    if (!w->request_failed || w->hub.armed_slot == 0) return false;
+    hub_reset_slot(w);
+    w->request_failed = false;
+    return true;
 }
 
 void kvm_hub_worker_drain(kvm_hub_worker_t *w, kvm_hub_queue_t *q)
@@ -336,12 +355,18 @@ void kvm_hub_worker_drain(kvm_hub_worker_t *w, kvm_hub_queue_t *q)
     kvm_hub_msg_t msg;
     unsigned count = KVM_HUB_QUEUE_DEPTH;
     uint64_t start = w->now ? w->now(w->now_context) : 0;
-    if (w->router->armed) hub_abandon(w); /* the host owns the output this iteration */
+    bool armed = w->router->armed;
+    if (armed) hub_abandon(w); /* the host owns the output this iteration */
     w->requests = 0;
     w->request_failed = false;
+    if (!hub_flush(w, armed)) return;
+    if (w->select_pending && kvm_input_hub_set_target(&w->hub, w->select_target, armed))
+        w->select_pending = false;
     while (count-- && kvm_hub_queue_pop(q, &msg)) {
         kvm_hub_worker_message(w, &msg);
-        if (w->request_failed) break; /* the host loop is failing: retry next iteration */
+        /* The host loop is failing, or the armed slot stopped answering (dirty):
+           keep the rest queued, in order, for the next iteration's flush. */
+        if (w->request_failed || w->hub.dirty) break;
         if (w->now) {
             uint64_t now = w->now(w->now_context);
             if (now < start || now - start >= KVM_HUB_DRAIN_BUDGET_MS) break;
@@ -373,13 +398,19 @@ bool kvm_hub_worker_select(kvm_hub_worker_t *w, uint8_t target)
 
 void kvm_hub_worker_slot_lost(kvm_hub_worker_t *w, uint8_t slot)
 {
-    if (w->hub.armed_slot == 0) return;
-    if (slot == w->hub.armed_slot) {
-        hub_abandon(w); /* the link is gone, and its channel arm with it */
-    } else if (slot == 0) {
+    if (slot >= 1 && slot <= KVM_INPUT_HUB_MAX_TARGET) {
+        /* Known disconnected until a slot sample or a hub arm says otherwise; on
+         * the hub's own slot the arm went with the link and is forgotten. */
+        kvm_input_hub_set_live(&w->hub, (uint8_t)(w->hub.live_mask & ~(1u << (slot - 1u))));
+    } else if (slot == 0 && w->hub.armed_slot != 0) {
         /* Unknown slot: release ours properly rather than assume it dropped. */
         hub_force_release(w, w->router->armed);
     }
+}
+
+void kvm_hub_worker_set_live(kvm_hub_worker_t *w, uint8_t live_mask)
+{
+    kvm_input_hub_set_live(&w->hub, live_mask);
 }
 
 void kvm_hub_worker_release(kvm_hub_worker_t *w)

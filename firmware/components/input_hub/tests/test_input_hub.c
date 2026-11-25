@@ -292,9 +292,11 @@ static void key_held_while_target_goes_not_ready_is_still_released(void)
     assert(kvm_input_hub_input(&hub, &in, false) == KVM_HUB_DROPPED_NOT_READY);
     f.send_ok = false;
     f.count = 0;
-    /* The dead slot cannot hold keys: state is abandoned without emitting. */
+    /* Known disconnected (slot sample or DISCONNECTED): the slot cannot hold keys,
+     * so its state is abandoned without emitting. */
+    kvm_input_hub_set_live(&hub, (uint8_t)(KVM_INPUT_HUB_ALL_LIVE & ~(1u << 1)));
     kvm_input_hub_device_lost(&hub, false);
-    assert(f.count == 0 && hub.keys[2] == 0);
+    assert(f.count == 0 && hub.keys[2] == 0 && hub.armed_slot == 0);
 }
 
 static void consumer_held_is_zeroed_on_target_change_and_device_lost(void)
@@ -530,6 +532,10 @@ static void set_target_abandons_dead_old_target(void)
     f.ready = false;
     f.send_ok = false;
     f.release_ok = false;
+    /* Not ready alone keeps the switch waiting (the slot may be busy, still armed). */
+    assert(!kvm_input_hub_set_target(&hub, 2, false) && hub.target == 1 && hub.armed_slot == 1);
+    /* Known disconnected: the dead link cannot hold keys, the switch goes through. */
+    hub.live_mask = (uint8_t)(KVM_INPUT_HUB_ALL_LIVE & ~1u); /* gone, arm not yet abandoned */
     assert(kvm_input_hub_set_target(&hub, 2, false));
     assert(hub.target == 2 && hub.armed_slot == 0 && hub.keys[2] == 0);
 }
@@ -546,6 +552,7 @@ static void chord_abandons_dead_old_target(void)
     f.ready = false;
     f.send_ok = false;
     f.release_ok = false;
+    hub.live_mask = (uint8_t)(KVM_INPUT_HUB_ALL_LIVE & ~1u); /* slot 1 known disconnected */
     assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED);
     assert(hub.target == 0 && hub.armed_slot == 0 && hub.keys[0] == 0);
 }
@@ -566,7 +573,102 @@ static void yield_returns_whether_everything_was_released(void)
     kvm_input_hub_input(&hub, &in, false);
     f.ready = false;
     f.send_ok = false;
+    assert(!kvm_input_hub_yield(&hub, false) && hub.armed_slot == 1 && hub.keys[2] == 4);
+    hub.live_mask = (uint8_t)(KVM_INPUT_HUB_ALL_LIVE & ~1u); /* slot 1 known disconnected */
     assert(kvm_input_hub_yield(&hub, false) && hub.armed_slot == 0 && hub.keys[2] == 0);
+}
+
+/* ready() false while the slot is still connected: the request bridge is busy
+ * with an earlier timed-out request. The channel may still be armed and holding
+ * keys, so the arm and held state stay, the hub is dirty, and flush resends the
+ * wanted state once the slot answers again. */
+static void busy_slot_keeps_arm_and_flush_resends(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = key(4);
+    kvm_router_input_t up = key(0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.ready = false;
+    f.count = 0;
+    assert(kvm_input_hub_input(&hub, &up, false) == KVM_HUB_DROPPED_NOT_READY);
+    assert(hub.dirty && hub.armed_slot == 1 && hub.keys[2] == 4);
+    kvm_input_hub_device_lost(&hub, false);
+    assert(!kvm_input_hub_yield(&hub, false));
+    assert(!kvm_input_hub_set_target(&hub, 2, false) && hub.target == 1);
+    assert(f.count == 0 && hub.armed_slot == 1 && hub.keys[2] == 4);
+    assert(!kvm_input_hub_flush(&hub, false) && hub.dirty);
+    f.ready = true;
+    assert(kvm_input_hub_flush(&hub, false) && !hub.dirty);
+    assert(f.count == 1 && is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && f.calls[0].slot == 1);
+    assert(hub.keys[2] == 0 && hub.armed_slot == 1);
+    assert(kvm_input_hub_flush(&hub, false) && f.count == 1); /* clean: nothing more */
+}
+
+/* A dropped key-up alone (no loss) is resent with the device's current state;
+ * a dropped press is delivered late rather than lost. */
+static void dropped_reports_are_resent_as_current_state(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = key(4);
+    kvm_router_input_t other = key(5);
+    kvm_router_input_t drag;
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.send_ok = false;
+    assert(kvm_input_hub_input(&hub, &other, false) == KVM_HUB_DROPPED_NOT_READY);
+    memset(&drag, 0, sizeof drag);
+    drag.kind = KVM_ROUTER_POINTER;
+    drag.buttons = 2;
+    assert(kvm_input_hub_input(&hub, &drag, false) == KVM_HUB_DROPPED_NOT_READY);
+    assert(!kvm_input_hub_flush(&hub, false) && hub.dirty); /* the slot still refuses */
+    f.send_ok = true;
+    f.count = 0;
+    assert(kvm_input_hub_flush(&hub, false));
+    assert(f.count == 2 && f.calls[0].input.kind == KVM_ROUTER_KEYBOARD &&
+           f.calls[0].input.keyboard[2] == 5);
+    assert(f.calls[1].input.kind == KVM_ROUTER_POINTER && f.calls[1].input.buttons == 2 &&
+           f.calls[1].input.dx == 0);
+    assert(hub.keys[2] == 5 && hub.buttons == 2);
+    /* Router armed: a dirty hub abandons without emitting. */
+    f.send_ok = false;
+    kvm_input_hub_input(&hub, &in, false);
+    f.count = 0;
+    assert(kvm_input_hub_flush(&hub, true) && f.count == 0 && hub.armed_slot == 0 && !hub.dirty);
+}
+
+/* Only a slot known disconnected is abandoned without a confirmed release; a
+ * successful arm marks the slot live again. */
+static void known_disconnected_slot_is_abandoned(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = key(4);
+    setup(&hub, &f);
+    assert(hub.live_mask == KVM_INPUT_HUB_ALL_LIVE);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.count = 0;
+    kvm_input_hub_set_live(&hub, 0x05); /* slot 2 gone: slot 1 untouched */
+    kvm_input_hub_set_live(&hub, 0x07);
+    assert(hub.armed_slot == 1 && f.count == 0);
+    kvm_input_hub_set_live(&hub, 0x06);
+    assert(f.count == 0 && hub.armed_slot == 0 && hub.keys[2] == 0 && !hub.dirty);
+    assert(kvm_input_hub_flush(&hub, false));
+    /* The guest comes back: the hub re-arms it and knows it is live again. */
+    assert(kvm_input_hub_input(&hub, &in, false) == KVM_HUB_FORWARDED);
+    assert(hub.armed_slot == 1 && (hub.live_mask & 1u));
+    /* A dirty hub on a slot found gone abandons on flush. */
+    f.ready = false;
+    kvm_input_hub_input(&hub, &in, false);
+    assert(hub.dirty);
+    hub.live_mask = 0x06;
+    f.count = 0;
+    assert(kvm_input_hub_flush(&hub, false) && f.count == 0 && hub.armed_slot == 0 && !hub.dirty);
 }
 
 static void retries_never_emit_while_router_armed(void)
@@ -831,6 +933,9 @@ int main(void)
     set_target_abandons_dead_old_target();
     chord_abandons_dead_old_target();
     yield_returns_whether_everything_was_released();
+    busy_slot_keeps_arm_and_flush_resends();
+    dropped_reports_are_resent_as_current_state();
+    known_disconnected_slot_is_abandoned();
     retries_never_emit_while_router_armed();
     forwards_to_ready_guest_after_arm();
     drops_when_router_armed();

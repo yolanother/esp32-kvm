@@ -100,14 +100,21 @@ void kvm_hub_worker_set_clock(kvm_hub_worker_t *worker, kvm_hub_clock_fn now, vo
  * kvm_router_arm has passed every check and is about to arm: the hub yields
  * there, and if that fails its channel is released directly (disconnected when
  * even that is uncertain) and abandoned, so the router's arm always proceeds.
+ * An arm the channel refuses (it may still be armed by an arm nobody tracks)
+ * is retried exactly once after releasing that slot, so a stale channel arm
+ * never turns a host ARM into NOT_READY, which ends the host session.
  * Releasing or disconnecting the hub's slot makes the hub forget its arm. */
 kvm_router_output_t kvm_hub_worker_router_output(void);
 /** Applies one message: INPUT through the hub, LOST as a loss of that device
  * kind (kvm_input_hub_device_lost_kind). */
 void kvm_hub_worker_message(kvm_hub_worker_t *worker, const kvm_hub_msg_t *msg);
-/** Drains in delivery order and stops at whichever comes first: the queue is
- * empty, KVM_HUB_QUEUE_DEPTH messages, KVM_HUB_DRAIN_BUDGET_MS elapsed, or a
- * failed hub output request. Undelivered messages stay queued. */
+/** First resends what a dropped or refused request left behind (a dirty hub,
+ * kvm_input_hub_flush); while the armed slot is live but not answering it
+ * returns at once, leaving every message queued and in order. Then retries a
+ * pending selection and drains in delivery order, stopping at whichever comes
+ * first: the queue is empty, KVM_HUB_QUEUE_DEPTH messages,
+ * KVM_HUB_DRAIN_BUDGET_MS elapsed, or a failed hub output request.
+ * Undelivered messages stay queued. */
 void kvm_hub_worker_drain(kvm_hub_worker_t *worker, kvm_hub_queue_t *queue);
 /** One worker iteration after the USB read: host bytes first (feed), then the
  * router tick (lease, queued host input), then the bounded device drain. A
@@ -118,9 +125,16 @@ void kvm_hub_worker_iteration(kvm_hub_worker_t *worker, kvm_hub_queue_t *queue,
 /** Touch or PLUS selection. False when a host session owns selection; true when
  * the hub took the target or will retry it on the next device report. */
 bool kvm_hub_worker_select(kvm_hub_worker_t *worker, uint8_t target);
-/** A guest slot dropped: forgets the hub arm on that slot. 0 (slot unknown)
- * releases the hub's arm with all-up instead of assuming its link dropped. */
+/** A guest slot dropped (DISCONNECTED event): marks it known disconnected and
+ * forgets the hub arm on that slot. 0 (slot unknown) releases the hub's arm
+ * with all-up instead of assuming its link dropped. */
 void kvm_hub_worker_slot_lost(kvm_hub_worker_t *worker, uint8_t slot);
+/** A valid slot sample: bit (slot - 1) set for each slot whose HID host reports
+ * it ready (connected, encrypted, subscribed). A cleared bit is the only thing
+ * besides slot_lost that lets the hub forget an arm without a confirmed release
+ * (kvm_input_hub_set_live); a false ready() alone (the request bridge can be
+ * busy) never does. Call only with a sample that succeeded. */
+void kvm_hub_worker_set_live(kvm_hub_worker_t *worker, uint8_t live_mask);
 /** Physical emergency release: all-up and release the hub's arm. */
 void kvm_hub_worker_release(kvm_hub_worker_t *worker);
 /** Delay before central start attempt failures + 1, doubling and capped. */

@@ -536,11 +536,18 @@ static void usb_worker(void *context)
                 paired_guests = retained_count;
             memset(retained, 0, sizeof(retained));
             memset(slots, 0, sizeof(slots));
-            if (valid) for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot) {
-                memcpy(slots[slot].token, sampled[slot].token, 16);
-                slots[slot].ready = sampled[slot].ready;
-                slots[slot].subscribed = sampled[slot].subscribed;
-                slots[slot].notify_tx_successes = sampled[slot].notify_tx_successes;
+            if (valid) {
+                uint8_t live = 0;
+                for (uint8_t slot = 0; slot < KVM_ROUTER_MAX_SLOTS; ++slot) {
+                    memcpy(slots[slot].token, sampled[slot].token, 16);
+                    slots[slot].ready = sampled[slot].ready;
+                    slots[slot].subscribed = sampled[slot].subscribed;
+                    slots[slot].notify_tx_successes = sampled[slot].notify_tx_successes;
+                    if (sampled[slot].ready && sampled[slot].subscribed) live |= (uint8_t)(1u << slot);
+                }
+                /* Only a successful sample may tell the hub a slot is gone; a
+                   failed one (bridge busy) says nothing about the channels. */
+                kvm_hub_worker_set_live(&hub_worker, live);
             }
             memset(sampled, 0, sizeof(sampled));
             guest_ready = false;

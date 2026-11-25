@@ -22,8 +22,14 @@ typedef enum {
     KVM_HUB_SWITCH_FAILED
 } kvm_hub_result_t;
 
+/** All guest slots: the live mask a hub starts with (nothing is known disconnected). */
+#define KVM_INPUT_HUB_ALL_LIVE 0x07u
+
 /** Hub state; armed_slot is zero while the hub holds no output arm. keys, buttons and
- * consumer are the last forwarded held state and stay set until an all-up is delivered. */
+ * consumer are the last forwarded held state and stay set until an all-up is delivered.
+ * want_* is the state the armed guest should hold (the device's latest state, zero after a
+ * loss or a swallowed chord); dirty means a send was dropped or refused and want_* has not
+ * reached the armed guest yet (kvm_input_hub_flush resends it). */
 typedef struct {
     kvm_router_output_t output;
     void *context;
@@ -36,20 +42,40 @@ typedef struct {
     bool chord_latched;  /* swallow keyboard reports until every non-modifier key is up */
     bool switch_pending; /* a chord switch or release is awaiting retry */
     uint8_t pending_target;
+    /* Bit (slot - 1) clear: the slot is known disconnected (or known not ready on the HID
+     * host, where no channel can stay armed). Only then is an arm forgotten unconfirmed. */
+    uint8_t live_mask;
+    bool dirty;
+    uint8_t want_keys[8];
+    uint8_t want_buttons;
+    uint16_t want_consumer;
 } kvm_input_hub_t;
 
-/** Initializes the hub on target zero with nothing armed or held. */
+/** Initializes the hub on target zero with nothing armed or held and every slot live. */
 void kvm_input_hub_init(kvm_input_hub_t *hub, kvm_router_output_t output, void *context);
 /** Re-arm policy: a retry never arms. All-up is only ever sent to a slot the hub itself holds
  * armed (held state implies an arm). Whenever router_armed is true, or the router arms, the
  * hub abandons its held state and arm without emitting, so no retry can touch a slot the host
- * route owns. A slot the output reports not ready is dead: it cannot hold keys down, so its
- * held state and arm are abandoned instead of retried; a failure on a ready slot keeps both.
+ * route owns. A false ready() alone is NOT proof the slot is gone: the request bridge also
+ * answers false while an earlier timed-out request still holds the host loop, and then the
+ * channel is still armed and holding keys. So the hub forgets an arm or held state without a
+ * confirmed release only for a slot known disconnected (kvm_input_hub_set_live); a not-ready
+ * or failing live slot keeps both, marks the hub dirty and is retried.
  *
  * Selects target 0 to 3, sending all-up and releasing the old target first. Returns false
- * and keeps the old target only when the target is invalid or the all-up or release failed
- * on a ready old target (retry later). A not-ready old target never blocks the switch. */
+ * and keeps the old target when the target is invalid or the all-up or release did not go
+ * through on a live old target (retry later). A known-disconnected old target never blocks
+ * the switch. */
 bool kvm_input_hub_set_target(kvm_input_hub_t *hub, uint8_t target, bool router_armed);
+/** Records which guest slots may still hold an arm (bit slot - 1 set). Clearing the armed
+ * slot's bit (link dropped, or the HID host reports it not ready) abandons its arm and held
+ * state without emitting: a disconnected or unready channel is not armed. A successful hub
+ * arm marks its slot live again. */
+void kvm_input_hub_set_live(kvm_input_hub_t *hub, uint8_t live_mask);
+/** Resends the wanted held state (want_*) to the armed slot after a drop or refusal (dirty).
+ * Returns true when nothing is left to resend. With router_armed it abandons local state; a
+ * known-disconnected slot is abandoned; a live slot that is not ready keeps it dirty. */
+bool kvm_input_hub_flush(kvm_input_hub_t *hub, bool router_armed);
 /** Delivers one report; arms the target lazily. While router_armed it drops the report,
  * clears local hub state and emits nothing. Keyboard reports with exactly Left Ctrl + Left Alt
  * (modifier byte 0x05) and a single newly pressed key select a target: 1 to 3 guests, 0 This
