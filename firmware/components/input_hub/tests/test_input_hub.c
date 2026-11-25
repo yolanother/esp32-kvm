@@ -97,7 +97,7 @@ static void forwards_to_ready_guest_after_arm(void)
     fake_t f;
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
-    assert(kvm_input_hub_set_target(&hub, 2));
+    assert(kvm_input_hub_set_target(&hub, 2, false));
     assert(f.count == 0);
     assert(kvm_input_hub_input(&hub, &in, false) == KVM_HUB_FORWARDED);
     assert(f.count == 2);
@@ -114,7 +114,7 @@ static void drops_when_router_armed(void)
     fake_t f;
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 1);
+    kvm_input_hub_set_target(&hub, 1, false);
     assert(kvm_input_hub_input(&hub, &in, false) == KVM_HUB_FORWARDED);
     f.count = 0;
     assert(kvm_input_hub_input(&hub, &in, true) == KVM_HUB_DROPPED_HOST_ARMED);
@@ -131,7 +131,7 @@ static void drops_when_target_not_ready(void)
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
     f.ready = false;
-    kvm_input_hub_set_target(&hub, 3);
+    kvm_input_hub_set_target(&hub, 3, false);
     assert(kvm_input_hub_input(&hub, &in, false) == KVM_HUB_DROPPED_NOT_READY);
     assert(f.count == 0 && hub.target == 3 && hub.armed_slot == 0);
 }
@@ -142,10 +142,10 @@ static void set_target_sends_all_up_then_arms_new(void)
     fake_t f;
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 1);
+    kvm_input_hub_set_target(&hub, 1, false);
     kvm_input_hub_input(&hub, &in, false);
     f.count = 0;
-    assert(kvm_input_hub_set_target(&hub, 2));
+    assert(kvm_input_hub_set_target(&hub, 2, false));
     assert(f.count == 3);
     assert(is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && f.calls[0].slot == 1);
     assert(is_all_up(&f.calls[1], KVM_ROUTER_POINTER) && f.calls[1].slot == 1);
@@ -163,7 +163,7 @@ static void yield_releases_and_clears_arm(void)
     fake_t f;
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 1);
+    kvm_input_hub_set_target(&hub, 1, false);
     kvm_input_hub_input(&hub, &in, false);
     f.count = 0;
     kvm_input_hub_yield(&hub);
@@ -181,24 +181,24 @@ static void device_lost_sends_all_up_keyboard_and_zero_mouse(void)
     kvm_router_input_t in = key(4);
     kvm_router_input_t drag;
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 1);
+    kvm_input_hub_set_target(&hub, 1, false);
     kvm_input_hub_input(&hub, &in, false);
     memset(&drag, 0, sizeof drag);
     drag.kind = KVM_ROUTER_POINTER;
     drag.buttons = 1;
     kvm_input_hub_input(&hub, &drag, false);
     f.count = 0;
-    kvm_input_hub_device_lost(&hub);
+    kvm_input_hub_device_lost(&hub, false);
     assert(f.count == 2);
     assert(is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && f.calls[0].slot == 1);
     assert(is_all_up(&f.calls[1], KVM_ROUTER_POINTER) && f.calls[1].slot == 1);
     assert(hub.target == 1 && hub.buttons == 0 && hub.keys[2] == 0);
     /* Nothing is held now, so a second loss releases the arm. */
     f.count = 0;
-    kvm_input_hub_device_lost(&hub);
+    kvm_input_hub_device_lost(&hub, false);
     assert(f.count == 3 && f.calls[2].kind == CALL_RELEASE && hub.armed_slot == 0);
     f.count = 0;
-    kvm_input_hub_device_lost(&hub);
+    kvm_input_hub_device_lost(&hub, false);
     assert(f.count == 0);
 }
 
@@ -210,9 +210,9 @@ static void target_zero_is_noop_sink(void)
     setup(&hub, &f);
     assert(hub.target == 0);
     assert(kvm_input_hub_input(&hub, &in, false) == KVM_HUB_FORWARDED);
-    kvm_input_hub_device_lost(&hub);
+    kvm_input_hub_device_lost(&hub, false);
     kvm_input_hub_yield(&hub);
-    assert(kvm_input_hub_set_target(&hub, 0));
+    assert(kvm_input_hub_set_target(&hub, 0, false));
     assert(f.count == 0);
 }
 
@@ -221,9 +221,9 @@ static void invalid_target_rejected(void)
     kvm_input_hub_t hub;
     fake_t f;
     setup(&hub, &f);
-    assert(kvm_input_hub_set_target(&hub, 1));
-    assert(!kvm_input_hub_set_target(&hub, 4));
-    assert(!kvm_input_hub_set_target(&hub, 255));
+    assert(kvm_input_hub_set_target(&hub, 1, false));
+    assert(!kvm_input_hub_set_target(&hub, 4, false));
+    assert(!kvm_input_hub_set_target(&hub, 255, false));
     assert(hub.target == 1 && f.count == 0);
 }
 
@@ -233,7 +233,7 @@ static void yield_before_arm_sends_all_up_then_releases_previous_target(void)
     fake_t f;
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 3);
+    kvm_input_hub_set_target(&hub, 3, false);
     kvm_input_hub_input(&hub, &in, false);
     f.count = 0;
     kvm_input_hub_yield(&hub); /* the caller does this before the router arms */
@@ -250,19 +250,19 @@ static void failed_all_up_keeps_held_state_and_device_lost_retries(void)
     fake_t f;
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 1);
+    kvm_input_hub_set_target(&hub, 1, false);
     kvm_input_hub_input(&hub, &in, false);
     f.send_ok = false;
     f.count = 0;
-    kvm_input_hub_device_lost(&hub);
+    kvm_input_hub_device_lost(&hub, false);
     assert(hub.keys[2] == 4 && hub.armed_slot == 1);
-    assert(!kvm_input_hub_set_target(&hub, 2) && hub.target == 1 && hub.keys[2] == 4);
+    assert(!kvm_input_hub_set_target(&hub, 2, false) && hub.target == 1 && hub.keys[2] == 4);
     f.send_ok = true;
     f.count = 0;
-    kvm_input_hub_device_lost(&hub);
+    kvm_input_hub_device_lost(&hub, false);
     assert(is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && f.calls[0].slot == 1);
     assert(hub.keys[2] == 0);
-    assert(kvm_input_hub_set_target(&hub, 2) && hub.target == 2);
+    assert(kvm_input_hub_set_target(&hub, 2, false) && hub.target == 2);
 }
 
 static void failed_release_keeps_arm(void)
@@ -271,13 +271,13 @@ static void failed_release_keeps_arm(void)
     fake_t f;
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 1);
+    kvm_input_hub_set_target(&hub, 1, false);
     kvm_input_hub_input(&hub, &in, false);
     f.release_ok = false;
-    assert(!kvm_input_hub_set_target(&hub, 2));
+    assert(!kvm_input_hub_set_target(&hub, 2, false));
     assert(hub.armed_slot == 1 && hub.target == 1);
     f.release_ok = true;
-    assert(kvm_input_hub_set_target(&hub, 2) && hub.armed_slot == 0);
+    assert(kvm_input_hub_set_target(&hub, 2, false) && hub.armed_slot == 0);
 }
 
 static void key_held_while_target_goes_not_ready_is_still_released(void)
@@ -286,18 +286,15 @@ static void key_held_while_target_goes_not_ready_is_still_released(void)
     fake_t f;
     kvm_router_input_t in = key(4);
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 2);
+    kvm_input_hub_set_target(&hub, 2, false);
     kvm_input_hub_input(&hub, &in, false);
     f.ready = false;
     assert(kvm_input_hub_input(&hub, &in, false) == KVM_HUB_DROPPED_NOT_READY);
-    assert(hub.keys[2] == 4 && hub.armed_slot == 2 && hub.target == 2);
     f.send_ok = false;
-    kvm_input_hub_device_lost(&hub);
-    assert(hub.keys[2] == 4);
-    f.send_ok = true;
     f.count = 0;
-    kvm_input_hub_device_lost(&hub);
-    assert(f.count >= 1 && is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && hub.keys[2] == 0);
+    /* The dead slot cannot hold keys: state is abandoned without emitting. */
+    kvm_input_hub_device_lost(&hub, false);
+    assert(f.count == 0 && hub.keys[2] == 0);
 }
 
 static void consumer_held_is_zeroed_on_target_change_and_device_lost(void)
@@ -309,16 +306,16 @@ static void consumer_held_is_zeroed_on_target_change_and_device_lost(void)
     memset(&vol, 0, sizeof vol);
     vol.kind = KVM_ROUTER_CONSUMER;
     vol.consumer = 0xE9;
-    kvm_input_hub_set_target(&hub, 1);
+    kvm_input_hub_set_target(&hub, 1, false);
     assert(kvm_input_hub_input(&hub, &vol, false) == KVM_HUB_FORWARDED);
     assert(hub.consumer == 0xE9);
     f.count = 0;
-    assert(kvm_input_hub_set_target(&hub, 2));
+    assert(kvm_input_hub_set_target(&hub, 2, false));
     assert(f.count == 4 && is_all_up(&f.calls[2], KVM_ROUTER_CONSUMER) && f.calls[2].slot == 1);
     assert(f.calls[2].input.consumer == 0 && hub.consumer == 0);
     kvm_input_hub_input(&hub, &vol, false);
     f.count = 0;
-    kvm_input_hub_device_lost(&hub);
+    kvm_input_hub_device_lost(&hub, false);
     assert(f.count == 3 && is_all_up(&f.calls[2], KVM_ROUTER_CONSUMER) && f.calls[2].slot == 2);
     assert(hub.consumer == 0);
 }
@@ -331,21 +328,290 @@ static void guest_targets_use_matching_router_slot_and_zero_emits_nothing(void)
     uint8_t t;
     for (t = 1; t <= 3; t++) {
         setup(&hub, &f);
-        kvm_input_hub_set_target(&hub, t);
+        kvm_input_hub_set_target(&hub, t, false);
         kvm_input_hub_input(&hub, &in, false);
         assert(f.calls[0].kind == CALL_ARM && f.calls[0].slot == t);
         assert(f.calls[1].kind == CALL_SEND && f.calls[1].slot == t);
     }
     setup(&hub, &f);
-    kvm_input_hub_set_target(&hub, 0);
+    kvm_input_hub_set_target(&hub, 0, false);
     kvm_input_hub_input(&hub, &in, false);
     kvm_input_hub_input(&hub, &in, true);
-    kvm_input_hub_device_lost(&hub);
+    kvm_input_hub_device_lost(&hub, false);
     assert(f.count == 0);
+}
+
+static kvm_router_input_t kbd(uint8_t mod, uint8_t k0, uint8_t k1)
+{
+    kvm_router_input_t in;
+    memset(&in, 0, sizeof in);
+    in.kind = KVM_ROUTER_KEYBOARD;
+    in.keyboard[0] = mod;
+    in.keyboard[2] = k0;
+    in.keyboard[3] = k1;
+    return in;
+}
+
+#define LCA 0x05
+#define KEY_1 0x1E
+#define KEY_2 0x1F
+#define KEY_0 0x27
+#define KEY_ESC 0x29
+
+static void ctrl_alt_1_selects_guest_1(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t mods = kbd(LCA, 0, 0);
+    kvm_router_input_t chord = kbd(LCA, KEY_1, 0);
+    setup(&hub, &f);
+    assert(kvm_input_hub_input(&hub, &mods, false) == KVM_HUB_FORWARDED);
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED);
+    assert(hub.target == 1 && f.count == 0);
+    chord = kbd(LCA, KEY_2, 0);
+    kvm_input_hub_input(&hub, &mods, false);
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED && hub.target == 2);
+}
+
+static void ctrl_alt_0_selects_pc(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t chord = kbd(LCA, KEY_0, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 2, false);
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED);
+    assert(hub.target == 0);
+}
+
+static void ctrl_alt_esc_releases_all_to_pc(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = kbd(LCA, 0, 0);
+    kvm_router_input_t up = kbd(0, 0, 0);
+    kvm_router_input_t chord = kbd(LCA, KEY_ESC, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 3, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.count = 0;
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED);
+    assert(hub.target == 0 && hub.armed_slot == 0 && hub.keys[0] == 0);
+    assert(f.count == 3 && is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && f.calls[0].slot == 3);
+    assert(f.calls[2].kind == CALL_RELEASE);
+    /* Already on This PC: swallowed, unchanged. */
+    kvm_input_hub_input(&hub, &up, false);
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_SWALLOWED);
+}
+
+static void chord_with_extra_modifier_is_forwarded(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t up = kbd(0, 0, 0);
+    kvm_router_input_t shifted = kbd(LCA | 0x02, KEY_1, 0);
+    kvm_router_input_t gui = kbd(LCA | 0x08, KEY_1, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    assert(kvm_input_hub_input(&hub, &shifted, false) == KVM_HUB_FORWARDED);
+    assert(kvm_input_hub_input(&hub, &up, false) == KVM_HUB_FORWARDED);
+    assert(kvm_input_hub_input(&hub, &gui, false) == KVM_HUB_FORWARDED);
+    assert(hub.target == 1);
+}
+
+static void right_ctrl_alt_is_not_a_chord(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t up = kbd(0, 0, 0);
+    kvm_router_input_t rctrl = kbd(0x10 | 0x04, KEY_1, 0);
+    kvm_router_input_t lctrl_ralt = kbd(0x01 | 0x40, KEY_1, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    assert(kvm_input_hub_input(&hub, &rctrl, false) == KVM_HUB_FORWARDED);
+    assert(kvm_input_hub_input(&hub, &up, false) == KVM_HUB_FORWARDED);
+    assert(kvm_input_hub_input(&hub, &lctrl_ralt, false) == KVM_HUB_FORWARDED);
+    assert(hub.target == 1);
+}
+
+static void chord_key_not_forwarded_after_target_change(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t up = kbd(0, 0, 0);
+    kvm_router_input_t chord = kbd(LCA, KEY_1, 0);
+    kvm_router_input_t released_alt = kbd(0x01, KEY_1, 0);
+    kvm_router_input_t plain = key(4);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 2, false);
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED && hub.target == 1);
+    f.count = 0;
+    /* Still held, even with a modifier change: swallowed, nothing reaches the new target. */
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_SWALLOWED);
+    assert(kvm_input_hub_input(&hub, &released_alt, false) == KVM_HUB_SWALLOWED);
+    assert(f.count == 0);
+    /* All keys up ends the swallow; the next press is forwarded. */
+    assert(kvm_input_hub_input(&hub, &up, false) == KVM_HUB_SWALLOWED);
+    assert(kvm_input_hub_input(&hub, &plain, false) == KVM_HUB_FORWARDED);
+    assert(f.count == 2 && f.calls[1].slot == 1 && f.calls[1].input.keyboard[2] == 4);
+}
+
+static void chord_does_not_fire_when_another_key_is_held(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t up = kbd(0, 0, 0);
+    kvm_router_input_t a_held = kbd(LCA, 4, 0);
+    kvm_router_input_t both = kbd(LCA, 4, KEY_1);
+    kvm_router_input_t one_first = kbd(0, KEY_1, 0);
+    kvm_router_input_t mods_added = kbd(LCA, KEY_1, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 3, false);
+    kvm_input_hub_input(&hub, &a_held, false);
+    assert(kvm_input_hub_input(&hub, &both, false) == KVM_HUB_FORWARDED && hub.target == 3);
+    kvm_input_hub_input(&hub, &up, false);
+    /* A key held before the modifiers is not a chord press. */
+    kvm_input_hub_input(&hub, &one_first, false);
+    assert(kvm_input_hub_input(&hub, &mods_added, false) == KVM_HUB_FORWARDED && hub.target == 3);
+}
+
+static void chord_with_failed_old_target_stays_swallowed_and_retries(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = kbd(LCA, 0, 0);
+    kvm_router_input_t up = kbd(0, 0, 0);
+    kvm_router_input_t chord = kbd(LCA, KEY_2, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.send_ok = false; /* transient failure on a ready target */
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_SWALLOWED);
+    assert(hub.target == 1 && hub.keys[0] == LCA);
+    f.send_ok = true;
+    kvm_input_hub_input(&hub, &up, false);
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED && hub.target == 2);
+}
+
+static void all_up_old_target_before_switch(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = kbd(LCA, 0, 0);
+    kvm_router_input_t chord = kbd(LCA, KEY_2, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.count = 0;
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED);
+    assert(is_all_up(&f.calls[0], KVM_ROUTER_KEYBOARD) && f.calls[0].slot == 1);
+    assert(is_all_up(&f.calls[1], KVM_ROUTER_POINTER) && f.calls[1].slot == 1);
+    assert(f.calls[2].kind == CALL_RELEASE && f.calls[2].slot == 1 && f.count == 3);
+}
+
+static void chord_ignored_while_router_armed(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t chord = kbd(LCA, KEY_1, 0);
+    setup(&hub, &f);
+    assert(kvm_input_hub_input(&hub, &chord, true) == KVM_HUB_DROPPED_HOST_ARMED);
+    assert(hub.target == 0 && f.count == 0);
+}
+
+static void set_target_abandons_dead_old_target(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = key(4);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.ready = false;
+    f.send_ok = false;
+    f.release_ok = false;
+    assert(kvm_input_hub_set_target(&hub, 2, false));
+    assert(hub.target == 2 && hub.armed_slot == 0 && hub.keys[2] == 0);
+}
+
+static void chord_abandons_dead_old_target(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = kbd(LCA, 0, 0);
+    kvm_router_input_t chord = kbd(LCA, KEY_ESC, 0);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.ready = false;
+    f.send_ok = false;
+    f.release_ok = false;
+    assert(kvm_input_hub_input(&hub, &chord, false) == KVM_HUB_TARGET_CHANGED);
+    assert(hub.target == 0 && hub.armed_slot == 0 && hub.keys[0] == 0);
+}
+
+static void yield_returns_whether_everything_was_released(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = key(4);
+    setup(&hub, &f);
+    assert(kvm_input_hub_yield(&hub));
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.send_ok = false;
+    assert(!kvm_input_hub_yield(&hub) && hub.keys[2] == 4 && hub.armed_slot == 1);
+    f.send_ok = true;
+    assert(kvm_input_hub_yield(&hub) && hub.armed_slot == 0);
+    kvm_input_hub_input(&hub, &in, false);
+    f.ready = false;
+    f.send_ok = false;
+    assert(kvm_input_hub_yield(&hub) && hub.armed_slot == 0 && hub.keys[2] == 0);
+}
+
+static void retries_never_emit_while_router_armed(void)
+{
+    kvm_input_hub_t hub;
+    fake_t f;
+    kvm_router_input_t in = key(4);
+    setup(&hub, &f);
+    kvm_input_hub_set_target(&hub, 1, false);
+    kvm_input_hub_input(&hub, &in, false);
+    f.send_ok = false;
+    kvm_input_hub_device_lost(&hub, false);
+    assert(hub.keys[2] == 4);
+    f.send_ok = true;
+    f.count = 0;
+    kvm_input_hub_device_lost(&hub, true);
+    assert(f.count == 0 && hub.keys[2] == 0 && hub.armed_slot == 0);
+    kvm_input_hub_input(&hub, &in, false);
+    f.send_ok = false;
+    kvm_input_hub_device_lost(&hub, false);
+    f.send_ok = true;
+    f.count = 0;
+    assert(kvm_input_hub_set_target(&hub, 2, true) && hub.target == 2);
+    assert(f.count == 0 && hub.keys[2] == 0 && hub.armed_slot == 0);
+    /* No state and no arm: nothing is emitted on an unarmed slot. */
+    kvm_input_hub_device_lost(&hub, false);
+    assert(kvm_input_hub_yield(&hub) && f.count == 0);
 }
 
 int main(void)
 {
+    ctrl_alt_1_selects_guest_1();
+    ctrl_alt_0_selects_pc();
+    ctrl_alt_esc_releases_all_to_pc();
+    chord_with_extra_modifier_is_forwarded();
+    right_ctrl_alt_is_not_a_chord();
+    chord_key_not_forwarded_after_target_change();
+    chord_does_not_fire_when_another_key_is_held();
+    chord_with_failed_old_target_stays_swallowed_and_retries();
+    all_up_old_target_before_switch();
+    chord_ignored_while_router_armed();
+    set_target_abandons_dead_old_target();
+    chord_abandons_dead_old_target();
+    yield_returns_whether_everything_was_released();
+    retries_never_emit_while_router_armed();
     forwards_to_ready_guest_after_arm();
     drops_when_router_armed();
     drops_when_target_not_ready();
