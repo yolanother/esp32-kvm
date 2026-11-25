@@ -52,6 +52,8 @@ typedef struct {
     char input_pair_name[25];          /* the selected or paired device */
     uint32_t input_pair_window;        /* identifies the window a touch belongs to */
     uint64_t input_pair_deadline_ms;   /* hard window deadline (scan, connect, passkey) */
+    bool input_pair_stopping;          /* RESULT: the central window is not confirmed closed yet */
+    uint8_t input_pair_busy_cause;     /* RESULT BUSY: KVM_DISPLAY_INPUT_BUSY_* */
 } kvm_display_status_t;
 
 /** Input-device pairing screen states (kvm_display_status_t.input_pair_state). */
@@ -69,6 +71,12 @@ typedef enum {
 #define KVM_DISPLAY_INPUT_REASON_AUTH_FAILED 3u
 #define KVM_DISPLAY_INPUT_REASON_BUSY 4u
 #define KVM_DISPLAY_INPUT_REASON_CAPACITY 5u
+/** Display-only reason: the owner cancelled and the central has not confirmed yet. */
+#define KVM_DISPLAY_INPUT_REASON_CANCELLED 6u
+/** Why a BUSY result was shown. */
+#define KVM_DISPLAY_INPUT_BUSY_CENTRAL 0u  /* the central refused or did not answer */
+#define KVM_DISPLAY_INPUT_BUSY_HOST 1u     /* the PC app is controlling a guest (router armed) */
+#define KVM_DISPLAY_INPUT_BUSY_GUEST 2u    /* a guest pairing window is open */
 
 /** Touch actions on the input-device pairing screen. */
 typedef enum {

@@ -94,8 +94,12 @@ esp_err_t doubtech_hid_central_start(const doubtech_hid_central_config_t *config
  * guest window opened during an input window. The application must not open
  * both (guest bonding still requires an authenticated link either way). */
 esp_err_t doubtech_hid_central_pair_begin(void);
-/** Ends the window silently; a half-paired device is disconnected and its new bond removed. */
-void doubtech_hid_central_pair_cancel(void);
+/** Ends the window silently; a half-paired device is disconnected and its new bond removed.
+ * ESP_OK only when the cancel ran on the host loop. Requests run one at a time
+ * in order, so ESP_OK also means any earlier timed-out (abandoned) request has
+ * already run or been dropped. ESP_ERR_TIMEOUT or ESP_ERR_INVALID_STATE (an
+ * abandoned request still pending) mean the window may still be open: retry. */
+esp_err_t doubtech_hid_central_pair_cancel(void);
 /** Connects and pairs the scan row index. The result arrives as PAIRED then
  * CONNECTED, or PAIR_FAILED. Replacing a stored kind requires forget first. */
 esp_err_t doubtech_hid_central_pair_select(uint8_t index);

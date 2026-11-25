@@ -9,16 +9,21 @@
 
 /* ---- Input-device pairing (worker state machine + view + touch) ---- */
 static int begin_calls, select_calls, cancel_calls, last_select;
-static bool begin_ok, select_ok;
-static bool fake_begin(void *c) { (void)c; begin_calls++; return begin_ok; }
-static bool fake_select(void *c, uint8_t index) { (void)c; select_calls++; last_select = index; return select_ok; }
-static void fake_cancel(void *c) { (void)c; cancel_calls++; }
+static bool begin_ok, select_ok, cancel_ok;
+static kvm_display_input_op_t begin_fail = KVM_DISPLAY_INPUT_OP_REFUSED;
+static kvm_display_input_op_t select_fail = KVM_DISPLAY_INPUT_OP_REFUSED;
+static kvm_display_input_op_t fake_begin(void *c)
+{ (void)c; begin_calls++; return begin_ok ? KVM_DISPLAY_INPUT_OP_OK : begin_fail; }
+static kvm_display_input_op_t fake_select(void *c, uint8_t index)
+{ (void)c; select_calls++; last_select = index; return select_ok ? KVM_DISPLAY_INPUT_OP_OK : select_fail; }
+static bool fake_cancel(void *c) { (void)c; cancel_calls++; return cancel_ok; }
 
 static void input_reset(kvm_display_input_pairing_t *p)
 {
     begin_calls = select_calls = cancel_calls = 0;
     last_select = -1;
-    begin_ok = select_ok = true;
+    begin_ok = select_ok = cancel_ok = true;
+    begin_fail = select_fail = KVM_DISPLAY_INPUT_OP_REFUSED;
     kvm_display_input_pairing_init(p, (kvm_display_input_ops_t){fake_begin, fake_select, fake_cancel, NULL});
 }
 /* The worker's snapshot, the way publish_status builds it, then the view. */
@@ -91,17 +96,20 @@ static void input_pairing_tests(void)
     s.touch_available = true; s.pairing_state = KVM_DISPLAY_PAIRING_WAITING; s.pairing_deadline_ms = 9000;
     assert(!kvm_display_input_touch_action(&s, 160, 214, &a, &row)); /* guest window open */
 
-    /* Refused with a host session or an open guest window: BUSY, central untouched. */
+    /* Refused while the PC drives a guest (router armed) or a guest window is
+       open: BUSY with the cause, central untouched. */
     input_reset(&p);
     assert(!kvm_display_input_pairing_request(&p, begin_req(), 1000, true, false));
     assert(begin_calls == 0 && p.state == KVM_DISPLAY_INPUT_RESULT &&
            p.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
     input_view(&p, 1000, &s, &v);
     assert(v.screen == KVM_DISPLAY_INPUT_PAIR && strcmp(v.primary, "BUSY") == 0);
-    assert(strcmp(v.detail, "Close PC app or guest pairing") == 0);
+    assert(strcmp(v.detail, "PC is controlling a guest") == 0);
     input_reset(&p);
     assert(!kvm_display_input_pairing_request(&p, begin_req(), 1000, false, true));
     assert(begin_calls == 0 && p.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
+    input_view(&p, 1000, &s, &v);
+    assert(strcmp(v.detail, "Close guest pairing first") == 0);
     /* The result dismisses itself back to the guest view. */
     kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_RESULT_MS - 1, false);
     assert(p.state == KVM_DISPLAY_INPUT_RESULT);
@@ -295,12 +303,97 @@ static void input_pairing_tests(void)
         assert(p.state != KVM_DISPLAY_INPUT_PASSKEY);
     }
 
-    /* A host session opening mid-window ends the window: never concurrent. */
+    /* An open, unarmed host session is fine (tick's flag is router.armed);
+       the router arming mid-window ends the window: the host route wins. */
     input_reset(&p);
     assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
-    kvm_display_input_pairing_tick(&p, 2000, true);
+    kvm_display_input_pairing_tick(&p, 2000, false);
+    assert(cancel_calls == 0 && p.state == KVM_DISPLAY_INPUT_SCANNING);
+    kvm_display_input_pairing_tick(&p, 2100, true);
     assert(cancel_calls == 1 && p.state == KVM_DISPLAY_INPUT_RESULT &&
-           p.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
+           p.reason == KVM_DISPLAY_INPUT_REASON_BUSY && !p.stopping);
+    input_view(&p, 2100, &s, &v);
+    assert(strcmp(v.detail, "PC is controlling a guest") == 0);
+
+    /* A begin whose RPC timed out may still open the window later: BUSY is
+       shown, but the guest gate stays closed, cancel is retried (bounded rate)
+       and the window is only reported closed once the central confirms. */
+    input_reset(&p);
+    begin_ok = false; begin_fail = KVM_DISPLAY_INPUT_OP_UNKNOWN; cancel_ok = false;
+    assert(!kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    assert(begin_calls == 1 && cancel_calls == 1 && p.stopping);
+    input_view(&p, 1000, &s, &v);
+    assert(s.input_pair_state == KVM_DISPLAY_INPUT_RESULT && s.input_pair_stopping);
+    assert(strcmp(v.primary, "BUSY") == 0 && strcmp(v.footer, "Stopping pairing...") == 0);
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_RESULT_MS, false);
+    assert(p.state == KVM_DISPLAY_INPUT_RESULT && kvm_display_input_pairing_blocks_guest(&p));
+    assert(cancel_calls == 2); /* retried at most once per retry interval */
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_RESULT_MS + 10, false);
+    assert(cancel_calls == 2);
+    for (uint64_t t = 6000; t < 1000 + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_STOP_MARGIN_MS;
+         t += 500)
+        kvm_display_input_pairing_tick(&p, t, false);
+    assert(kvm_display_input_pairing_blocks_guest(&p) && cancel_calls > 10 && cancel_calls < 40);
+    /* The central's own window timer has surely ended it: release. */
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_STOP_MARGIN_MS,
+                                   false);
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED && !kvm_display_input_pairing_blocks_guest(&p));
+    /* A confirmed cancel ends the hold early (it ran after the abandoned begin). */
+    input_reset(&p);
+    begin_ok = false; begin_fail = KVM_DISPLAY_INPUT_OP_UNKNOWN; cancel_ok = false;
+    assert(!kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    cancel_ok = true;
+    kvm_display_input_pairing_tick(&p, 1500, false); /* before the retry interval */
+    assert(cancel_calls == 1 && p.stopping);
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_CANCEL_RETRY_MS, false);
+    assert(cancel_calls == 2 && !p.stopping && p.state == KVM_DISPLAY_INPUT_RESULT);
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_RESULT_MS, false);
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED);
+    /* A plain refusal (no timeout) needs no hold. */
+    input_reset(&p);
+    begin_ok = false;
+    assert(!kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    assert(cancel_calls == 0 && !p.stopping);
+    /* An owner cancel the central does not confirm is not reported closed. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    cancel_ok = false;
+    input_view(&p, 1500, &s, &v);
+    assert(input_touch_request(&s, 200, 10, &r) && r.action == KVM_DISPLAY_INPUT_PAIR_CANCEL);
+    assert(!kvm_display_input_pairing_request(&p, r, 1500, false, false));
+    assert(p.state == KVM_DISPLAY_INPUT_RESULT && p.stopping &&
+           kvm_display_input_pairing_blocks_guest(&p));
+    input_view(&p, 1500, &s, &v);
+    assert(strcmp(v.primary, "CANCELLED") == 0 && strcmp(v.footer, "Stopping pairing...") == 0);
+    cancel_ok = true; /* pressing close again retries at once */
+    input_view(&p, 1600, &s, &v);
+    assert(input_touch_request(&s, 200, 10, &r));
+    assert(kvm_display_input_pairing_request(&p, r, 1600, false, false));
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED && cancel_calls == 2);
+    /* A timed-out select is held the same way. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    {
+        kvm_display_input_event_t e = scan_ev(2, -50, 1, "K");
+        kvm_display_input_pairing_event(&p, &e, 1000);
+        input_view(&p, 1100, &s, &v);
+        select_ok = false; select_fail = KVM_DISPLAY_INPUT_OP_UNKNOWN; cancel_ok = false;
+        assert(kvm_display_input_request(&s, KVM_DISPLAY_INPUT_PAIR_SELECT, 0, &r));
+        assert(!kvm_display_input_pairing_request(&p, r, 1100, false, false));
+        assert(p.stopping && p.stop_deadline_ms ==
+               1100 + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_STOP_MARGIN_MS);
+    }
+    /* The hard deadline with an unconfirmed cancel holds too. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    cancel_ok = false;
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_WINDOW_MS, false);
+    assert(p.reason == KVM_DISPLAY_INPUT_REASON_TIMEOUT && p.stopping);
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_RESULT_MS, false);
+    assert(p.state == KVM_DISPLAY_INPUT_RESULT);
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_STOP_MARGIN_MS,
+                                   false);
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED);
 
     /* Cancel at any time: scanning, connecting and passkey all cancel the central. */
     input_reset(&p);
@@ -357,6 +450,22 @@ static void input_pairing_tests(void)
     assert(s.input_pair_guest_busy && strcmp(v.title, "GUEST PAIRING BUSY") == 0);
     input_view(&p, 1000 + KVM_DISPLAY_INPUT_GUEST_BUSY_MS, &s, &v);
     assert(!s.input_pair_guest_busy && strcmp(v.title, "ADD KEYBOARD/MOUSE") == 0);
+    /* On the passkey screen the hint never replaces the typing instructions. */
+    {
+        kvm_display_input_event_t e = scan_ev(1, -40, KVM_DISPLAY_INPUT_KEYBOARD, "K");
+        kvm_display_input_pairing_event(&p, &e, 2000);
+        input_view(&p, 2000, &s, &v);
+        assert(kvm_display_input_request(&s, KVM_DISPLAY_INPUT_PAIR_SELECT, 0, &r));
+        assert(kvm_display_input_pairing_request(&p, r, 2000, false, false));
+        e = ev(KVM_DISPLAY_INPUT_EVENT_PASSKEY, KVM_DISPLAY_INPUT_KEYBOARD, 42, 0);
+        kvm_display_input_pairing_event(&p, &e, 2100);
+        kvm_display_input_pairing_guest_refused(&p, 2200);
+        input_view(&p, 2200, &s, &v);
+        assert(strcmp(v.title, "TYPE ON KEYBOARD") == 0 && strcmp(v.primary, "000042") == 0);
+        assert(strcmp(v.detail, "Then press Enter") == 0 && strcmp(v.footer, "GUEST PAIRING BUSY") == 0);
+        input_view(&p, 2200 + KVM_DISPLAY_INPUT_GUEST_BUSY_MS, &s, &v);
+        assert(strcmp(v.title, "TYPE ON KEYBOARD") == 0 && strcmp(v.footer, "27s remaining") == 0);
+    }
 
     /* Recovery and update keep precedence over the input screen. */
     input_view(&p, 1000, &s, &v);

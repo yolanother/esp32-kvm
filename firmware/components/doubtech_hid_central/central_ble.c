@@ -937,7 +937,7 @@ esp_err_t doubtech_hid_central_start(const doubtech_hid_central_config_t *cfg)
 
 esp_err_t doubtech_hid_central_pair_begin(void) { return request(OP_PAIR_BEGIN, 0); }
 
-void doubtech_hid_central_pair_cancel(void) { (void)request(OP_PAIR_CANCEL, 0); }
+esp_err_t doubtech_hid_central_pair_cancel(void) { return request(OP_PAIR_CANCEL, 0); }
 
 esp_err_t doubtech_hid_central_pair_select(uint8_t index) { return request(OP_PAIR_SELECT, index); }
 

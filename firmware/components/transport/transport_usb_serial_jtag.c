@@ -12,7 +12,9 @@
  * the host bytes and the lease tick, bounded to 20 ms of device work.
  * The worker also owns the input-device pairing window: touch requests and
  * central pairing events update it, and it is never open beside a guest
- * pairing window or a host session (each refuses the other with BUSY). */
+ * pairing window (each refuses the other with BUSY) or while the host has a
+ * guest armed (BEGIN refused, an open window ended); an open but unarmed host
+ * session does not affect it. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "transport_hub.h"
@@ -142,12 +144,45 @@ static void drain_central_events(uint64_t time_ms)
 }
 
 /* Central operations for the input pairing window; worker task only. */
-static bool central_pair_begin(void *context)
-{ (void)context; return doubtech_hid_central_pair_begin() == ESP_OK; }
-static bool central_pair_select(void *context, uint8_t index)
-{ (void)context; return doubtech_hid_central_pair_select(index) == ESP_OK; }
-static void central_pair_cancel(void *context)
-{ (void)context; doubtech_hid_central_pair_cancel(); }
+/* ESP_ERR_TIMEOUT: the bounded request gave up but the host may still run it. */
+static kvm_display_input_op_t central_op(esp_err_t result)
+{
+    return result == ESP_OK ? KVM_DISPLAY_INPUT_OP_OK :
+           result == ESP_ERR_TIMEOUT ? KVM_DISPLAY_INPUT_OP_UNKNOWN : KVM_DISPLAY_INPUT_OP_REFUSED;
+}
+static kvm_display_input_op_t central_pair_begin(void *context)
+{ (void)context; return central_op(doubtech_hid_central_pair_begin()); }
+static kvm_display_input_op_t central_pair_select(void *context, uint8_t index)
+{ (void)context; return central_op(doubtech_hid_central_pair_select(index)); }
+static bool central_pair_cancel(void *context)
+{ (void)context; return doubtech_hid_central_pair_cancel() == ESP_OK; }
+
+/* A guest window the worker did not open, cancelled for the input window;
+ * the cancel RPC is retried (once a second) until it succeeds, the guest
+ * window reports its end, or the guest window's own deadline passes. */
+static bool guest_cancel_pending;
+static uint64_t guest_cancel_until_ms;
+static uint64_t guest_cancel_retry_ms;
+
+static void cancel_foreign_guest_window(uint64_t time_ms, uint64_t window_deadline_ms)
+{
+    if (doubtech_hid_request_pair_cancel()) {
+        guest_cancel_pending = false;
+        return;
+    }
+    if (!guest_cancel_pending) {
+        guest_cancel_pending = true;
+        guest_cancel_until_ms = window_deadline_ms > time_ms ? window_deadline_ms : time_ms + 60000u;
+    }
+    guest_cancel_retry_ms = time_ms + KVM_DISPLAY_INPUT_CANCEL_RETRY_MS;
+}
+
+static void poll_foreign_guest_cancel(uint64_t time_ms)
+{
+    if (!guest_cancel_pending) return;
+    if (time_ms >= guest_cancel_until_ms) guest_cancel_pending = false;
+    else if (time_ms >= guest_cancel_retry_ms) cancel_foreign_guest_window(time_ms, guest_cancel_until_ms);
+}
 
 /* The guest window as the worker knows it (OPENED events and its own begins).
  * doubtech_hid_pairing_active() itself is checked by the central on the
@@ -168,7 +203,7 @@ static void drain_input_touch(uint64_t time_ms)
     kvm_display_input_request_t request;
     while (input_touch_queue && xQueueReceive(input_touch_queue, &request, 0) == pdTRUE)
         (void)kvm_display_input_pairing_request(&input_pairing, request, time_ms,
-                                                router.session_open, guest_pairing_open());
+                                                router.armed, guest_pairing_open());
 }
 
 static uint8_t visible_ready_mask(const kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS])
@@ -260,15 +295,17 @@ static bool drain_pairing_events(void)
             kvm_display_input_pairing_blocks_guest(&input_pairing)) {
             /* A guest window the worker did not open (a guest starting
                pairing on its own) never runs beside the input window; its
-               CLOSED event follows the cancel. */
-            (void)doubtech_hid_request_pair_cancel();
-            kvm_display_input_pairing_guest_refused(&input_pairing,
-                                                    (uint64_t)esp_timer_get_time() / 1000);
+               CLOSED event follows the cancel, which is retried on failure. */
+            uint64_t time_ms = (uint64_t)esp_timer_get_time() / 1000;
+            cancel_foreign_guest_window(time_ms, event.deadline_ms);
+            kvm_display_input_pairing_guest_refused(&input_pairing, time_ms);
         } else if (event.type == DOUBTECH_HID_PAIRING_OPENED) {
             if (display_pairing.state == KVM_DISPLAY_PAIRING_CLOSED)
                 kvm_display_pairing_started(&display_pairing, false,
                                             (uint64_t)esp_timer_get_time() / 1000);
         } else {
+            if (event.type != DOUBTECH_HID_PAIRING_CHALLENGE)
+                guest_cancel_pending = false; /* that guest window has ended */
             (void)kvm_display_pairing_event(&display_pairing,
                 (kvm_display_pairing_state_t)state, event.challenge_id,
                 event.number, event.deadline_ms,
@@ -435,7 +472,7 @@ static void usb_worker(void *context)
             (void)kvm_display_input_pairing_request(&input_pairing,
                 (kvm_display_input_request_t){.action = KVM_DISPLAY_INPUT_PAIR_CANCEL,
                                               .window = input_pairing.window},
-                now_ms(NULL), router.session_open, guest_pairing_open());
+                now_ms(NULL), router.armed, guest_pairing_open());
             kvm_hub_worker_release(&hub_worker);
             kvm_router_emergency_release(&router);
             kvm_transport_core_reset(&core);
@@ -489,8 +526,11 @@ static void usb_worker(void *context)
         poll_central_start(time_ms);
         if (!(button_bits & 2u)) drain_input_touch(time_ms);
         drain_central_events(time_ms);
-        /* Hard deadline and host-session exclusivity, even without central events. */
-        kvm_display_input_pairing_tick(&input_pairing, time_ms, router.session_open);
+        /* Hard deadline, unconfirmed-cancel retries and the host-armed rule,
+           even without central events. An open, unarmed session (the PC app
+           just connected) leaves the window alone; the router arming ends it. */
+        kvm_display_input_pairing_tick(&input_pairing, time_ms, router.armed);
+        poll_foreign_guest_cancel(time_ms);
         /* Device input waiting: poll USB briefly so it is not held back 20 ms. */
         TickType_t wait = pdMS_TO_TICKS(kvm_hub_queue_pending(&hub_queue) ? 2 : 20);
         if (!wait) wait = 1;

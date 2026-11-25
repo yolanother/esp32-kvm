@@ -656,9 +656,13 @@ static void slot_lost_and_emergency(void)
 /* ---- input-device pairing beside the router and guest pairing ---- */
 static kvm_display_input_pairing_t input_pairing;
 static int central_begin_calls, central_cancel_calls, guest_begin_calls;
-static bool central_begin(void *c) { (void)c; central_begin_calls++; return true; }
-static bool central_select(void *c, uint8_t index) { (void)c; (void)index; return true; }
-static void central_cancel(void *c) { (void)c; central_cancel_calls++; }
+static kvm_display_input_op_t central_begin_result;
+static bool central_cancel_ok;
+static kvm_display_input_op_t central_begin(void *c)
+{ (void)c; central_begin_calls++; return central_begin_result; }
+static kvm_display_input_op_t central_select(void *c, uint8_t index)
+{ (void)c; (void)index; return KVM_DISPLAY_INPUT_OP_OK; }
+static bool central_cancel(void *c) { (void)c; central_cancel_calls++; return central_cancel_ok; }
 /* The worker's PC-app guest PAIR_BEGIN: refused while the input window is open. */
 static bool guest_pair_begin(void *c)
 {
@@ -680,47 +684,41 @@ static void input_setup(void)
 {
     setup();
     central_begin_calls = central_cancel_calls = guest_begin_calls = 0;
+    central_begin_result = KVM_DISPLAY_INPUT_OP_OK;
+    central_cancel_ok = true;
     kvm_display_input_pairing_init(&input_pairing,
         (kvm_display_input_ops_t){central_begin, central_select, central_cancel, NULL});
     kvm_transport_core_bind_pairing(&core,
         (kvm_transport_pairing_ops_t){.begin = guest_pair_begin}, NULL);
 }
 
-static void input_pairing_refused_with_host_session(void)
+static const kvm_display_input_request_t input_begin = {KVM_DISPLAY_INPUT_PAIR_BEGIN, 0, 0, 0};
+
+/* The owner's PC app is always connected: an open but unarmed session must
+ * not stop input pairing (the gate is router.armed, as the worker passes). */
+static void input_pairing_allowed_with_unarmed_session(void)
 {
-    const kvm_display_input_request_t begin = {KVM_DISPLAY_INPUT_PAIR_BEGIN, 0, 0, 0};
     input_setup();
     open_session();
-    assert(!kvm_display_input_pairing_request(&input_pairing, begin, now_ms,
-                                              router.session_open, false));
-    assert(central_begin_calls == 0 && input_pairing.state == KVM_DISPLAY_INPUT_RESULT &&
-           input_pairing.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
-    /* The PC app's guest pairing is refused while that BUSY result shows... */
-    assert(host_pair_begin() == NACK(KVM_ROUTER_BUSY) && guest_begin_calls == 0);
-    /* ...and allowed again once it is dismissed. */
-    /* (Only the pairing clock moves: the host lease stays fresh.) */
-    kvm_display_input_pairing_tick(&input_pairing, now_ms + KVM_DISPLAY_INPUT_RESULT_MS,
-                                   router.session_open);
-    assert(input_pairing.state == KVM_DISPLAY_INPUT_CLOSED);
-    assert(host_pair_begin() == ACK_OK && guest_begin_calls == 1);
-    /* An open guest window refuses the input window the same way. */
-    input_setup();
-    assert(!kvm_display_input_pairing_request(&input_pairing, begin, now_ms,
-                                              router.session_open, true));
-    assert(central_begin_calls == 0 && input_pairing.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
+    assert(router.session_open && !router.armed);
+    assert(kvm_display_input_pairing_request(&input_pairing, input_begin, now_ms,
+                                             router.armed, false));
+    assert(central_begin_calls == 1 && input_pairing.state == KVM_DISPLAY_INPUT_SCANNING);
+    /* The worker's tick leaves the window alone while the session stays unarmed. */
+    kvm_display_input_pairing_tick(&input_pairing, now_ms + 20, router.armed);
+    assert(central_cancel_calls == 0 && input_pairing.state == KVM_DISPLAY_INPUT_SCANNING);
+    /* Device input routing is untouched by any of it. */
+    assert(n_ops == 0 && !router.armed && worker.hub.armed_slot == 0);
 }
 
 static void guest_pairing_refused_while_input_window_open(void)
 {
-    const kvm_display_input_request_t begin = {KVM_DISPLAY_INPUT_PAIR_BEGIN, 0, 0, 0};
     input_setup();
-    assert(!router.session_open);
-    assert(kvm_display_input_pairing_request(&input_pairing, begin, now_ms,
-                                             router.session_open, false));
-    assert(central_begin_calls == 1 && input_pairing.state == KVM_DISPLAY_INPUT_SCANNING);
-    /* The app connects and asks for a guest window before the worker's next
-     * tick: the guest window is refused (BUSY), visibly on the device too. */
     open_session();
+    assert(kvm_display_input_pairing_request(&input_pairing, input_begin, now_ms,
+                                             router.armed, false));
+    /* The app asks for a guest window during the input window: BUSY, and the
+     * device shows why. */
     assert(host_pair_begin() == NACK(KVM_ROUTER_BUSY) && guest_begin_calls == 0);
     {
         kvm_display_status_t s;
@@ -728,12 +726,84 @@ static void guest_pairing_refused_while_input_window_open(void)
         kvm_display_input_pairing_status(&input_pairing, now_ms, &s);
         assert(s.input_pair_guest_busy && s.input_pair_state == KVM_DISPLAY_INPUT_SCANNING);
     }
-    /* The worker's tick sees the session and ends the input window. */
-    kvm_display_input_pairing_tick(&input_pairing, now_ms + 20, router.session_open);
+    /* Still refused while the result shows; allowed once it is dismissed.
+     * (Only the pairing clock moves: the host lease stays fresh.) */
+    kvm_display_input_pairing_tick(&input_pairing, now_ms + KVM_DISPLAY_INPUT_WINDOW_MS, router.armed);
+    assert(input_pairing.state == KVM_DISPLAY_INPUT_RESULT && central_cancel_calls == 1);
+    assert(host_pair_begin() == NACK(KVM_ROUTER_BUSY) && guest_begin_calls == 0);
+    kvm_display_input_pairing_tick(&input_pairing,
+        now_ms + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_RESULT_MS, router.armed);
+    assert(input_pairing.state == KVM_DISPLAY_INPUT_CLOSED);
+    assert(host_pair_begin() == ACK_OK && guest_begin_calls == 1);
+    /* And the other way: an open guest window refuses the input window. */
+    input_setup();
+    assert(!kvm_display_input_pairing_request(&input_pairing, input_begin, now_ms,
+                                              router.armed, true));
+    assert(central_begin_calls == 0 && input_pairing.reason == KVM_DISPLAY_INPUT_REASON_BUSY &&
+           input_pairing.busy_cause == KVM_DISPLAY_INPUT_BUSY_GUEST);
+}
+
+static void input_pairing_refused_and_ended_when_router_armed(void)
+{
+    /* Armed before BEGIN: refused with the host cause, central untouched. */
+    input_setup();
+    open_session();
+    assert(host_switch(1) == ACK_OK && host_arm(1) == ACK_OK && router.armed);
+    assert(!kvm_display_input_pairing_request(&input_pairing, input_begin, now_ms,
+                                              router.armed, false));
+    assert(central_begin_calls == 0 && input_pairing.reason == KVM_DISPLAY_INPUT_REASON_BUSY &&
+           input_pairing.busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST);
+    /* Armed mid-window: the next tick cancels the central and shows BUSY. */
+    input_setup();
+    open_session();
+    assert(kvm_display_input_pairing_request(&input_pairing, input_begin, now_ms,
+                                             router.armed, false));
+    assert(host_switch(2) == ACK_OK && host_arm(2) == ACK_OK && router.armed);
+    kvm_display_input_pairing_tick(&input_pairing, now_ms + 20, router.armed);
     assert(central_cancel_calls == 1 && input_pairing.state == KVM_DISPLAY_INPUT_RESULT &&
-           input_pairing.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
-    /* Device input routing is untouched by any of it. */
-    assert(n_ops == 0 && !router.armed && worker.hub.armed_slot == 0);
+           input_pairing.reason == KVM_DISPLAY_INPUT_REASON_BUSY &&
+           input_pairing.busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST);
+    assert(router.armed && router.slot == 2); /* the host route is untouched */
+}
+
+static void begin_rpc_timeout_holds_guest_gate(void)
+{
+    uint64_t t;
+    input_setup();
+    open_session();
+    central_begin_result = KVM_DISPLAY_INPUT_OP_UNKNOWN; /* request() hit ESP_ERR_TIMEOUT */
+    central_cancel_ok = false;                           /* the abandoned begin still holds the loop */
+    assert(!kvm_display_input_pairing_request(&input_pairing, input_begin, now_ms,
+                                              router.armed, false));
+    assert(central_begin_calls == 1 && input_pairing.stopping && central_cancel_calls == 1);
+    /* The result screen shows BUSY, but the window is not reported closed and
+     * guest pairing stays refused well past the normal 4 s result. */
+    for (t = now_ms + 500; t < now_ms + KVM_DISPLAY_INPUT_WINDOW_MS; t += 500)
+        kvm_display_input_pairing_tick(&input_pairing, t, router.armed);
+    assert(input_pairing.state == KVM_DISPLAY_INPUT_RESULT && input_pairing.stopping);
+    assert(host_pair_begin() == NACK(KVM_ROUTER_BUSY) && guest_begin_calls == 0);
+    assert(central_cancel_calls >= 25); /* retried, about once a second */
+    /* Until the central's own timer has surely ended the window. */
+    kvm_display_input_pairing_tick(&input_pairing,
+        now_ms + KVM_DISPLAY_INPUT_WINDOW_MS + KVM_DISPLAY_INPUT_STOP_MARGIN_MS, router.armed);
+    assert(input_pairing.state == KVM_DISPLAY_INPUT_CLOSED);
+    assert(host_pair_begin() == ACK_OK && guest_begin_calls == 1);
+
+    /* A cancel the central confirms (it ran after the abandoned begin) releases early. */
+    input_setup();
+    open_session();
+    central_begin_result = KVM_DISPLAY_INPUT_OP_UNKNOWN;
+    central_cancel_ok = false;
+    assert(!kvm_display_input_pairing_request(&input_pairing, input_begin, now_ms,
+                                              router.armed, false));
+    assert(host_pair_begin() == NACK(KVM_ROUTER_BUSY));
+    central_cancel_ok = true;
+    kvm_display_input_pairing_tick(&input_pairing, now_ms + KVM_DISPLAY_INPUT_CANCEL_RETRY_MS,
+                                   router.armed);
+    assert(!input_pairing.stopping && central_cancel_calls == 2);
+    kvm_display_input_pairing_tick(&input_pairing, now_ms + KVM_DISPLAY_INPUT_RESULT_MS, router.armed);
+    assert(input_pairing.state == KVM_DISPLAY_INPUT_CLOSED);
+    assert(host_pair_begin() == ACK_OK && guest_begin_calls == 1);
 }
 
 static void central_backoff_is_bounded(void)
@@ -759,8 +829,10 @@ int main(void)
     switch_failed_is_counted_and_retried();
     slot_lost_and_emergency();
     central_backoff_is_bounded();
-    input_pairing_refused_with_host_session();
+    input_pairing_allowed_with_unarmed_session();
     guest_pairing_refused_while_input_window_open();
+    input_pairing_refused_and_ended_when_router_armed();
+    begin_rpc_timeout_holds_guest_gate();
     puts("test_hub_worker: all passed");
     return 0;
 }

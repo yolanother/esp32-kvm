@@ -44,13 +44,14 @@ static const char *input_kind_text(uint8_t kind)
 static void make_input_view(const kvm_display_status_t *s, uint64_t now_ms,
                             kvm_display_view_t *v)
 {
-    static const char *const failure[6][2] = {
+    static const char *const failure[7][2] = {
         {"", ""},
         {"NOT SUPPORTED", "Device is not supported"},
         {"TIMED OUT", "No device paired in time"},
         {"PAIRING FAILED", "Retry and check the code"},
-        {"BUSY", "Close PC app or guest pairing"},
+        {"BUSY", "Pairing is busy, try again"},
         {"NO FREE SLOT", "Forget a keyboard or mouse"},
+        {"CANCELLED", "Stopping pairing"},
     };
     unsigned long long remaining = s->input_pair_deadline_ms > now_ms
         ? (unsigned long long)((s->input_pair_deadline_ms - now_ms + 999u) / 1000u) : 0u;
@@ -84,14 +85,26 @@ static void make_input_view(const kvm_display_status_t *s, uint64_t now_ms,
             snprintf(v->primary, sizeof(v->primary), "%s PAIRED", input_kind_text(s->input_pair_kind));
             COPY_TEXT(v->detail, s->input_pair_name[0] ? s->input_pair_name : "Ready to use");
         } else {
-            uint8_t reason = s->input_pair_reason <= 5u ? s->input_pair_reason
-                                                         : KVM_DISPLAY_INPUT_REASON_AUTH_FAILED;
+            uint8_t reason = s->input_pair_reason <= KVM_DISPLAY_INPUT_REASON_CANCELLED
+                                 ? s->input_pair_reason : KVM_DISPLAY_INPUT_REASON_AUTH_FAILED;
             COPY_TEXT(v->primary, failure[reason][0]);
             COPY_TEXT(v->detail, failure[reason][1]);
+            if (reason == KVM_DISPLAY_INPUT_REASON_BUSY &&
+                s->input_pair_busy_cause == KVM_DISPLAY_INPUT_BUSY_HOST)
+                COPY_TEXT(v->detail, "PC is controlling a guest");
+            else if (reason == KVM_DISPLAY_INPUT_REASON_BUSY &&
+                     s->input_pair_busy_cause == KVM_DISPLAY_INPUT_BUSY_GUEST)
+                COPY_TEXT(v->detail, "Close guest pairing first");
         }
+        /* Not reported closed until the central confirms (or its timer ran out). */
+        if (s->input_pair_stopping) COPY_TEXT(v->footer, "Stopping pairing...");
         break;
     }
-    if (s->input_pair_guest_busy) COPY_TEXT(v->title, "GUEST PAIRING BUSY");
+    if (s->input_pair_guest_busy) {
+        /* Never over the passkey instructions: there the hint takes the footer. */
+        if (s->input_pair_state == KVM_DISPLAY_INPUT_PASSKEY) COPY_TEXT(v->footer, "GUEST PAIRING BUSY");
+        else COPY_TEXT(v->title, "GUEST PAIRING BUSY");
+    }
 }
 
 void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,

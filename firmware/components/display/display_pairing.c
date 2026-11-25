@@ -119,6 +119,7 @@ static void input_result(kvm_display_input_pairing_t *p, uint8_t reason, bool re
     p->connecting = false;
     p->refused = refused;
     p->reason = reason;
+    p->busy_cause = KVM_DISPLAY_INPUT_BUSY_CENTRAL;
     p->passkey = 0;
     p->deadline_ms = now_ms + KVM_DISPLAY_INPUT_RESULT_MS;
     memset(p->scan, 0, sizeof(p->scan));
@@ -129,9 +130,36 @@ static bool input_window_open(const kvm_display_input_pairing_t *p)
     return p->state == KVM_DISPLAY_INPUT_SCANNING || p->state == KVM_DISPLAY_INPUT_PASSKEY;
 }
 
-static void input_cancel_central(kvm_display_input_pairing_t *p)
+static bool input_cancel_confirmed(kvm_display_input_pairing_t *p)
 {
-    if (p->ops.cancel) p->ops.cancel(p->ops.context);
+    return !p->ops.cancel || p->ops.cancel(p->ops.context);
+}
+
+/* Ends the central window. A cancel the central did not confirm (its RPC
+ * timed out, or an abandoned request still holds the host loop) leaves the
+ * window possibly open: hold the guest gate and retry, until a confirmed
+ * cancel or until the central's own timer has surely ended it. Requests are
+ * serialized on the host loop, so a confirmed cancel always ran after any
+ * abandoned begin or select. */
+static void input_stop(kvm_display_input_pairing_t *p, uint64_t now_ms,
+                       uint64_t window_deadline_ms)
+{
+    if (input_cancel_confirmed(p)) {
+        p->stopping = false;
+        return;
+    }
+    p->stopping = true;
+    p->stop_deadline_ms = (window_deadline_ms > now_ms ? window_deadline_ms : now_ms) +
+                          KVM_DISPLAY_INPUT_STOP_MARGIN_MS;
+    p->cancel_retry_ms = now_ms + KVM_DISPLAY_INPUT_CANCEL_RETRY_MS;
+}
+
+static void input_retry_stop(kvm_display_input_pairing_t *p, uint64_t now_ms)
+{
+    if (!p->stopping) return;
+    if (now_ms >= p->stop_deadline_ms) p->stopping = false; /* the central's timer ended it */
+    else if (input_cancel_confirmed(p)) p->stopping = false;
+    else p->cancel_retry_ms = now_ms + KVM_DISPLAY_INPUT_CANCEL_RETRY_MS;
 }
 
 void kvm_display_input_pairing_init(kvm_display_input_pairing_t *p, kvm_display_input_ops_t ops)
@@ -143,27 +171,34 @@ void kvm_display_input_pairing_init(kvm_display_input_pairing_t *p, kvm_display_
 
 bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
                                        kvm_display_input_request_t request, uint64_t now_ms,
-                                       bool host_session, bool guest_pairing)
+                                       bool host_armed, bool guest_pairing)
 {
     if (!p) return false;
     switch (request.action) {
-    case KVM_DISPLAY_INPUT_PAIR_BEGIN:
+    case KVM_DISPLAY_INPUT_PAIR_BEGIN: {
         if (p->state != KVM_DISPLAY_INPUT_CLOSED) return false;
         input_close(p);
         if (++p->window == 0) p->window = 1;
-        if (host_session || guest_pairing) {
-            /* Never concurrent with a host session or a guest window. */
+        if (host_armed || guest_pairing) {
+            /* Never while the PC drives a guest or beside a guest window. */
             input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, false, now_ms);
+            p->busy_cause = host_armed ? KVM_DISPLAY_INPUT_BUSY_HOST : KVM_DISPLAY_INPUT_BUSY_GUEST;
             return false;
         }
-        if (!p->ops.begin || !p->ops.begin(p->ops.context)) {
+        kvm_display_input_op_t op = p->ops.begin ? p->ops.begin(p->ops.context)
+                                                 : KVM_DISPLAY_INPUT_OP_REFUSED;
+        if (op != KVM_DISPLAY_INPUT_OP_OK) {
             /* The central reports its own reason (busy or capacity) as an event. */
             input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, true, now_ms);
+            /* A timed-out begin may still open the window later (sm_mitm=0). */
+            if (op == KVM_DISPLAY_INPUT_OP_UNKNOWN)
+                input_stop(p, now_ms, now_ms + KVM_DISPLAY_INPUT_WINDOW_MS);
             return false;
         }
         p->state = KVM_DISPLAY_INPUT_SCANNING;
         p->deadline_ms = now_ms + KVM_DISPLAY_INPUT_WINDOW_MS;
         return true;
+    }
     case KVM_DISPLAY_INPUT_PAIR_SELECT: {
         if (p->state != KVM_DISPLAY_INPUT_SCANNING || p->connecting ||
             request.window != p->window || request.scan_index >= KVM_DISPLAY_INPUT_SCAN_MAX)
@@ -172,9 +207,13 @@ bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
         if (!entry->used) return false;
         p->kind = entry->kind;
         copy_name(p->name, sizeof(p->name), entry->name, sizeof(entry->name));
-        if (!p->ops.select || !p->ops.select(p->ops.context, request.scan_index)) {
-            input_cancel_central(p); /* make sure the window is over */
+        kvm_display_input_op_t op = p->ops.select ? p->ops.select(p->ops.context, request.scan_index)
+                                                  : KVM_DISPLAY_INPUT_OP_REFUSED;
+        if (op != KVM_DISPLAY_INPUT_OP_OK) {
+            /* Make sure the window is over; a timed-out select may still link
+               later under a fresh central timer. */
             input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, true, now_ms);
+            input_stop(p, now_ms, now_ms + KVM_DISPLAY_INPUT_WINDOW_MS);
             return false;
         }
         p->connecting = true;
@@ -184,7 +223,14 @@ bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
     }
     case KVM_DISPLAY_INPUT_PAIR_CANCEL:
         if (p->state == KVM_DISPLAY_INPUT_CLOSED || request.window != p->window) return false;
-        if (input_window_open(p)) input_cancel_central(p);
+        if (input_window_open(p)) {
+            uint64_t window_deadline = p->deadline_ms;
+            input_result(p, KVM_DISPLAY_INPUT_REASON_CANCELLED, false, now_ms);
+            input_stop(p, now_ms, window_deadline);
+        } else if (p->stopping) {
+            input_retry_stop(p, now_ms); /* the owner asked again: retry now */
+        }
+        if (p->stopping) return false; /* not closed until the central confirms */
         input_close(p);
         return true;
     default: return false;
@@ -235,25 +281,31 @@ void kvm_display_input_pairing_event(kvm_display_input_pairing_t *p,
 }
 
 void kvm_display_input_pairing_tick(kvm_display_input_pairing_t *p, uint64_t now_ms,
-                                    bool host_session)
+                                    bool host_armed)
 {
     if (!p) return;
     if (input_window_open(p)) {
-        if (host_session) {
-            input_cancel_central(p);
+        uint64_t window_deadline = p->deadline_ms;
+        if (host_armed) {
+            /* The PC armed a guest mid-window: the host route wins. An open
+               but unarmed session leaves the window alone. */
             input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, false, now_ms);
-        } else if (now_ms >= p->deadline_ms) {
-            input_cancel_central(p);
+            p->busy_cause = KVM_DISPLAY_INPUT_BUSY_HOST;
+            input_stop(p, now_ms, window_deadline);
+        } else if (now_ms >= window_deadline) {
             input_result(p, KVM_DISPLAY_INPUT_REASON_TIMEOUT, false, now_ms);
+            input_stop(p, now_ms, window_deadline);
         }
-    } else if (p->state == KVM_DISPLAY_INPUT_RESULT && now_ms >= p->deadline_ms) {
-        input_close(p);
+    } else if (p->state == KVM_DISPLAY_INPUT_RESULT) {
+        if (p->stopping && (now_ms >= p->cancel_retry_ms || now_ms >= p->stop_deadline_ms))
+            input_retry_stop(p, now_ms);
+        if (!p->stopping && now_ms >= p->deadline_ms) input_close(p);
     }
 }
 
 bool kvm_display_input_pairing_blocks_guest(const kvm_display_input_pairing_t *p)
 {
-    return p && p->state != KVM_DISPLAY_INPUT_CLOSED;
+    return p && p->state != KVM_DISPLAY_INPUT_CLOSED; /* RESULT lasts while stopping */
 }
 
 void kvm_display_input_pairing_guest_refused(kvm_display_input_pairing_t *p, uint64_t now_ms)
@@ -283,6 +335,8 @@ void kvm_display_input_pairing_status(const kvm_display_input_pairing_t *p, uint
     copy_name(s->input_pair_name, sizeof(s->input_pair_name), p->name, sizeof(p->name));
     s->input_pair_window = p->window;
     s->input_pair_deadline_ms = input_window_open(p) ? p->deadline_ms : 0;
+    s->input_pair_stopping = p->state == KVM_DISPLAY_INPUT_RESULT && p->stopping;
+    s->input_pair_busy_cause = p->state == KVM_DISPLAY_INPUT_RESULT ? p->busy_cause : 0;
     if (p->state != KVM_DISPLAY_INPUT_SCANNING || p->connecting) return;
     /* Selection sort of the used entries: strongest first, at most four. */
     bool taken[KVM_DISPLAY_INPUT_SCAN_MAX] = {false};

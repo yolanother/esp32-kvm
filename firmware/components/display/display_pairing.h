@@ -48,6 +48,18 @@ void kvm_display_pairing_clear(kvm_display_pairing_t *pairing);
 #define KVM_DISPLAY_INPUT_GUEST_BUSY_MS 3000u
 /** Scan rows kept (DOUBTECH_HID_CENTRAL_MAX_SCAN_RESULTS); four are shown. */
 #define KVM_DISPLAY_INPUT_SCAN_MAX 8u
+/** An unconfirmed stop holds the guest gate until the central's own timer has
+ *  ended the window: its window deadline plus the central's close guard. */
+#define KVM_DISPLAY_INPUT_STOP_MARGIN_MS 5000u
+/** Interval between cancel retries while a stop is unconfirmed (each retry is
+ *  one bounded RPC, so this keeps host heartbeats served). */
+#define KVM_DISPLAY_INPUT_CANCEL_RETRY_MS 1000u
+
+/** Outcome of a central operation as the worker saw it. UNKNOWN: the request
+ *  timed out and may still run on the NimBLE host later (window possibly open). */
+typedef enum {
+    KVM_DISPLAY_INPUT_OP_OK, KVM_DISPLAY_INPUT_OP_REFUSED, KVM_DISPLAY_INPUT_OP_UNKNOWN
+} kvm_display_input_op_t;
 
 typedef enum {
     KVM_DISPLAY_INPUT_EVENT_SCAN, KVM_DISPLAY_INPUT_EVENT_PASSKEY,
@@ -65,11 +77,12 @@ typedef struct {
     uint8_t reason;
 } kvm_display_input_event_t;
 
-/** Central operations; the worker binds doubtech_hid_central_pair_*. */
+/** Central operations; the worker binds doubtech_hid_central_pair_*. cancel
+ *  returns true only when the central confirmed it ran (the window is over). */
 typedef struct {
-    bool (*begin)(void *context);
-    bool (*select)(void *context, uint8_t scan_index);
-    void (*cancel)(void *context);
+    kvm_display_input_op_t (*begin)(void *context);
+    kvm_display_input_op_t (*select)(void *context, uint8_t scan_index);
+    bool (*cancel)(void *context);
     void *context;
 } kvm_display_input_ops_t;
 
@@ -86,6 +99,10 @@ typedef struct {
     kvm_display_input_state_t state;
     bool connecting;
     bool refused;               /* RESULT from a refused begin/select: the central's reason may refine it */
+    bool stopping;              /* RESULT whose central window is not confirmed closed */
+    uint8_t busy_cause;         /* KVM_DISPLAY_INPUT_BUSY_* for a BUSY result */
+    uint64_t stop_deadline_ms;  /* the central's own timer has ended the window by then */
+    uint64_t cancel_retry_ms;
     uint32_t window;
     uint64_t deadline_ms;       /* window deadline, or the RESULT dismiss time */
     uint64_t guest_busy_until_ms;
@@ -100,20 +117,27 @@ typedef struct {
 void kvm_display_input_pairing_init(kvm_display_input_pairing_t *pairing,
                                     kvm_display_input_ops_t ops);
 /** Applies one touch request. BEGIN is refused with a BUSY result (the central
- *  untouched) while host_session or guest_pairing is true. Returns true when
- *  the request started, selected or cancelled something. */
+ *  untouched) while host_armed (the PC is driving a guest; an open, unarmed
+ *  host session is fine) or guest_pairing is true. A begin or select whose
+ *  RPC timed out, or a cancel the central did not confirm, leaves the window
+ *  "possibly open": a BUSY/failed result is shown, the guest gate stays closed
+ *  and cancel is retried until confirmed or the stop deadline. Returns true
+ *  when the request started, selected or cancelled something. */
 bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *pairing,
                                        kvm_display_input_request_t request, uint64_t now_ms,
-                                       bool host_session, bool guest_pairing);
+                                       bool host_armed, bool guest_pairing);
 /** Applies one central event; events outside a matching state are ignored. */
 void kvm_display_input_pairing_event(kvm_display_input_pairing_t *pairing,
                                      const kvm_display_input_event_t *event, uint64_t now_ms);
 /** Enforces the hard deadline and exclusivity: an open window past its
- *  deadline, or with a host session now open, is cancelled on the central and
- *  shown as TIMED OUT / BUSY; a result past its time closes. */
+ *  deadline, or with the router now armed by the host, is cancelled on the
+ *  central and shown as TIMED OUT / BUSY (an unarmed session opening does not
+ *  touch it). Retries an unconfirmed cancel; a result past its time closes
+ *  once the window is known to be over. */
 void kvm_display_input_pairing_tick(kvm_display_input_pairing_t *pairing, uint64_t now_ms,
-                                    bool host_session);
-/** True from BEGIN until the result is dismissed: no guest window may open. */
+                                    bool host_armed);
+/** True from BEGIN until the result is dismissed and the central window is
+ *  known closed: no guest window may open. */
 bool kvm_display_input_pairing_blocks_guest(const kvm_display_input_pairing_t *pairing);
 /** Records a guest pairing request refused for the input window (shown as BUSY). */
 void kvm_display_input_pairing_guest_refused(kvm_display_input_pairing_t *pairing, uint64_t now_ms);
