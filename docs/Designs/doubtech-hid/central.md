@@ -310,8 +310,9 @@ every key and button it holds for that kind. It is delivered exactly once per lo
 
 - **This PC (target 0) is a stub until stage 3**: typing at it does nothing (risk R6).
 - RPA reconnect, scan airtime and its effect on guest notify latency (R3) are not measured.
-- The worker stack (6144 bytes) and heap headroom are not measured (the firmware logs a
-  `Health:` line for it, see the owner checklist).
+- The worker stack (8192 bytes), the NimBLE host task stack (4096 bytes) and heap headroom
+  are not measured (the firmware logs a `Health:` line with all three high-water marks, see
+  the owner checklist item j).
 - Deletes made by the guest code in the reverse direction (`doubtech_hid` forgetting a
   guest bond) are unaware of the central registry; the guest code only deletes guest
   bonds, so the exposure is the unresolved-RPA case above.

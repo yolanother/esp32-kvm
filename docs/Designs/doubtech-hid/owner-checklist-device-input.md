@@ -167,12 +167,17 @@ Capture on FAIL: the three interval logs, the guest and its OS, and the number o
 The firmware prints a line every 30 s from the USB worker (new in this change):
 
 ```text
-I (...) esp32-kvm: Health: free=<bytes> min_free=<bytes> internal_min_free=<bytes> usb_worker_stack_min=<bytes> display_stack_min=<bytes>
+I (...) esp32-kvm: Health: free=<bytes> min_free=<bytes> internal_min_free=<bytes> usb_worker_stack_min=<bytes> display_stack_min=<bytes> nimble_host_stack_min=<bytes>
 ```
 
 `min_free` is the lowest free heap since boot. `usb_worker_stack_min` is the least free stack
-the worker (6144 bytes) has had, and `display_stack_min` the least the display task (4096 bytes)
-has had. They fall as code paths run, so read them after the busiest steps (items a, b, d, i).
+the worker (8192 bytes: it runs the router, the input hub, the central bridge and the central
+start) has had, `display_stack_min` the least the display task (4096 bytes) has had, and
+`nimble_host_stack_min` the least the NimBLE host task (`nimble_host`,
+`CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE` = 4096 bytes; it runs the guest peripheral and the
+central GATT client) has had; it prints `-1` if that task cannot be found by name. None of
+the three stack sizes has been measured: this item is what confirms them. They fall as code
+paths run, so read them after the busiest steps (items a, b, d, i).
 
 Reading the log: the console is UART0, because USB Serial/JTAG is reserved for the PC
 protocol (the build refuses to share it). Attach a 3.3 V USB-UART adapter to the board's UART0
@@ -181,15 +186,15 @@ baud and open a serial monitor. Do not open the board's own USB port: the PC app
 opening it can reset the board. If you have no adapter, mark this item NOT RUN.
 
 Expected: after pairing both devices, three guests connected and a scan window opened once:
-`min_free` and `internal_min_free` stay above 20000 bytes; `usb_worker_stack_min` and
-`display_stack_min` stay above 512 bytes. Record the numbers:
+`min_free` and `internal_min_free` stay above 20000 bytes; `usb_worker_stack_min`,
+`display_stack_min` and `nimble_host_stack_min` stay above 512 bytes. Record the numbers:
 
-| Moment | free | min_free | internal_min_free | usb_worker_stack_min | display_stack_min |
-|---|---|---|---|---|---|
-| Boot, idle | | | | | |
-| 3 guests, 2 inputs connected | | | | | |
-| After a scan window | | | | | |
-| After the busiest run (d, i) | | | | | |
+| Moment | free | min_free | internal_min_free | usb_worker_stack_min | display_stack_min | nimble_host_stack_min |
+|---|---|---|---|---|---|---|
+| Boot, idle | | | | | | |
+| 3 guests, 2 inputs connected | | | | | | |
+| After a scan window | | | | | | |
+| After the busiest run (d, i) | | | | | | |
 
 Result: PASS / FAIL / NOT RUN
 Capture on FAIL: the full table, and the first Health line that fell below a threshold.

@@ -55,7 +55,10 @@
 #endif
 
 #define KVM_USB_BUFFER_SIZE 1024
-#define KVM_USB_TASK_STACK 6144 /* worker also starts the central (NVS load) */
+/* Bytes. The worker runs the router, the input hub, the central bridge and the
+   central start (NVS load); 8192 is headroom, not a measurement: the Health
+   line's usb_worker_stack_min is the owner-checklist figure to confirm it. */
+#define KVM_USB_TASK_STACK 8192
 #define KVM_HEALTH_LOG_MS 30000u /* period of the Health log line */
 
 static kvm_transport_core_t core;
@@ -510,12 +513,19 @@ static void usb_worker(void *context)
         uint64_t time_ms = now_ms(NULL);
         if (time_ms - last_health_ms >= KVM_HEALTH_LOG_MS || time_ms < last_health_ms) {
             last_health_ms = time_ms;
-            /* Owner checklist: free heap and the smallest free stack seen by the two busiest tasks. */
-            ESP_LOGI("esp32-kvm", "Health: free=%u min_free=%u internal_min_free=%u usb_worker_stack_min=%u display_stack_min=%u",
+            /* The NimBLE port keeps its host task handle private; look it up by
+               the name nimble_port_freertos_init gives it (once per 30 s, not
+               cached, so a restarted host task is never read through a stale
+               handle). -1 while the host task does not exist. */
+            TaskHandle_t nimble_host = xTaskGetHandle("nimble_host");
+            /* Owner checklist: free heap and the smallest free stack (bytes) seen
+               by the worker, the display task and the NimBLE host task. */
+            ESP_LOGI("esp32-kvm", "Health: free=%u min_free=%u internal_min_free=%u usb_worker_stack_min=%u display_stack_min=%u nimble_host_stack_min=%d",
                      (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
                      (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)),
-                     (unsigned)kvm_display_stack_high_water_bytes());
+                     (unsigned)kvm_display_stack_high_water_bytes(),
+                     nimble_host ? (int)(uxTaskGetStackHighWaterMark(nimble_host) * sizeof(StackType_t)) : -1);
         }
         if (drain_pairing_events()) ready_sampled = false;
         kvm_display_pairing_expire(&display_pairing, time_ms);

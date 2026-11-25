@@ -117,6 +117,8 @@ pairing gates). Neither runs on a board. They are not in CI.
 ## Limits
 
 - This PC is a stub until stage 3.
-- The worker stack is 6144 bytes (the central start does an NVS load there); not measured.
+- The worker stack is 8192 bytes (it runs the router, the hub, the central bridge and the
+  central start, which does an NVS load); not measured. The 30 s `Health:` log line reports
+  its high-water mark beside the display and NimBLE host tasks (owner checklist item j).
 - A slot that stays ready but keeps failing keeps a switch pending (retried on later
   swallowed reports); `Esc` or the slot's loss ends it.
