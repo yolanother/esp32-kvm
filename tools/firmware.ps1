@@ -73,15 +73,27 @@ function Invoke-Idf {
     if ($LASTEXITCODE -ne 0) { Stop-Script "idf.py failed with exit code $LASTEXITCODE." }
 }
 
+function Get-IdfPythonScripts {
+    # The ESP-IDF python env is preferred over whatever python is first on PATH
+    # (a newer python has no matching IDF env and breaks export.ps1).
+    # Test-only: ESP32_KVM_IDF_PYTHON_ROOT replaces ~/.espressif/python_env.
+    $root = if ($env:ESP32_KVM_IDF_PYTHON_ROOT) { $env:ESP32_KVM_IDF_PYTHON_ROOT } else { Join-Path $env:USERPROFILE '.espressif\python_env' }
+    $pyEnv = Get-ChildItem $root -Directory -Filter 'idf5.5*' -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'Scripts') } |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if ($pyEnv) { return (Join-Path $pyEnv.FullName 'Scripts') }
+    return $null
+}
+
 function Enter-IdfEnvironment {
-    if ($DryRun) { return }
+    $scripts = Get-IdfPythonScripts
+    if ($DryRun) {
+        if ($scripts) { Write-Host "python env first on PATH: $scripts" }
+        return
+    }
     $idf = Find-IdfPath
     $env:IDF_PATH = $idf
-    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-        $pyEnv = Get-ChildItem (Join-Path $env:USERPROFILE '.espressif\python_env') -Directory -Filter 'idf5.5*' -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending | Select-Object -First 1
-        if ($pyEnv) { $env:PATH = (Join-Path $pyEnv.FullName 'Scripts') + [IO.Path]::PathSeparator + $env:PATH }
-    }
+    if ($scripts) { $env:PATH = $scripts + [IO.Path]::PathSeparator + $env:PATH }
     . (Join-Path $idf 'export.ps1') | Out-Null
     if (-not (Get-Command idf.py -ErrorAction SilentlyContinue)) {
         Stop-Script 'idf.py is not available after loading export.ps1.'

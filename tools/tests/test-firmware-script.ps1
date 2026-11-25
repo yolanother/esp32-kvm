@@ -62,6 +62,17 @@ $onePorts = Invoke-Firmware -Arguments @('ports', '-DryRun') -FakePorts 'COM4'
 Assert-That ($onePorts.Code -eq 0) 'ports -DryRun with one board exits 0'
 Assert-That ($onePorts.Output -match '(?m)^COM4\s' -and $onePorts.Output -notmatch '(?m)^C\s') 'ports -DryRun lists COM4, not a lone C'
 
+$pyRoot = Join-Path ([IO.Path]::GetTempPath()) ("kvm-pyenv-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force (Join-Path $pyRoot 'idf5.5_py3.12_env\Scripts') | Out-Null
+$env:ESP32_KVM_IDF_PYTHON_ROOT = $pyRoot
+$pyBuild = Invoke-Firmware -Arguments @('build', '-DryRun')
+Assert-That ($pyBuild.Code -eq 0 -and $pyBuild.Output -match [regex]::Escape('python env first on PATH: ' + (Join-Path $pyRoot 'idf5.5_py3.12_env\Scripts'))) 'build prefers the ESP-IDF python env over PATH python'
+$env:ESP32_KVM_IDF_PYTHON_ROOT = Join-Path $pyRoot 'missing'
+$noPy = Invoke-Firmware -Arguments @('build', '-DryRun')
+Assert-That ($noPy.Code -eq 0 -and $noPy.Output -notmatch 'python env first') 'build -DryRun without an IDF python env does not reorder PATH'
+Remove-Item Env:ESP32_KVM_IDF_PYTHON_ROOT -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $pyRoot -ErrorAction SilentlyContinue
+
 if ($failures -gt 0) { Write-Host "$failures assertion(s) failed"; exit 1 }
 Write-Host 'All firmware script checks passed'
 exit 0
