@@ -6,6 +6,7 @@
 #define ESP32_KVM_DISPLAY_MODEL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /** Logical status shown by the device screen. */
@@ -128,6 +129,9 @@ void kvm_display_buttons_init(kvm_display_buttons_t *state, bool plus_down,
 kvm_display_event_t kvm_display_buttons_sample(kvm_display_buttons_t *state,
                                                 bool plus_down, bool boot_down,
                                                 uint64_t now_ms);
+/** Writes the footer badge, e.g. "USB off | KB MS": USB state, then KB/MS when connected.
+ *  Always NUL-terminates when n > 0; truncates safely. */
+void kvm_display_badge_text(const kvm_display_status_t *status, char *out, size_t n);
 /** Formats a short target label, including an explicit disarmed state. */
 const char *kvm_display_target_label(const kvm_display_status_t *status);
 

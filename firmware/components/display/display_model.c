@@ -264,3 +264,13 @@ const char *kvm_display_target_label(const kvm_display_status_t *status)
     }
     return status->selected_slot ? "DISARMED" : "HOST";
 }
+
+void kvm_display_badge_text(const kvm_display_status_t *status, char *out, size_t n)
+{
+    if (!out || n == 0) return;
+    out[0] = '\0';
+    if (!status) return;
+    snprintf(out, n, "%s%s%s%s", status->usb_connected ? "USB on" : "USB off",
+             status->input_kbd || status->input_mouse ? " |" : "",
+             status->input_kbd ? " KB" : "", status->input_mouse ? " MS" : "");
+}

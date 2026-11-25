@@ -2,7 +2,24 @@
 
 The firmware display model derives a 240×240 view from copied, confirmed router and pairing status. Rendering cannot change the active route. The board LCD is disabled by default. The explicit `CONFIG_KVM_DISPLAY_WAVESHARE_TOUCH_154_VERIFIED` board profile enables its ST7789/SPI/LVGL startup after physical verification. `CONFIG_KVM_DISPLAY_CST816_TOUCH_VERIFIED` separately enables CST816 touch only after pin, orientation, and hit-region validation. PLUS remains disabled. BOOT runtime hold requests emergency release even if panel startup fails.
 
-The view priority is recovery, update, routing fault, pairing, paused, guest list, then active target. Recovery and update take precedence over stale routing. A disconnected USB link shows **INPUT PAUSED** unless a local pairing window is active. A routing fault always shows **INPUT PAUSED**. The active target names a guest only when the status says it is armed; otherwise it shows **DISARMED** or **HOST**. Guest rows use reported capacity and ready bits, and offline rows are never touch-selectable. Touch hit testing returns a request slot only; host arbitration must still acknowledge selection. The screen never treats a request as an active target.
+The view priority is recovery, update, routing fault or armed-without-ready-guest (paused), pairing, guest list, then active target. Recovery and update take precedence over stale routing. A disconnected USB link (no PC app session) no longer pauses the screen: see the table below. A routing fault always shows **INPUT PAUSED**. The active target names a guest only when the status says it is armed; otherwise it shows **DISARMED** or **HOST**. Guest rows use reported capacity and ready bits, and offline rows are never touch-selectable. Touch hit testing returns a request slot only; host arbitration must still acknowledge selection. The screen never treats a request as an active target.
+
+### No PC app session (USB off)
+
+With no host session the board shows the same active screen as with a session. Only two things differ: the target cards are dimmed (50% opacity, geometry and touch targets unchanged) and the footer shows a badge instead of "Selected target is highlighted". The badge lists the USB state first, then each connected device-owned input:
+
+| USB | Keyboard | Mouse | Footer badge |
+| --- | --- | --- | --- |
+| off | no | no | `USB off` |
+| off | yes | no | `USB off \| KB` |
+| off | no | yes | `USB off \| MS` |
+| off | yes | yes | `USB off \| KB MS` |
+| on | no | no | `USB on` |
+| on | yes | no | `USB on \| KB` |
+| on | no | yes | `USB on \| MS` |
+| on | yes | yes | `USB on \| KB MS` |
+
+The badge is shown only while dimmed (no session); with a session the normal footer is used. It is redrawn only when its text changes. The screen no longer pauses for a missing USB session. Only a routing fault, recovery, a firmware update, or an armed route without a ready guest pauses input; pairing and guest-list screens keep their precedence and are never dimmed.
 
 A numeric comparison appears in a 28-pixel font only when pairing state is challenge, the challenge ID is nonzero, the six-digit value is valid, and its monotonic deadline is in the future. The display derives the remaining seconds locally for both the waiting window and challenge, and removes the number when the deadline passes. It never logs or persists the number. Rejected, full, and expired pairing states show distinct retry guidance. Update progress is capped visually at 100 percent; recovery guidance supersedes update progress.
 

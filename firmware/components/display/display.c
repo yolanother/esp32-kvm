@@ -160,6 +160,8 @@ static void update_target_card(unsigned index, const kvm_display_view_t *view)
         return;
     }
     lv_obj_remove_flag(card, LV_OBJ_FLAG_HIDDEN);
+    /* No host session: dim the whole card (same geometry) so the screen reads as USB off. */
+    lv_obj_set_style_opa(card, view->usb_dim ? LV_OPA_50 : LV_OPA_COVER, 0);
     bool selected = view->selected_card == index;
     bool ready = view->card_ready_mask & (1u << index);
     lv_obj_set_style_bg_color(card, lv_color_hex(selected ? 0x1d4948 : 0x15242e), 0);
@@ -264,6 +266,7 @@ static void display_worker(void *context)
 {
     (void)context;
     kvm_display_view_t shown = {0};
+    char shown_badge[48] = "";
     uint64_t last_touch_ms = 0;
     for (;;) {
         kvm_display_status_t next;
@@ -273,7 +276,13 @@ static void display_worker(void *context)
         next.touch_available = touch_started;
         kvm_display_view_t view;
         kvm_display_make_view(&next, (uint64_t)esp_timer_get_time() / 1000, &view);
-        if (panel_started && memcmp(&shown, &view, sizeof(view)) != 0 && lvgl_port_lock(20)) {
+        char badge[48];
+        kvm_display_badge_text(&next, badge, sizeof badge);
+        /* The badge only replaces the footer on the dimmed active screen. Input
+           changes do not alter the view, so compare the badge text as well. */
+        bool badge_changed = view.usb_dim && strcmp(badge, shown_badge) != 0;
+        if (panel_started && (memcmp(&shown, &view, sizeof(view)) != 0 || badge_changed) &&
+            lvgl_port_lock(20)) {
             lv_label_set_text(title_label, view.title);
 #if CONFIG_LV_FONT_MONTSERRAT_28
             lv_obj_set_style_text_font(primary_label,
@@ -282,7 +291,8 @@ static void display_worker(void *context)
 #endif
             lv_label_set_text(primary_label, view.primary);
             lv_label_set_text(detail_label, view.detail);
-            lv_label_set_text(footer_label, view.footer);
+            lv_label_set_text(footer_label, view.usb_dim ? badge : view.footer);
+            strcpy(shown_badge, view.usb_dim ? badge : "");
             bool cards = view.screen == KVM_DISPLAY_ACTIVE;
             if (cards) {
                 lv_obj_add_flag(primary_label, LV_OBJ_FLAG_HIDDEN);

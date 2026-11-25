@@ -248,6 +248,39 @@ int main(void)
         assert(strcmp(on.footer, "Use host to select") == 0);
     }
 
+    /* Footer badge text: USB state first, then connected input devices. */
+    {
+        kvm_display_status_t s;
+        char out[32];
+        memset(&s, 0, sizeof s);
+        s.input_kbd = s.input_mouse = true;
+        kvm_display_badge_text(&s, out, sizeof out);
+        assert(strcmp(out, "USB off | KB MS") == 0);  /* badge_text_lists_usb_and_inputs */
+        for (unsigned m = 0; m < 8; ++m) {
+            static const char *const want[8] = {
+                "USB off", "USB off | KB", "USB off | MS", "USB off | KB MS",
+                "USB on", "USB on | KB", "USB on | MS", "USB on | KB MS"};
+            memset(&s, 0, sizeof s);
+            s.usb_connected = (m & 4u) != 0; s.input_kbd = (m & 1u) != 0;
+            s.input_mouse = (m & 2u) != 0;
+            kvm_display_badge_text(&s, out, sizeof out);
+            assert(strcmp(out, want[m]) == 0);
+        }
+        /* Buffer edges: always terminated, truncated, never overrun. */
+        s.usb_connected = s.input_kbd = s.input_mouse = true;
+        char guard[8]; memset(guard, 'x', sizeof guard);
+        kvm_display_badge_text(&s, guard, 0);
+        assert(guard[0] == 'x');
+        kvm_display_badge_text(&s, guard, 1);
+        assert(guard[0] == '\0' && guard[1] == 'x');
+        kvm_display_badge_text(&s, guard, 5);
+        assert(strcmp(guard, "USB ") == 0 && guard[5] == 'x');
+        memset(guard, 'x', sizeof guard);
+        kvm_display_badge_text(NULL, guard, sizeof guard);
+        assert(guard[0] == '\0');
+        kvm_display_badge_text(&s, NULL, 4);
+    }
+
     kvm_display_buttons_t b;
     kvm_display_buttons_init(&b, false, true, 0);
     assert(kvm_display_buttons_sample(&b, false, true, 2000) == KVM_DISPLAY_NO_EVENT);
