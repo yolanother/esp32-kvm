@@ -892,13 +892,20 @@ fn worker(
     }
 }
 
-/// Windows raises a sticky SystemTransition fault on suspend, lock, or shutdown.
-/// A fresh verified session is the required reconciliation, so clear only that
-/// fault before reconnecting; real capture failures stay sticky.
+/// Capture faults are sticky, and any one of them fails every new session at once,
+/// which shows up as the device screen flashing. Windows raises them on suspend,
+/// lock, screen-off and desktop switches (SystemTransition, RawInputFailure,
+/// CaptureWorkerStalled, ...). Reconnecting is the reconciliation: a fresh verified
+/// session starts disarmed, so clear any fault first. Only MessagePumpFailure stays,
+/// because it means the capture worker thread itself died and needs an app restart.
 fn reconcile_system_transition(capture: &dyn CaptureControl) {
-    if capture.fault() == Some(esp32_kvm_platform_windows::CaptureFault::SystemTransition) {
-        capture.disarm();
-        let _ = capture.clear_fault();
+    use esp32_kvm_platform_windows::CaptureFault;
+    match capture.fault() {
+        None | Some(CaptureFault::MessagePumpFailure) => {}
+        Some(_) => {
+            capture.disarm();
+            let _ = capture.clear_fault();
+        }
     }
 }
 
@@ -1002,17 +1009,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reconnect_clears_only_the_system_transition_fault() {
+    fn reconnect_clears_recoverable_capture_faults_but_not_a_dead_pump() {
         use esp32_kvm_platform_windows::CaptureFault;
         let (gate, _events) = CaptureGate::new(8);
-        gate.system_transition();
-        assert_eq!(gate.fault(), Some(CaptureFault::SystemTransition));
-        reconcile_system_transition(&gate);
-        assert_eq!(gate.fault(), None);
+        for fault in [
+            CaptureFault::SystemTransition,
+            CaptureFault::RawInputFailure,
+            CaptureFault::CaptureWorkerStalled,
+            CaptureFault::RoutingWorkerStalled,
+            CaptureFault::QueueOverflow,
+        ] {
+            gate.mark_fault(fault);
+            assert_eq!(gate.fault(), Some(fault));
+            reconcile_system_transition(&gate);
+            assert_eq!(gate.fault(), None, "{fault:?} must clear on reconnect");
+        }
 
-        gate.mark_fault(CaptureFault::RawInputFailure);
+        gate.mark_fault(CaptureFault::MessagePumpFailure);
         reconcile_system_transition(&gate);
-        assert_eq!(gate.fault(), Some(CaptureFault::RawInputFailure));
+        assert_eq!(gate.fault(), Some(CaptureFault::MessagePumpFailure));
     }
     use esp32_kvm_host_actor::{
         HostState, PairingStatus, SetupSnapshot as ActorSnapshot, SlotSnapshot,
