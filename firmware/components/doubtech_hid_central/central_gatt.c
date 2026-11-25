@@ -230,6 +230,14 @@ void central_gatt_report_map(central_gatt_t *m, const uint8_t *data, size_t len,
     use_boot_mouse_or_fail(m, act);
 }
 
+void central_gatt_report_map_too_long(central_gatt_t *m, central_gatt_action_t *act)
+{
+    set_none(act);
+    if (m->state != CG_REPORT_MAP) return;
+    m->map_ok = false;
+    use_boot_mouse_or_fail(m, act);
+}
+
 void central_gatt_report_reference(central_gatt_t *m, const uint8_t *data, size_t len, central_gatt_action_t *act)
 {
     set_none(act);

@@ -115,6 +115,9 @@ static void test_scan_list(void)
     central_scan_clear(&list);
     central_adv_info_t name_only = info_of(false, 0, "Thing");
     CHECK(central_scan_offer(&list, extra, 0, -10, &name_only) == -1 && list.count == 0);
+    /* The HID gamepad appearance (spec filter) is listed with an unknown kind. */
+    central_adv_info_t gamepad = info_of(false, 0x03C4, "Pad");
+    CHECK(central_scan_offer(&list, extra, 0, -10, &gamepad) == 0 && list.entries[0].kind == 0);
 }
 
 int main(void)

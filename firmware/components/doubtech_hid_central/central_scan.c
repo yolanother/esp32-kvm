@@ -86,7 +86,8 @@ int central_scan_offer(central_scan_list_t *list, const uint8_t addr[6], uint8_t
         }
         return changed ? (int)i : -1;
     }
-    if (!info->hid_service && kind == 0) return -1;
+    bool gamepad = info->has_appearance && info->appearance == CENTRAL_APPEARANCE_GAMEPAD;
+    if (!info->hid_service && kind == 0 && !gamepad) return -1;
     if (list->count >= CENTRAL_SCAN_MAX) return -1;
     central_scan_entry_t *entry = &list->entries[list->count];
     memset(entry, 0, sizeof(*entry));

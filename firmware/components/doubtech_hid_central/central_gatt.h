@@ -123,6 +123,10 @@ void central_gatt_descriptor(central_gatt_t *m, uint16_t uuid16, uint16_t handle
 void central_gatt_descriptors_done(central_gatt_t *m, central_gatt_action_t *act);
 /** The complete (or 512-byte capped) Report Map value. */
 void central_gatt_report_map(central_gatt_t *m, const uint8_t *data, size_t len, central_gatt_action_t *act);
+/** The Report Map is longer than HOGP_MAP_MAX_BYTES: it is treated as an
+ * unsupported map (boot mouse fallback, else reason 1), never parsed from a
+ * truncated prefix. */
+void central_gatt_report_map_too_long(central_gatt_t *m, central_gatt_action_t *act);
 /** The value of the Report Reference descriptor last requested. */
 void central_gatt_report_reference(central_gatt_t *m, const uint8_t *data, size_t len, central_gatt_action_t *act);
 /** A Protocol Mode or CCCD write completed (or a write without response was queued). */

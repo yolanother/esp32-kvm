@@ -42,6 +42,7 @@ typedef struct {
     size_t ref_count;
     central_gatt_state_t fail_in; /* CG_IDLE: no injected error */
     central_gatt_error_t fail_class;
+    bool map_too_long; /* the device's Report Map exceeds the 512-byte cap */
 } fixture_t;
 
 typedef struct {
@@ -144,7 +145,8 @@ static central_gatt_action_t drive(central_gatt_t *m, const fixture_t *f, uint8_
             t->long_reads++;
             CHECK(m->report_map >= 0 && act.handle == m->chrs[m->report_map].val_handle);
             CHECK(act.handle == 0x24 || act.handle == 0x42);
-            central_gatt_report_map(m, f->map, f->map_len, &act);
+            if (f->map_too_long) central_gatt_report_map_too_long(m, &act);
+            else central_gatt_report_map(m, f->map, f->map_len, &act);
             break;
         case CG_ACT_READ: {
             const fx_ref *ref = NULL;
@@ -451,8 +453,64 @@ static void test_lost_input_on_disconnect(void)
     CHECK(!central_gatt_disconnect(&m, &in) && m.state == CG_IDLE);
 }
 
+/* A map over the 512-byte cap is never parsed from a truncated prefix: it counts
+ * as unsupported, so a boot mouse falls back to boot input and anything else
+ * fails with reason 1. */
+static void test_report_map_too_long(void)
+{
+    central_gatt_t m;
+    trace_t t;
+    fixture_t f = mouse_fixture(k_wheel_id2, sizeof(k_wheel_id2), k_mouse_refs_id2);
+    f.map_too_long = true;
+    central_gatt_action_t act = drive(&m, &f, MOUSE, BOTH, &t);
+    CHECK(act.type == CG_ACT_READY && m.mode == CG_INPUT_BOOT_MOUSE && !m.map_ok && t.reads == 0);
+
+    static const fx_chr chrs[] = {{0x2A4B, 0x41, 0x42, RD}, {0x2A4D, 0x43, 0x44, RN}};
+    static const fx_dsc dscs[] = {{0x2902, 0x45}, {0x2908, 0x46}};
+    static const fx_ref refs[] = {{0x46, {0x02, 0x01}}};
+    fixture_t g = {true,      0x40, 0x46,         chrs,         2, dscs, 2, k_wheel_id2, sizeof(k_wheel_id2), refs, 1,
+                   CG_IDLE, CG_ERR_OTHER, true};
+    act = drive(&m, &g, MOUSE, BOTH, &t);
+    CHECK(act.type == CG_ACT_FAIL && act.reason == DOUBTECH_HID_CENTRAL_REASON_NOT_SUPPORTED && t.reads == 0);
+
+    /* Outside the map read it is ignored. */
+    central_gatt_begin(&m, MOUSE, BOTH, &act);
+    central_gatt_report_map_too_long(&m, &act);
+    CHECK(act.type == CG_ACT_NONE && m.state == CG_SERVICE);
+}
+
+/* The adapter resets the machine when it aborts a ready link (forget, failure)
+ * and again when the link finally closes: the lost input comes exactly once,
+ * from whichever reset sees READY first. */
+static void test_abort_from_ready_reports_lost_once(void)
+{
+    central_gatt_t m;
+    trace_t t;
+    fixture_t f = keyboard_fixture();
+    CHECK(drive(&m, &f, KB, BOTH, &t).type == CG_ACT_READY);
+    doubtech_hid_central_input_t in;
+    int lost = 0;
+    if (central_gatt_disconnect(&m, &in) && in.lost && in.kind == KB) lost++; /* abort */
+    if (central_gatt_disconnect(&m, &in)) lost++;                             /* later DISCONNECT */
+    CHECK(lost == 1);
+
+    /* A plain disconnect also reports once. */
+    CHECK(drive(&m, &f, KB, BOTH, &t).type == CG_ACT_READY);
+    lost = 0;
+    if (central_gatt_disconnect(&m, &in) && in.lost) lost++;
+    if (central_gatt_disconnect(&m, &in)) lost++;
+    CHECK(lost == 1);
+
+    /* A machine discarded without an output (failure before input flowed) reports nothing later. */
+    CHECK(drive(&m, &f, KB, BOTH, &t).type == CG_ACT_READY);
+    CHECK(!central_gatt_disconnect(&m, NULL));
+    CHECK(!central_gatt_disconnect(&m, &in));
+}
+
 int main(void)
 {
+    test_report_map_too_long();
+    test_abort_from_ready_reports_lost_once();
     test_boot_keyboard_happy_path();
     test_keyboard_kind_resolved_without_hint();
     test_protocol_mode_write_variants();

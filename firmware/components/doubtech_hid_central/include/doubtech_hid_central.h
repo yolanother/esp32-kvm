@@ -58,7 +58,9 @@ typedef enum {
 /** index: scan row for SCAN_RESULT (a repeated index updates that row).
  * kind: the device kind (0 while a scan result's kind is unknown).
  * name: NUL-terminated advertised name, possibly empty.
- * rssi: SCAN_RESULT only. passkey: PASSKEY only (type it on the keyboard).
+ * rssi: SCAN_RESULT only. passkey: PASSKEY only, sent for the passkey-entry
+ * method (the owner types it on the keyboard); a numeric comparison is accepted
+ * silently because the owner already chose the device.
  * reason: PAIR_FAILED only, one of DOUBTECH_HID_CENTRAL_REASON_*. */
 typedef struct {
     doubtech_hid_central_event_type_t type;
@@ -87,7 +89,10 @@ esp_err_t doubtech_hid_central_start(const doubtech_hid_central_config_t *config
 /** Opens a 30 s scan for HID keyboards and mice with sm_mitm cleared for the
  * window. Refused (ESP_ERR_INVALID_STATE plus PAIR_FAILED reason 4) while guest
  * pairing is open or another input pairing runs, and (reason 5) when a keyboard
- * and a mouse are already stored. */
+ * and a mouse are already stored. Exclusivity is enforced one way only: this
+ * call checks doubtech_hid_pairing_active(), but doubtech_hid does not refuse a
+ * guest window opened during an input window. The application must not open
+ * both (guest bonding still requires an authenticated link either way). */
 esp_err_t doubtech_hid_central_pair_begin(void);
 /** Ends the window silently; a half-paired device is disconnected and its new bond removed. */
 void doubtech_hid_central_pair_cancel(void);

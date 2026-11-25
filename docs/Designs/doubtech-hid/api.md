@@ -244,9 +244,17 @@ timer cannot be armed (the window is closed again).
 Returns `true` while the guest pairing window is open (including a pending
 numeric comparison). An expired window is closed first, which publishes
 `DOUBTECH_HID_PAIRING_TIMEOUT` like any other expiry check. Returns `false` before
-`doubtech_hid_start`. Call it on the NimBLE host thread. Another role sharing the
-host (the input-device central) checks it so its own pairing window, which clears
-`ble_hs_cfg.sm_mitm`, never overlaps a guest window.
+`doubtech_hid_start`. Call it on the NimBLE host thread.
+
+What is enforced: another role sharing the host (the input-device central) checks
+it and refuses to open its own pairing window, which clears `ble_hs_cfg.sm_mitm`,
+while a guest window is open. The reverse is not enforced: this library does not
+know about the other role's window, so `doubtech_hid_pairing_open` (or a
+guest-initiated numeric comparison, which opens the window itself) still succeeds
+during an input pairing window. The application must not open both (the KVM
+touchscreen flow gates this). Guest bonding still requires an authenticated link,
+so a guest that pairs during that overlap is either authenticated by numeric
+comparison or rejected.
 
 ### `void doubtech_hid_pairing_cancel(void)`
 

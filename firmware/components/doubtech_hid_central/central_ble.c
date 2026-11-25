@@ -7,10 +7,12 @@
  * All state below is owned by the NimBLE host thread. Public calls from other
  * tasks run on the host loop through one bounded request. Link callbacks carry
  * (slot, generation) so a GATT or GAP callback for a closed or reused slot is
- * ignored. A link is released only by its DISCONNECT (or a failed CONNECT),
- * which is also the single place that reports PAIR_FAILED, DISCONNECTED and
- * the lost input. Discovery errors terminate the link; an unfinished pairing
- * deletes the bond it created. */
+ * ignored. A link is released by its DISCONNECT, a failed CONNECT, or a close
+ * that cannot complete (terminate refused, or the pairing close guard expires);
+ * link_closed is the single place that reports PAIR_FAILED and DISCONNECTED.
+ * The lost input is reported once, by whichever comes first: link_abort (a
+ * forget or failure of a ready link) or link_closed. Discovery errors terminate
+ * the link; an unfinished pairing deletes the bond it created. */
 #include "doubtech_hid_central.h"
 
 #include <string.h>
@@ -43,6 +45,7 @@ _Static_assert(CENTRAL_SCAN_NAME_BYTES == DTHID_INPUT_NAME_BYTES, "scan and reco
 #define RPC_TIMEOUT_MS 200u
 #define SCAN_ITVL 0x0060u            /* 60 ms */
 #define SCAN_WINDOW 0x0030u          /* 30 ms: half duty keeps guest airtime */
+#define CLOSE_GUARD_MS 5000u         /* a pairing link that does not close by then is dropped */
 #define REASON(name) DOUBTECH_HID_CENTRAL_REASON_##name
 
 static const char *tag = "dthid-central";
@@ -58,8 +61,9 @@ typedef struct {
     bool bonded;        /* encrypted with a bond on this link */
     bool announced;     /* CONNECTED was reported */
     uint8_t fail_reason;
-    uint8_t kind_hint, allowed, kind;
+    uint8_t kind_hint, allowed, kind; /* kind: resolved by discovery (0 until then) */
     ble_addr_t addr;
+    ble_addr_t peer_id; /* identity address once encrypted (bond owner) */
     char name[DTHID_INPUT_NAME_BYTES];
     central_gatt_t gatt;
     uint8_t map[HOGP_MAP_MAX_BYTES];
@@ -214,16 +218,34 @@ static int start_scan(void)
     return ble_gap_disc(own_addr_type, (int32_t)DOUBTECH_HID_CENTRAL_PAIR_WINDOW_MS, &params, gap_event, NULL);
 }
 
-/* The link is gone (DISCONNECT, failed CONNECT, or nothing left to cancel). */
+/* The kind a link stands for: the resolved kind once discovery found it,
+ * otherwise the advertised or stored kind. */
+static uint8_t link_kind(const link_t *link) { return link->kind ? link->kind : link->kind_hint; }
+
+/* Releases held input downstream if the link was delivering it: resets the
+ * machine and emits the lost input exactly once (the machine leaves READY). */
+static void link_release_input(link_t *link)
+{
+    doubtech_hid_central_input_t lost;
+    if (central_gatt_disconnect(&link->gatt, &lost)) emit_input(&lost);
+}
+
+/* The link is gone (DISCONNECT, failed CONNECT, nothing left to cancel, or a
+ * close that never completed). The single place that reports the outcome. */
 static void link_closed(link_t *link)
 {
     bool was_pairing = link->pairing;
+    link_release_input(link);
+    if (was_pairing && link->bonded && !registry_has_addr(&link->peer_id)) {
+        int rc = ble_store_util_delete_peer(&link->peer_id); /* never keep the bond of an unfinished pairing */
+        if (rc != 0 && rc != BLE_HS_ENOENT) ESP_LOGW(tag, "could not delete the unfinished bond: %d", rc);
+    }
     if (link->announced) {
         kind_connected[link->kind] = false;
         emit(DTHID_CENTRAL_DISCONNECTED, 0, link->kind, link->name, 0, 0, 0);
     }
     if (was_pairing && !link->silent)
-        emit(DTHID_CENTRAL_PAIR_FAILED, 0, link->kind_hint, link->name, 0, 0,
+        emit(DTHID_CENTRAL_PAIR_FAILED, 0, link_kind(link), link->name, 0, 0,
              link->fail_reason ? link->fail_reason : REASON(TIMEOUT));
     link->phase = LINK_FREE;
     link->conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -231,33 +253,41 @@ static void link_closed(link_t *link)
     if (pair.phase == PAIR_SCANNING && pair.scan_deferred && start_scan() == 0) pair.scan_deferred = false;
 }
 
-/* Fails or cancels a link: drops its discovery state (no lost input, no more
- * notifications), then cancels the connect or terminates the connection. The
- * closing event finishes the cleanup. */
+/* Fails or cancels a link: releases its input (lost when it was READY, so a
+ * forget of a connected device lets the hub drop held keys), stops further
+ * notifications, then cancels the connect or terminates the connection. The
+ * closing event finishes the cleanup; a pairing link that does not close within
+ * CLOSE_GUARD_MS is dropped by the window timer, and a terminate that cannot
+ * be issued drops the link at once, so the window and sm_mitm never wedge. */
 static void link_abort(link_t *link, uint8_t reason, bool silent)
 {
     if (link->phase == LINK_FREE || link->phase == LINK_CLOSING) return;
     link->fail_reason = reason;
     link->silent = silent;
-    (void)central_gatt_disconnect(&link->gatt, NULL);
+    link_release_input(link);
     link_phase_t was = link->phase;
     link->phase = LINK_CLOSING;
+    if (link->pairing) (void)ble_npl_callout_reset(&pair_timer, ble_npl_time_ms_to_ticks32(CLOSE_GUARD_MS));
     if (was == LINK_CONNECTING) {
         if (ble_gap_conn_cancel() != 0) link_closed(link); /* nothing pending: no event follows */
         return;
     }
     int rc = ble_gap_terminate(link->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    if (rc == BLE_HS_ENOTCONN) link_closed(link);
-    else if (rc != 0 && rc != BLE_HS_EALREADY) ESP_LOGW(tag, "terminate failed: %d", rc);
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGW(tag, "terminate failed (%d); dropping the link", rc);
+        link_closed(link); /* a later event for this slot no longer matches its generation */
+    }
 }
 
 static void link_ready(link_t *link)
 {
     link->phase = LINK_READY;
     link->kind = link->gatt.kind;
+    link->kind_hint = link->kind; /* forget and connect_stored match the resolved kind */
     if (link->pairing) {
         struct ble_gap_conn_desc desc;
         if (ble_gap_conn_find(link->conn_handle, &desc) != 0) {
+            (void)central_gatt_disconnect(&link->gatt, NULL); /* no input has flowed yet */
             link_abort(link, REASON(TIMEOUT), false);
             return;
         }
@@ -270,6 +300,7 @@ static void link_ready(link_t *link)
         central_registry_t next = registry;
         if (!central_registry_set(&next, &record) || central_store_save(store_ns, &next) != ESP_OK) {
             ESP_LOGW(tag, "could not store the paired device");
+            (void)central_gatt_disconnect(&link->gatt, NULL); /* no input has flowed yet */
             link_abort(link, REASON(CAPACITY), false);
             return;
         }
@@ -384,11 +415,11 @@ static int on_report_map(uint16_t conn_handle, const struct ble_gatt_error *erro
         if (take && os_mbuf_copydata(attr->om, 0, take, link->map + link->map_len) != 0)
             return gatt_failed(link, BLE_HS_EBADDATA);
         link->map_len = (uint16_t)(link->map_len + take);
-        if (take == length && link->map_len < sizeof(link->map)) return 0;
-        /* The walker reads at most 512 bytes: stop the read and use what we have. */
-        central_gatt_report_map(&link->gatt, link->map, link->map_len, &act);
+        if (take == length) return 0; /* a map of exactly 512 bytes ends with EDONE next */
+        /* Longer than the walker's 512-byte limit: never parse a truncated prefix. */
+        central_gatt_report_map_too_long(&link->gatt, &act);
         run(link, act);
-        return 1;
+        return 1; /* stop the read */
     }
     /* Some devices answer a blob read at the exact end with an error instead of an empty value. */
     bool ended = error->status == BLE_HS_EDONE ||
@@ -437,6 +468,7 @@ static void run(link_t *link, central_gatt_action_t act)
         uint16_t handle = link->conn_handle;
         void *arg = link_arg(link);
         int rc = 0;
+        if (link->gatt.kind) link->kind = link->gatt.kind; /* resolved after the characteristics */
         switch (act.type) {
         case CG_ACT_NONE: return;
         case CG_ACT_READY: link_ready(link); return;
@@ -511,6 +543,7 @@ static void on_enc_change(link_t *link, const struct ble_gap_event *event)
         return;
     }
     link->bonded = true;
+    link->peer_id = desc.peer_id_addr;
     link->phase = LINK_DISCOVERING;
     central_gatt_action_t act;
     central_gatt_begin(&link->gatt, link->kind_hint, link->allowed, &act);
@@ -526,13 +559,10 @@ static void on_passkey(link_t *link, const struct ble_gap_event *event)
     struct ble_sm_io io;
     memset(&io, 0, sizeof(io));
     io.action = event->passkey.params.action;
-    uint32_t shown;
     if (io.action == BLE_SM_IOACT_DISP) {
         io.passkey = esp_random() % 1000000u; /* the owner types it on the keyboard */
-        shown = io.passkey;
     } else if (io.action == BLE_SM_IOACT_NUMCMP) {
-        io.numcmp_accept = 1; /* the owner chose this device; show the number for reference */
-        shown = event->passkey.params.numcmp;
+        io.numcmp_accept = 1; /* the owner selected this device: accept silently, nothing to type */
     } else {
         link_abort(link, REASON(AUTH_FAILED), false);
         return;
@@ -541,7 +571,8 @@ static void on_passkey(link_t *link, const struct ble_gap_event *event)
         link_abort(link, REASON(AUTH_FAILED), false);
         return;
     }
-    emit(DTHID_CENTRAL_PASSKEY, 0, link->kind_hint, link->name, 0, shown, 0);
+    if (io.action == BLE_SM_IOACT_DISP)
+        emit(DTHID_CENTRAL_PASSKEY, 0, link_kind(link), link->name, 0, io.passkey, 0);
 }
 
 static int on_repeat_pairing(link_t *link, const struct ble_gap_event *event)
@@ -569,14 +600,8 @@ static void on_notify(link_t *link, const struct ble_gap_event *event)
 static void on_disconnect(link_t *link, const struct ble_gap_event *event)
 {
     if (event->disconnect.conn.conn_handle != link->conn_handle) return;
-    doubtech_hid_central_input_t lost;
-    if (central_gatt_disconnect(&link->gatt, &lost)) emit_input(&lost); /* release held keys downstream */
-    if (link->pairing && link->bonded && !registry_has_addr(&event->disconnect.conn.peer_id_addr)) {
-        int rc = ble_store_util_delete_peer(&event->disconnect.conn.peer_id_addr);
-        if (rc != 0 && rc != BLE_HS_ENOENT) ESP_LOGW(tag, "could not delete the unfinished bond: %d", rc);
-    }
     if (link->pairing && !link->fail_reason) link->fail_reason = link->bonded ? REASON(TIMEOUT) : REASON(AUTH_FAILED);
-    link_closed(link);
+    link_closed(link); /* lost input (if still READY), bond cleanup and events */
 }
 
 static void on_scan_report(const struct ble_gap_event *event)
@@ -633,7 +658,19 @@ static void pair_timeout_on_host(struct ble_npl_event *event)
 {
     (void)event;
     if (pair.phase == PAIR_SCANNING) pair_fail_window(REASON(TIMEOUT));
-    else if (pair.phase == PAIR_LINKING && pair.link >= 0) link_abort(&links[pair.link], REASON(TIMEOUT), false);
+    else if (pair.phase == PAIR_LINKING && pair.link >= 0) {
+        link_t *link = &links[pair.link];
+        if (link->phase != LINK_CLOSING) {
+            link_abort(link, REASON(TIMEOUT), false); /* rearms the timer as a close guard */
+            return;
+        }
+        /* The close never completed: retry the terminate once and drop the link so
+         * the window ends and sm_mitm is restored. Later events miss its generation. */
+        if (link->conn_handle != BLE_HS_CONN_HANDLE_NONE)
+            (void)ble_gap_terminate(link->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (!link->fail_reason) link->fail_reason = REASON(TIMEOUT);
+        link_closed(link);
+    }
 }
 
 static bool infer_address_type(void) { return ble_hs_id_infer_auto(0, &own_addr_type) == 0; }
@@ -706,6 +743,10 @@ static esp_err_t pair_select_on_host(uint8_t index)
         return ESP_ERR_INVALID_STATE;
     }
     (void)ble_gap_disc_cancel(); /* the initiator cannot start while scanning */
+    /* A stale local bond for this unlisted address would make encryption fail
+     * forever; pairing starts from no keys. */
+    int deleted = ble_store_util_delete_peer(&addr);
+    if (deleted != 0 && deleted != BLE_HS_ENOENT) ESP_LOGW(tag, "could not clear an old bond: %d", deleted);
     link->pairing = true;
     link->kind_hint = entry.kind;
     link->allowed = allowed;
@@ -739,8 +780,8 @@ static esp_err_t forget_on_host(uint8_t kind)
     if (result != ESP_OK) return result;
     registry = next;
     for (size_t i = 0; i < LINK_COUNT; ++i)
-        if (links[i].phase != LINK_FREE && !links[i].pairing && links[i].kind_hint == kind)
-            link_abort(&links[i], 0, true);
+        if (links[i].phase != LINK_FREE && !links[i].pairing && link_kind(&links[i]) == kind)
+            link_abort(&links[i], 0, true); /* reports the lost input, then DISCONNECTED */
     ble_addr_t addr = {.type = record.addr_type};
     memcpy(addr.val, record.addr, sizeof(addr.val));
     if (!registry_has_addr(&addr)) { /* a combo device keeps its bond for the other kind */
@@ -758,7 +799,7 @@ esp_err_t central_connect_stored(uint8_t kind)
     dthid_input_record_t record;
     if (!central_registry_get(&registry, (dthid_input_kind_t)kind, &record)) return ESP_ERR_NOT_FOUND;
     for (size_t i = 0; i < LINK_COUNT; ++i)
-        if (links[i].phase != LINK_FREE && (links[i].phase == LINK_CONNECTING || links[i].kind_hint == kind))
+        if (links[i].phase != LINK_FREE && (links[i].phase == LINK_CONNECTING || link_kind(&links[i]) == kind))
             return ESP_ERR_INVALID_STATE;
     if (!infer_address_type()) return ESP_FAIL;
     link_t *link = link_alloc();

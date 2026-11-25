@@ -2,8 +2,9 @@
  * Pure helpers for the input pairing scan: a bounded advertising-data reader
  * and a deduplicated list of at most eight HID keyboard or mouse candidates.
  * A device is listed when it advertises the HID service UUID 0x1812 or the
- * keyboard (0x03C1) or mouse (0x03C2) appearance. Rows keep their index for the
- * whole window so a selection by index stays stable. */
+ * keyboard (0x03C1), mouse (0x03C2) or gamepad (0x03C4) appearance. Rows keep
+ * their index for the whole window so a selection by index stays stable; the
+ * display sorts them (for example by RSSI). */
 #ifndef DTHID_CENTRAL_SCAN_H
 #define DTHID_CENTRAL_SCAN_H
 
@@ -17,6 +18,7 @@
 #define CENTRAL_SCAN_NAME_BYTES 24u
 #define CENTRAL_APPEARANCE_KEYBOARD 0x03C1u
 #define CENTRAL_APPEARANCE_MOUSE 0x03C2u
+#define CENTRAL_APPEARANCE_GAMEPAD 0x03C4u /* listed (spec filter), kind unknown */
 
 typedef struct {
     bool hid_service;

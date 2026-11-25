@@ -92,7 +92,9 @@ void doubtech_hid_pairing_set_events(doubtech_hid_pairing_event_fn callback, voi
 /** Opens pairing for 60 seconds; caller must run on the NimBLE host thread. */
 esp_err_t doubtech_hid_pairing_open(void);
 /** True while the guest pairing window is open (an expired window closes first);
- * call on the NimBLE host thread. Another role uses it to keep windows exclusive. */
+ * call on the NimBLE host thread. Another role (the input central) refuses its own
+ * window while this is true; this library does not refuse a guest window opened
+ * during another role's window, so the application must not open both. */
 bool doubtech_hid_pairing_active(void);
 /** Cancels pairing; caller must run on the NimBLE host thread. */
 void doubtech_hid_pairing_cancel(void);
