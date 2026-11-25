@@ -256,6 +256,23 @@ touchscreen flow gates this). Guest bonding still requires an authenticated link
 so a guest that pairs during that overlap is either authenticated by numeric
 comparison or rejected.
 
+### `bool doubtech_hid_peer_is_guest(uint8_t address_type, const uint8_t address[6])`
+
+Returns `true` when `address` (6 bytes in NimBLE's little-endian order, the
+`val` of a `ble_addr_t`) equals the identity address of a retained guest bond.
+Guest identities are the resolved peer identity addresses kept in the guest bond
+table (`hid_pairing_t.bonds[].peer`, persisted in the bond namespace). Only the
+address bytes are compared; `address_type` is not, so a public/random type mismatch
+can never hide a guest. This fails safe: a false positive only makes the caller
+refuse. Returns `false` before `doubtech_hid_start` and for a `NULL` address.
+Call it only on the NimBLE host thread, because it reads the table that the host
+thread changes.
+
+Why it exists: guest bonds and the input-device central's bonds share one NimBLE
+key store. The central uses this query to refuse a scanned device that is a guest
+(reason 5). It also uses it so that it never deletes a bond whose peer is a guest
+(stale-bond cleanup, unfinished pairing, repeat pairing, forget).
+
 ### `void doubtech_hid_pairing_cancel(void)`
 
 Closes the window and any pending challenge, terminates the link that owned a

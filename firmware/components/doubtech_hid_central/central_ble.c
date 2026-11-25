@@ -156,6 +156,17 @@ static bool registry_has_addr(const ble_addr_t *addr)
     return false;
 }
 
+/* Guest and central bonds share one NimBLE key store and look alike there. */
+static bool peer_is_guest(const ble_addr_t *addr) { return doubtech_hid_peer_is_guest(addr->type, addr->val); }
+
+/* Deletes a bond only when it belongs to neither a guest nor a stored input device. */
+static void delete_bond_if_ours(const ble_addr_t *addr, const char *why)
+{
+    if (!central_bond_deletable(peer_is_guest(addr), registry_has_addr(addr))) return;
+    int rc = ble_store_util_delete_peer(addr);
+    if (rc != 0 && rc != BLE_HS_ENOENT) ESP_LOGW(tag, "could not delete %s bond: %d", why, rc);
+}
+
 static uint8_t free_kinds(void)
 {
     uint8_t mask = 0;
@@ -236,10 +247,7 @@ static void link_closed(link_t *link)
 {
     bool was_pairing = link->pairing;
     link_release_input(link);
-    if (was_pairing && link->bonded && !registry_has_addr(&link->peer_id)) {
-        int rc = ble_store_util_delete_peer(&link->peer_id); /* never keep the bond of an unfinished pairing */
-        if (rc != 0 && rc != BLE_HS_ENOENT) ESP_LOGW(tag, "could not delete the unfinished bond: %d", rc);
-    }
+    if (was_pairing && link->bonded) delete_bond_if_ours(&link->peer_id, "the unfinished"); /* never a guest's */
     if (link->announced) {
         kind_connected[link->kind] = false;
         emit(DTHID_CENTRAL_DISCONNECTED, 0, link->kind, link->name, 0, 0, 0);
@@ -542,6 +550,12 @@ static void on_enc_change(link_t *link, const struct ble_gap_event *event)
         link_abort(link, REASON(AUTH_FAILED), false);
         return;
     }
+    /* A scanned private address can resolve to a guest's identity (its bond then
+     * encrypted this link): never adopt it as an input device, never mark it ours. */
+    if (link->pairing && peer_is_guest(&desc.peer_id_addr)) {
+        link_abort(link, REASON(CAPACITY), false);
+        return;
+    }
     link->bonded = true;
     link->peer_id = desc.peer_id_addr;
     link->phase = LINK_DISCOVERING;
@@ -579,9 +593,10 @@ static int on_repeat_pairing(link_t *link, const struct ble_gap_event *event)
 {
     struct ble_gap_conn_desc desc;
     if (link->pairing && link->phase == LINK_SECURING &&
-        ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0 && !registry_has_addr(&desc.peer_id_addr) &&
+        ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0 &&
+        central_bond_deletable(peer_is_guest(&desc.peer_id_addr), registry_has_addr(&desc.peer_id_addr)) &&
         ble_store_util_delete_peer(&desc.peer_id_addr) == 0)
-        return BLE_GAP_REPEAT_PAIRING_RETRY; /* a stale bond for an unlisted device */
+        return BLE_GAP_REPEAT_PAIRING_RETRY; /* a stale bond of an unlisted, non-guest device */
     link_abort(link, REASON(AUTH_FAILED), false);
     return BLE_GAP_REPEAT_PAIRING_IGNORE;
 }
@@ -634,11 +649,21 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     }
     link_t *link = link_from_arg(arg);
     if (!link) {
-        /* No owner: never keep an unowned central link open. */
-        if (event->type == BLE_GAP_EVENT_CONNECT && event->connect.status == 0)
-            (void)ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        else if (event->type == BLE_GAP_EVENT_PASSKEY_ACTION)
-            (void)ble_gap_terminate(event->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        /* No owner (a dropped or reused slot): this callback only serves central
+         * links, so terminate any such connection that is still talking to us.
+         * Guest links never reach this callback. */
+        uint16_t orphan = BLE_HS_CONN_HANDLE_NONE;
+        switch (event->type) {
+        case BLE_GAP_EVENT_CONNECT:
+            if (event->connect.status == 0) orphan = event->connect.conn_handle;
+            break;
+        case BLE_GAP_EVENT_PASSKEY_ACTION: orphan = event->passkey.conn_handle; break;
+        case BLE_GAP_EVENT_ENC_CHANGE: orphan = event->enc_change.conn_handle; break;
+        case BLE_GAP_EVENT_NOTIFY_RX: orphan = event->notify_rx.conn_handle; break;
+        case BLE_GAP_EVENT_REPEAT_PAIRING: orphan = event->repeat_pairing.conn_handle; break;
+        default: break;
+        }
+        if (orphan != BLE_HS_CONN_HANDLE_NONE) (void)ble_gap_terminate(orphan, BLE_ERR_REM_USER_CONN_TERM);
         return event->type == BLE_GAP_EVENT_REPEAT_PAIRING ? BLE_GAP_REPEAT_PAIRING_IGNORE : 0;
     }
     switch (event->type) {
@@ -733,8 +758,10 @@ static esp_err_t pair_select_on_host(uint8_t index)
     ble_addr_t addr = {.type = entry.addr_type};
     memcpy(addr.val, entry.addr, sizeof(addr.val));
     uint8_t allowed = free_kinds();
-    if ((entry.kind && !(allowed & CENTRAL_KIND_BIT(entry.kind))) || registry_has_addr(&addr)) {
-        pair_fail_window(REASON(CAPACITY)); /* replacing a kind needs forget first */
+    /* Guests are never connected or bonded; a stored address or a full kind needs forget first. */
+    uint8_t refused = central_scan_select_reason(&entry, allowed, registry_has_addr(&addr), peer_is_guest(&addr));
+    if (refused) {
+        pair_fail_window(refused);
         return ESP_ERR_INVALID_STATE;
     }
     link_t *link = pair.scan_deferred ? NULL : link_alloc();
@@ -743,10 +770,9 @@ static esp_err_t pair_select_on_host(uint8_t index)
         return ESP_ERR_INVALID_STATE;
     }
     (void)ble_gap_disc_cancel(); /* the initiator cannot start while scanning */
-    /* A stale local bond for this unlisted address would make encryption fail
-     * forever; pairing starts from no keys. */
-    int deleted = ble_store_util_delete_peer(&addr);
-    if (deleted != 0 && deleted != BLE_HS_ENOENT) ESP_LOGW(tag, "could not clear an old bond: %d", deleted);
+    /* A stale local bond for this unlisted, non-guest address would make
+     * encryption fail forever; pairing starts from no keys. */
+    delete_bond_if_ours(&addr, "a stale");
     link->pairing = true;
     link->kind_hint = entry.kind;
     link->allowed = allowed;
@@ -784,7 +810,8 @@ static esp_err_t forget_on_host(uint8_t kind)
             link_abort(&links[i], 0, true); /* reports the lost input, then DISCONNECTED */
     ble_addr_t addr = {.type = record.addr_type};
     memcpy(addr.val, record.addr, sizeof(addr.val));
-    if (!registry_has_addr(&addr)) { /* a combo device keeps its bond for the other kind */
+    /* A combo device keeps its bond for the other kind; a guest's bond is never touched. */
+    if (central_bond_deletable(peer_is_guest(&addr), registry_has_addr(&addr))) {
         int rc = ble_store_util_delete_peer(&addr);
         if (rc != 0 && rc != BLE_HS_ENOENT) return ESP_FAIL;
     }

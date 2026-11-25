@@ -179,6 +179,21 @@ static void pairing_active_follows_window(void)
     assert(last_event.type == DOUBTECH_HID_PAIRING_TIMEOUT);
 }
 
+/* Another role (the input central) must never delete or reuse a guest's bond. */
+static void peer_is_guest_matches_retained_bonds(void)
+{
+    const uint8_t first[6] = {1, 0, 0, 0, 0, 0}, second[6] = {2, 0, 0, 0, 0, 0}, other[6] = {9, 0, 0, 0, 0, 0};
+    check_gap_name = false;
+    seed_guest_bonds(2); /* identities type 1, address[0] = 1 and 2 */
+    assert(!doubtech_hid_peer_is_guest(1, first)); /* not started: no table yet */
+    assert(doubtech_hid_start(NULL) == 0);
+    assert(doubtech_hid_peer_is_guest(1, first) && doubtech_hid_peer_is_guest(1, second));
+    /* The same bytes under another address type are treated as the guest too (fail safe). */
+    assert(doubtech_hid_peer_is_guest(0, first));
+    assert(!doubtech_hid_peer_is_guest(1, other));
+    assert(!doubtech_hid_peer_is_guest(1, NULL));
+}
+
 static void foreign_ignored(void) { check_gap_name = false; pairing_open_ignores_foreign_bonds(); }
 static void eight_guests_refused(void) { check_gap_name = false; pairing_open_refused_at_eight_guests(); }
 
@@ -199,6 +214,7 @@ int main(int argc, char **argv)
         {"reserve_above_8_rejected", reserve_above_8_rejected},
         {"host_synced_false_before_sync_true_after", host_synced_false_before_sync_true_after},
         {"pairing_active_follows_window", pairing_active_follows_window},
+        {"peer_is_guest_matches_retained_bonds", peer_is_guest_matches_retained_bonds},
         {"pairing_open_ignores_foreign_bonds", foreign_ignored},
         {"pairing_open_refused_at_eight_guests", eight_guests_refused},
     };

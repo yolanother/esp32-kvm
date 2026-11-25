@@ -120,8 +120,34 @@ static void test_scan_list(void)
     CHECK(central_scan_offer(&list, extra, 0, -10, &gamepad) == 0 && list.entries[0].kind == 0);
 }
 
+/* Selection and bond-deletion rules that protect guest and stored bonds. */
+static void test_selection_and_bond_rules(void)
+{
+    central_scan_entry_t entry;
+    memset(&entry, 0, sizeof(entry));
+    const uint8_t both = (uint8_t)((1u << DOUBTECH_HID_CENTRAL_KEYBOARD) | (1u << DOUBTECH_HID_CENTRAL_MOUSE));
+    const uint8_t mouse_only = (uint8_t)(1u << DOUBTECH_HID_CENTRAL_MOUSE);
+    CHECK(central_scan_select_reason(&entry, both, false, false) == 0);
+    /* A guest identity is never connected or bonded as an input device. */
+    CHECK(central_scan_select_reason(&entry, both, false, true) == DOUBTECH_HID_CENTRAL_REASON_CAPACITY);
+    /* An address already stored for either kind needs forget first. */
+    CHECK(central_scan_select_reason(&entry, both, true, false) == DOUBTECH_HID_CENTRAL_REASON_CAPACITY);
+    entry.kind = DOUBTECH_HID_CENTRAL_KEYBOARD;
+    CHECK(central_scan_select_reason(&entry, mouse_only, false, false) == DOUBTECH_HID_CENTRAL_REASON_CAPACITY);
+    CHECK(central_scan_select_reason(&entry, both, false, false) == 0);
+    entry.kind = 0; /* unknown kind: decided after discovery */
+    CHECK(central_scan_select_reason(&entry, mouse_only, false, false) == 0);
+    CHECK(central_scan_select_reason(NULL, both, false, false) == DOUBTECH_HID_CENTRAL_REASON_CAPACITY);
+
+    CHECK(central_bond_deletable(false, false));
+    CHECK(!central_bond_deletable(true, false));  /* guest bond */
+    CHECK(!central_bond_deletable(false, true));  /* stored input device */
+    CHECK(!central_bond_deletable(true, true));
+}
+
 int main(void)
 {
+    test_selection_and_bond_rules();
     test_adv_parse();
     test_scan_list();
     if (failures) {

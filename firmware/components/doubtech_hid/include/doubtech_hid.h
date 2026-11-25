@@ -96,6 +96,13 @@ esp_err_t doubtech_hid_pairing_open(void);
  * window while this is true; this library does not refuse a guest window opened
  * during another role's window, so the application must not open both. */
 bool doubtech_hid_pairing_active(void);
+/** True when the 6-byte address (NimBLE little-endian order, as in ble_addr_t.val)
+ * is the identity of a retained guest bond. The type is accepted for symmetry with
+ * ble_addr_t but not compared, so a match never depends on public/random typing
+ * (fail safe: another role sharing the NimBLE store must never delete or reuse a
+ * guest's keys). False before doubtech_hid_start or for NULL. Call only on the
+ * NimBLE host thread. */
+bool doubtech_hid_peer_is_guest(uint8_t address_type, const uint8_t address[6]);
 /** Cancels pairing; caller must run on the NimBLE host thread. */
 void doubtech_hid_pairing_cancel(void);
 /** Confirms or rejects a pending numeric comparison on the host thread.

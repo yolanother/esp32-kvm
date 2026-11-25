@@ -52,4 +52,14 @@ void central_scan_clear(central_scan_list_t *list);
 int central_scan_offer(central_scan_list_t *list, const uint8_t addr[6], uint8_t addr_type, int8_t rssi,
                        const central_adv_info_t *info);
 
+/** Whether a scan row may be paired: 0 when it may, else reason 5 (capacity)
+ * when the address is a guest identity (never connect or bond a guest), already
+ * stored for any kind (forget first), or its advertised kind has no free slot.
+ * free_kinds holds bit (1 << kind) for each kind not yet stored. */
+uint8_t central_scan_select_reason(const central_scan_entry_t *entry, uint8_t free_kinds, bool stored_peer,
+                                   bool guest_peer);
+/** A NimBLE bond may be deleted only when its peer is neither a guest nor a
+ * stored input device. The guest and central bonds share one key store. */
+bool central_bond_deletable(bool guest_peer, bool stored_peer);
+
 #endif

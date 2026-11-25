@@ -99,3 +99,13 @@ int central_scan_offer(central_scan_list_t *list, const uint8_t addr[6], uint8_t
     entry->name[sizeof(entry->name) - 1] = '\0';
     return (int)list->count++;
 }
+
+uint8_t central_scan_select_reason(const central_scan_entry_t *entry, uint8_t free_kinds, bool stored_peer,
+                                   bool guest_peer)
+{
+    if (!entry || guest_peer || stored_peer) return DOUBTECH_HID_CENTRAL_REASON_CAPACITY;
+    if (entry->kind && !(free_kinds & (uint8_t)(1u << entry->kind))) return DOUBTECH_HID_CENTRAL_REASON_CAPACITY;
+    return 0;
+}
+
+bool central_bond_deletable(bool guest_peer, bool stored_peer) { return !guest_peer && !stored_peer; }

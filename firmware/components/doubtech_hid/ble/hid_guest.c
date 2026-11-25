@@ -625,6 +625,16 @@ bool doubtech_hid_pairing_active(void)
     return pairing.window_active;
 }
 
+bool doubtech_hid_peer_is_guest(uint8_t address_type, const uint8_t address[6])
+{
+    (void)address_type; /* bytes alone decide: a false positive only refuses */
+    if (!started || !address) return false;
+    for (size_t index = 0; index < pairing.bond_count; ++index)
+        if (memcmp(pairing.bonds[index].peer.address, address, sizeof(pairing.bonds[index].peer.address)) == 0)
+            return true;
+    return false;
+}
+
 void doubtech_hid_pairing_cancel(void)
 {
     bool pending = pairing.challenge_active || pairing.challenge_approved;
