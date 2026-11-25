@@ -35,6 +35,7 @@ void app_main(void)
 #else
     const bool enable_panel = false;
 #endif
+    kvm_display_set_input_fn(kvm_transport_input_touch);
     esp_err_t display_result = kvm_display_start(enable_panel, kvm_transport_button_event,
                                                  kvm_transport_pairing_touch,
                                                  kvm_transport_target_touch);

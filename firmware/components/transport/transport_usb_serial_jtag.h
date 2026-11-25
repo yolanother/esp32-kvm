@@ -26,6 +26,9 @@ void kvm_transport_pairing_touch(kvm_display_pair_request_t request);
 /** Queues a local/guest card selection: the device-input target while no host
  * session is open, otherwise a selection request to the host. */
 void kvm_transport_target_touch(uint8_t slot);
+/** Queues one input-device pairing touch (begin, select a displayed row, cancel)
+ *  for the worker, which alone calls the BLE central. */
+void kvm_transport_input_touch(kvm_display_input_request_t request);
 /** Copies one device-input message into the worker's bounded hub queue (depth
  * 16; overflow drops pointer motion first; a LOST message is never dropped).
  * Safe from the NimBLE host thread; ignored before the transport starts. */

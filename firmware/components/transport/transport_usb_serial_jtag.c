@@ -9,7 +9,10 @@
  * The input hub runs in the same worker beside the router: the BLE central
  * starts here once the NimBLE host is synced, its callbacks only copy reports
  * into a bounded queue, and the worker drains that queue each iteration after
- * the host bytes and the lease tick, bounded to 20 ms of device work. */
+ * the host bytes and the lease tick, bounded to 20 ms of device work.
+ * The worker also owns the input-device pairing window: touch requests and
+ * central pairing events update it, and it is never open beside a guest
+ * pairing window or a host session (each refuses the other with BUSY). */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "transport_hub.h"
@@ -62,6 +65,9 @@ static atomic_bool hub_queue_ready;
 static kvm_hub_worker_t hub_worker;
 static QueueHandle_t central_event_queue;
 static atomic_uint published_hub_target;
+/* Input-device pairing screen: worker-owned, fed by touch and central events. */
+static kvm_display_input_pairing_t input_pairing;
+static QueueHandle_t input_touch_queue;
 
 static void hub_queue_lock(void *context) { (void)context; portENTER_CRITICAL(&hub_lock); }
 static void hub_queue_unlock(void *context) { (void)context; portEXIT_CRITICAL(&hub_lock); }
@@ -81,8 +87,9 @@ static void central_input(const doubtech_hid_central_input_t *input, void *conte
     if (kvm_router_hid_central_msg(input, &msg)) kvm_transport_hub_submit(&msg);
 }
 
-/* NimBLE host thread: copy and enqueue only. Pairing events are for the input
- * pairing screen; a full queue drops the event (the window is re-entered). */
+/* NimBLE host thread: copy and enqueue only. Pairing events feed the input
+ * pairing screen; a full queue drops the event, and the screen's own hard
+ * deadline still closes the window and cancels the central. */
 static void central_event(const doubtech_hid_central_event_t *event, void *context)
 {
     (void)context;
@@ -111,12 +118,57 @@ static void poll_central_start(uint64_t time_ms)
     ESP_LOGW("esp32-kvm", "Input central start failed: %d", result);
 }
 
-static void drain_central_events(void)
+static void drain_central_events(uint64_t time_ms)
 {
     doubtech_hid_central_event_t event;
     while (central_event_queue && xQueueReceive(central_event_queue, &event, 0) == pdTRUE) {
-        /* No consumer yet: the input pairing screen reads these. */
+        kvm_display_input_event_t copy;
+        memset(&copy, 0, sizeof(copy));
+        switch (event.type) {
+        case DTHID_CENTRAL_SCAN_RESULT: copy.type = KVM_DISPLAY_INPUT_EVENT_SCAN; break;
+        case DTHID_CENTRAL_PASSKEY: copy.type = KVM_DISPLAY_INPUT_EVENT_PASSKEY; break;
+        case DTHID_CENTRAL_PAIRED: copy.type = KVM_DISPLAY_INPUT_EVENT_PAIRED; break;
+        case DTHID_CENTRAL_PAIR_FAILED: copy.type = KVM_DISPLAY_INPUT_EVENT_FAILED; break;
+        default: continue; /* CONNECTED/DISCONNECTED: the status polls connected() */
+        }
+        copy.index = event.index;
+        copy.kind = event.kind;
+        memcpy(copy.name, event.name, sizeof(copy.name));
+        copy.rssi = event.rssi;
+        copy.passkey = event.passkey;
+        copy.reason = event.reason;
+        kvm_display_input_pairing_event(&input_pairing, &copy, time_ms);
     }
+}
+
+/* Central operations for the input pairing window; worker task only. */
+static bool central_pair_begin(void *context)
+{ (void)context; return doubtech_hid_central_pair_begin() == ESP_OK; }
+static bool central_pair_select(void *context, uint8_t index)
+{ (void)context; return doubtech_hid_central_pair_select(index) == ESP_OK; }
+static void central_pair_cancel(void *context)
+{ (void)context; doubtech_hid_central_pair_cancel(); }
+
+/* The guest window as the worker knows it (OPENED events and its own begins).
+ * doubtech_hid_pairing_active() itself is checked by the central on the
+ * NimBLE host thread inside pair_begin; calling it here would race the host. */
+static bool guest_pairing_open(void)
+{
+    return display_pairing.state == KVM_DISPLAY_PAIRING_WAITING ||
+           display_pairing.state == KVM_DISPLAY_PAIRING_CHALLENGE;
+}
+
+void kvm_transport_input_touch(kvm_display_input_request_t request)
+{
+    if (input_touch_queue) (void)xQueueSend(input_touch_queue, &request, 0);
+}
+
+static void drain_input_touch(uint64_t time_ms)
+{
+    kvm_display_input_request_t request;
+    while (input_touch_queue && xQueueReceive(input_touch_queue, &request, 0) == pdTRUE)
+        (void)kvm_display_input_pairing_request(&input_pairing, request, time_ms,
+                                                router.session_open, guest_pairing_open());
 }
 
 static uint8_t visible_ready_mask(const kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS])
@@ -134,6 +186,11 @@ static bool pair_begin(void *context)
     (void)context;
     if (display_pairing.state == KVM_DISPLAY_PAIRING_WAITING ||
         display_pairing.state == KVM_DISPLAY_PAIRING_CHALLENGE) return false;
+    /* Never beside an input-device window (the app gets BUSY, the screen too). */
+    if (kvm_display_input_pairing_blocks_guest(&input_pairing)) {
+        kvm_display_input_pairing_guest_refused(&input_pairing, (uint64_t)esp_timer_get_time() / 1000);
+        return false;
+    }
     if (!doubtech_hid_request_pair_begin()) return false;
     kvm_display_pairing_started(&display_pairing, false, (uint64_t)esp_timer_get_time() / 1000);
     return true;
@@ -199,7 +256,15 @@ static bool drain_pairing_events(void)
         case DOUBTECH_HID_PAIRING_TIMEOUT: state = KVM_PAIRING_TIMEOUT; break;
         default: state = KVM_PAIRING_CLOSED; break;
         }
-        if (event.type == DOUBTECH_HID_PAIRING_OPENED) {
+        if (event.type == DOUBTECH_HID_PAIRING_OPENED &&
+            kvm_display_input_pairing_blocks_guest(&input_pairing)) {
+            /* A guest window the worker did not open (a guest starting
+               pairing on its own) never runs beside the input window; its
+               CLOSED event follows the cancel. */
+            (void)doubtech_hid_request_pair_cancel();
+            kvm_display_input_pairing_guest_refused(&input_pairing,
+                                                    (uint64_t)esp_timer_get_time() / 1000);
+        } else if (event.type == DOUBTECH_HID_PAIRING_OPENED) {
             if (display_pairing.state == KVM_DISPLAY_PAIRING_CLOSED)
                 kvm_display_pairing_started(&display_pairing, false,
                                             (uint64_t)esp_timer_get_time() / 1000);
@@ -231,6 +296,11 @@ static void drain_pairing_touch(uint64_t time_ms)
     kvm_display_pair_request_t request;
     while (xQueueReceive(pairing_touch_queue, &request, 0) == pdTRUE) {
         if (!kvm_display_pairing_accept(&display_pairing, request, time_ms)) continue;
+        if (request.action == KVM_DISPLAY_PAIR_BEGIN &&
+            kvm_display_input_pairing_blocks_guest(&input_pairing)) {
+            kvm_display_input_pairing_guest_refused(&input_pairing, time_ms); /* shows BUSY */
+            continue;
+        }
         switch (request.action) {
         case KVM_DISPLAY_PAIR_BEGIN:
             if (doubtech_hid_request_pair_begin())
@@ -270,6 +340,7 @@ static void publish_status(bool connected, bool guest_ready, uint8_t paired_gues
     status.input_kbd = doubtech_hid_central_connected(DOUBTECH_HID_CENTRAL_KEYBOARD);
     status.input_mouse = doubtech_hid_central_connected(DOUBTECH_HID_CENTRAL_MOUSE);
     status.hub_target = hub_worker.hub.target;
+    kvm_display_input_pairing_status(&input_pairing, (uint64_t)(esp_timer_get_time() / 1000), &status);
     /* USB can remain electrically connected after the verified host session
        closes. Keep the authenticated BLE slot visible in either case. */
     if (!connected || !core.session_open || !router.session_open) {
@@ -360,6 +431,11 @@ static void usb_worker(void *context)
             (void)doubtech_hid_request_pair_cancel();
             (void)xQueueReset(pairing_touch_queue);
             kvm_display_pairing_clear(&display_pairing);
+            (void)xQueueReset(input_touch_queue);
+            (void)kvm_display_input_pairing_request(&input_pairing,
+                (kvm_display_input_request_t){.action = KVM_DISPLAY_INPUT_PAIR_CANCEL,
+                                              .window = input_pairing.window},
+                now_ms(NULL), router.session_open, guest_pairing_open());
             kvm_hub_worker_release(&hub_worker);
             kvm_router_emergency_release(&router);
             kvm_transport_core_reset(&core);
@@ -411,7 +487,10 @@ static void usb_worker(void *context)
             plus = false;
         }
         poll_central_start(time_ms);
-        drain_central_events();
+        if (!(button_bits & 2u)) drain_input_touch(time_ms);
+        drain_central_events(time_ms);
+        /* Hard deadline and host-session exclusivity, even without central events. */
+        kvm_display_input_pairing_tick(&input_pairing, time_ms, router.session_open);
         /* Device input waiting: poll USB briefly so it is not held back 20 ms. */
         TickType_t wait = pdMS_TO_TICKS(kvm_hub_queue_pending(&hub_queue) ? 2 : 20);
         if (!wait) wait = 1;
@@ -471,7 +550,7 @@ static void usb_worker(void *context)
 static void delete_queues(void)
 {
     QueueHandle_t *queues[] = {&pairing_queue, &pairing_touch_queue, &target_touch_queue,
-                               &central_event_queue};
+                               &central_event_queue, &input_touch_queue};
     for (size_t i = 0; i < sizeof(queues) / sizeof(queues[0]); ++i) {
         if (*queues[i]) vQueueDelete(*queues[i]);
         *queues[i] = NULL;
@@ -490,8 +569,13 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     pairing_queue = xQueueCreate(8, sizeof(doubtech_hid_pairing_event_t));
     pairing_touch_queue = xQueueCreate(4, sizeof(kvm_display_pair_request_t));
     target_touch_queue = xQueueCreate(4, sizeof(uint8_t));
-    central_event_queue = xQueueCreate(8, sizeof(doubtech_hid_central_event_t));
-    if (!pairing_queue || !pairing_touch_queue || !target_touch_queue || !central_event_queue) {
+    /* Holds a full scan list (8 rows) plus the window's terminal events. */
+    central_event_queue = xQueueCreate(16, sizeof(doubtech_hid_central_event_t));
+    input_touch_queue = xQueueCreate(4, sizeof(kvm_display_input_request_t));
+    kvm_display_input_pairing_init(&input_pairing, (kvm_display_input_ops_t){
+        central_pair_begin, central_pair_select, central_pair_cancel, NULL});
+    if (!pairing_queue || !pairing_touch_queue || !target_touch_queue || !central_event_queue ||
+        !input_touch_queue) {
         delete_queues();
         (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;

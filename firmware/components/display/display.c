@@ -30,6 +30,7 @@
 static kvm_display_event_fn event_callback;
 static kvm_display_pair_fn pair_callback;
 static kvm_display_target_fn target_callback;
+static kvm_display_input_fn input_callback;
 static kvm_display_status_t latest_status;
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool started;
@@ -49,6 +50,12 @@ static lv_obj_t *target_names[4];
 static lv_obj_t *left_action;
 static lv_obj_t *right_action;
 static lv_obj_t *guest_settings_action;
+/* Input-device pairing: the entry beside the gear, the close control and the
+   device rows (geometry from display_model.h, the touch zones' source). */
+static lv_obj_t *input_entry_action;
+static lv_obj_t *input_cancel_action;
+static lv_obj_t *input_rows[4];
+static lv_obj_t *input_row_labels[4];
 
 static void touch_interrupt(esp_lcd_touch_handle_t touch)
 {
@@ -258,6 +265,29 @@ static esp_err_t init_panel(void)
     lv_obj_add_flag(left_action, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(right_action, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(guest_settings_action, LV_OBJ_FLAG_HIDDEN);
+    input_entry_action = make_action(screen, KVM_DISPLAY_INPUT_ENTRY_X, KVM_DISPLAY_INPUT_ENTRY_SIZE);
+    lv_obj_set_size(input_entry_action, KVM_DISPLAY_INPUT_ENTRY_SIZE, KVM_DISPLAY_INPUT_ENTRY_SIZE);
+    lv_obj_align(input_entry_action, LV_ALIGN_TOP_LEFT, KVM_DISPLAY_INPUT_ENTRY_X,
+                 KVM_DISPLAY_INPUT_ENTRY_Y);
+    lv_obj_add_flag(input_entry_action, LV_OBJ_FLAG_HIDDEN);
+    input_cancel_action = make_action(screen, KVM_DISPLAY_INPUT_CANCEL_X, KVM_DISPLAY_INPUT_CANCEL_W);
+    lv_obj_set_size(input_cancel_action, KVM_DISPLAY_INPUT_CANCEL_W, KVM_DISPLAY_INPUT_CANCEL_W);
+    lv_obj_align(input_cancel_action, LV_ALIGN_TOP_LEFT, KVM_DISPLAY_INPUT_CANCEL_X, 1);
+    lv_obj_add_flag(input_cancel_action, LV_OBJ_FLAG_HIDDEN);
+    for (unsigned i = 0; i < 4; ++i) {
+        /* A 42 px box inside each 44 px touch row. */
+        input_rows[i] = make_action(screen, KVM_DISPLAY_INPUT_ROW_X, KVM_DISPLAY_INPUT_ROW_W);
+        lv_obj_set_size(input_rows[i], KVM_DISPLAY_INPUT_ROW_W, KVM_DISPLAY_INPUT_ROW_H - 2);
+        lv_obj_align(input_rows[i], LV_ALIGN_TOP_LEFT, KVM_DISPLAY_INPUT_ROW_X,
+                     (int32_t)(KVM_DISPLAY_INPUT_ROW_Y + KVM_DISPLAY_INPUT_ROW_H * i + 1u));
+        input_row_labels[i] = lv_label_create(input_rows[i]);
+        lv_obj_set_width(input_row_labels[i], KVM_DISPLAY_INPUT_ROW_W - 16);
+        lv_label_set_long_mode(input_row_labels[i], LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_style_text_color(input_row_labels[i], lv_color_hex(0xeef5f7), 0);
+        lv_label_set_text(input_row_labels[i], "");
+        lv_obj_center(input_row_labels[i]);
+        lv_obj_add_flag(input_rows[i], LV_OBJ_FLAG_HIDDEN);
+    }
     lvgl_port_unlock();
     touch_started = pair_callback && init_touch();
     panel_started = true;
@@ -288,15 +318,23 @@ static void display_worker(void *context)
             lv_label_set_text(title_label, view.title);
 #if CONFIG_LV_FONT_MONTSERRAT_28
             lv_obj_set_style_text_font(primary_label,
-                view.screen == KVM_DISPLAY_PAIRING && strlen(view.primary) == 6u
-                    ? &lv_font_montserrat_28 : LV_FONT_DEFAULT, 0);
+                (view.screen == KVM_DISPLAY_PAIRING || view.screen == KVM_DISPLAY_INPUT_PAIR) &&
+                strlen(view.primary) == 6u ? &lv_font_montserrat_28 : LV_FONT_DEFAULT, 0);
 #endif
             lv_label_set_text(primary_label, view.primary);
             lv_label_set_text(detail_label, view.detail);
             lv_label_set_text(footer_label, view.usb_dim ? badge : view.footer);
             strcpy(shown_badge, view.usb_dim ? badge : "");
+            bool input_screen = view.screen == KVM_DISPLAY_INPUT_PAIR;
+            /* The input rows reach y 220; its countdown footer sits below them.
+               Beside the entry and gear buttons the footer ends before x 142.
+               (TOP_LEFT at x 12 equals the original TOP_MID for width 216.) */
+            lv_obj_set_width(footer_label, view.show_input_entry && touch_started
+                                               ? KVM_DISPLAY_INPUT_ENTRY_X - 16 : LCD_WIDTH - 24);
+            lv_obj_align(footer_label, LV_ALIGN_TOP_LEFT, 12, input_screen ? 220 : 210);
             bool cards = view.screen == KVM_DISPLAY_ACTIVE;
-            if (cards) {
+            bool device_rows = input_screen && view.input_row_count > 0;
+            if (cards || device_rows) {
                 lv_obj_add_flag(primary_label, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
             } else {
@@ -305,12 +343,25 @@ static void display_worker(void *context)
             }
             for (unsigned i = 0; i < 3; ++i) {
                 lv_label_set_text(row_labels[i], view.rows[i]);
-                if (cards) lv_obj_add_flag(row_labels[i], LV_OBJ_FLAG_HIDDEN);
+                if (cards || input_screen) lv_obj_add_flag(row_labels[i], LV_OBJ_FLAG_HIDDEN);
                 else lv_obj_remove_flag(row_labels[i], LV_OBJ_FLAG_HIDDEN);
             }
+            for (unsigned i = 0; i < 4; ++i) {
+                if (input_screen && i < view.input_row_count) {
+                    lv_label_set_text(input_row_labels[i], view.input_rows[i]);
+                    lv_obj_remove_flag(input_rows[i], LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(input_rows[i], LV_OBJ_FLAG_HIDDEN);
+                }
+            }
             for (unsigned i = 0; i < 4; ++i) update_target_card(i, &view);
+            set_action(input_entry_action, view.show_input_entry && touch_started
+                                               ? LV_SYMBOL_KEYBOARD : NULL);
+            set_action(input_cancel_action, input_screen && view.input_cancel && touch_started
+                                                ? LV_SYMBOL_CLOSE : NULL);
             if (touch_started && !next.recovery_required && !next.updating &&
-                !next.fault && !next.armed) {
+                !next.fault && !next.armed && !input_screen &&
+                next.input_pair_state == KVM_DISPLAY_INPUT_CLOSED) {
                 switch (next.pairing_state) {
                 case KVM_DISPLAY_PAIRING_CLOSED:
                 case KVM_DISPLAY_PAIRING_REJECTED:
@@ -356,9 +407,21 @@ static void display_worker(void *context)
             if (esp_lcd_touch_get_data(touch_handle, &point, &count, 1) == ESP_OK && count) {
                 kvm_display_pair_action_t action;
                 kvm_display_pair_request_t request;
+                kvm_display_input_action_t input_action;
+                kvm_display_input_request_t input_request;
+                uint8_t input_row = 0;
                 uint64_t touch_ms = (uint64_t)esp_timer_get_time() / 1000;
                 bool accepted = false;
-                if ((!last_touch_ms || touch_ms - last_touch_ms >= 750u) &&
+                /* Input-device pairing first: its zones only exist on its own
+                   screen or (the entry) where no card or guest zone lies. */
+                if ((!last_touch_ms || touch_ms - last_touch_ms >= 750u) && input_callback &&
+                    kvm_display_input_touch_action(&next, point.x, point.y,
+                                                   &input_action, &input_row) &&
+                    kvm_display_input_request(&next, input_action, input_row, &input_request)) {
+                    input_callback(input_request);
+                    accepted = true;
+                }
+                if (!accepted && (!last_touch_ms || touch_ms - last_touch_ms >= 750u) &&
                     view.screen == KVM_DISPLAY_ACTIVE && target_callback) {
                     int card = -1;
                     if (point.x >= 12 && point.x < 116 && point.y >= 42 && point.y < 112) card = 0;
@@ -383,6 +446,11 @@ static void display_worker(void *context)
             }
         }
     }
+}
+
+void kvm_display_set_input_fn(kvm_display_input_fn input_fn)
+{
+    if (!started) input_callback = input_fn; /* read by the display task it precedes */
 }
 
 esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn,

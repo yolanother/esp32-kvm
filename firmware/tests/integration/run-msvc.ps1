@@ -32,7 +32,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Transport display status compile failed' }
 & (Join-Path $output 'test_transport_display_status.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Transport display status test failed' }
 Write-Output 'PASS transport display status'
-& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 "/I$repo/firmware/components/input_hub" @includes (Join-Path $PSScriptRoot 'test_hub_worker.c') (Join-Path $repo 'firmware/components/transport/transport_hub.c') (Join-Path $repo 'firmware/components/transport/transport_core.c') (Join-Path $repo 'firmware/components/router/router.c') (Join-Path $repo 'firmware/components/input_hub/input_hub.c') "/Fo:$output/" "/Fe:$output/test_hub_worker.exe" /link @libraries
+& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 "/I$repo/firmware/components/input_hub" @includes (Join-Path $PSScriptRoot 'test_hub_worker.c') (Join-Path $repo 'firmware/components/transport/transport_hub.c') (Join-Path $repo 'firmware/components/transport/transport_core.c') (Join-Path $repo 'firmware/components/router/router.c') (Join-Path $repo 'firmware/components/input_hub/input_hub.c') (Join-Path $repo 'firmware/components/display/display_pairing.c') "/Fo:$output/" "/Fe:$output/test_hub_worker.exe" /link @libraries
 if ($LASTEXITCODE -ne 0) { throw 'Hub worker test compile failed' }
 & (Join-Path $output 'test_hub_worker.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Hub worker test failed' }

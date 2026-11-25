@@ -15,6 +15,11 @@ typedef void (*kvm_display_pair_fn)(kvm_display_pair_request_t request);
 /** Queues one visible target card selection; zero is the local host. */
 typedef void (*kvm_display_target_fn)(uint8_t slot);
 
+/** Delivers a validated input-device pairing touch to the serialized USB worker. */
+typedef void (*kvm_display_input_fn)(kvm_display_input_request_t request);
+
+/** Sets the input-device pairing touch consumer; call before kvm_display_start. */
+void kvm_display_set_input_fn(kvm_display_input_fn input_fn);
 /** Starts BOOT sampling, then optionally the validated board LCD and touch. */
 esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn,
                             kvm_display_pair_fn pair_fn, kvm_display_target_fn target_fn);

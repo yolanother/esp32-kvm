@@ -89,3 +89,218 @@ void kvm_display_pairing_clear(kvm_display_pairing_t *p)
 {
     if (p) memset(p, 0, sizeof(*p));
 }
+
+/* ---- Input-device pairing ---- */
+
+/* Copies a possibly unterminated fixed-size name. */
+static void copy_name(char *dst, size_t dst_size, const char *src, size_t src_size)
+{
+    size_t n = 0;
+    while (n < src_size && n + 1 < dst_size && src[n]) ++n;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+static void input_close(kvm_display_input_pairing_t *p)
+{
+    kvm_display_input_ops_t ops = p->ops;
+    uint32_t window = p->window;
+    uint64_t busy = p->guest_busy_until_ms;
+    memset(p, 0, sizeof(*p));
+    p->ops = ops;
+    p->window = window;
+    p->guest_busy_until_ms = busy;
+}
+
+static void input_result(kvm_display_input_pairing_t *p, uint8_t reason, bool refused,
+                         uint64_t now_ms)
+{
+    p->state = KVM_DISPLAY_INPUT_RESULT;
+    p->connecting = false;
+    p->refused = refused;
+    p->reason = reason;
+    p->passkey = 0;
+    p->deadline_ms = now_ms + KVM_DISPLAY_INPUT_RESULT_MS;
+    memset(p->scan, 0, sizeof(p->scan));
+}
+
+static bool input_window_open(const kvm_display_input_pairing_t *p)
+{
+    return p->state == KVM_DISPLAY_INPUT_SCANNING || p->state == KVM_DISPLAY_INPUT_PASSKEY;
+}
+
+static void input_cancel_central(kvm_display_input_pairing_t *p)
+{
+    if (p->ops.cancel) p->ops.cancel(p->ops.context);
+}
+
+void kvm_display_input_pairing_init(kvm_display_input_pairing_t *p, kvm_display_input_ops_t ops)
+{
+    if (!p) return;
+    memset(p, 0, sizeof(*p));
+    p->ops = ops;
+}
+
+bool kvm_display_input_pairing_request(kvm_display_input_pairing_t *p,
+                                       kvm_display_input_request_t request, uint64_t now_ms,
+                                       bool host_session, bool guest_pairing)
+{
+    if (!p) return false;
+    switch (request.action) {
+    case KVM_DISPLAY_INPUT_PAIR_BEGIN:
+        if (p->state != KVM_DISPLAY_INPUT_CLOSED) return false;
+        input_close(p);
+        if (++p->window == 0) p->window = 1;
+        if (host_session || guest_pairing) {
+            /* Never concurrent with a host session or a guest window. */
+            input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, false, now_ms);
+            return false;
+        }
+        if (!p->ops.begin || !p->ops.begin(p->ops.context)) {
+            /* The central reports its own reason (busy or capacity) as an event. */
+            input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, true, now_ms);
+            return false;
+        }
+        p->state = KVM_DISPLAY_INPUT_SCANNING;
+        p->deadline_ms = now_ms + KVM_DISPLAY_INPUT_WINDOW_MS;
+        return true;
+    case KVM_DISPLAY_INPUT_PAIR_SELECT: {
+        if (p->state != KVM_DISPLAY_INPUT_SCANNING || p->connecting ||
+            request.window != p->window || request.scan_index >= KVM_DISPLAY_INPUT_SCAN_MAX)
+            return false;
+        const kvm_display_input_scan_t *entry = &p->scan[request.scan_index];
+        if (!entry->used) return false;
+        p->kind = entry->kind;
+        copy_name(p->name, sizeof(p->name), entry->name, sizeof(entry->name));
+        if (!p->ops.select || !p->ops.select(p->ops.context, request.scan_index)) {
+            input_cancel_central(p); /* make sure the window is over */
+            input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, true, now_ms);
+            return false;
+        }
+        p->connecting = true;
+        p->deadline_ms = now_ms + KVM_DISPLAY_INPUT_WINDOW_MS;
+        memset(p->scan, 0, sizeof(p->scan));
+        return true;
+    }
+    case KVM_DISPLAY_INPUT_PAIR_CANCEL:
+        if (p->state == KVM_DISPLAY_INPUT_CLOSED || request.window != p->window) return false;
+        if (input_window_open(p)) input_cancel_central(p);
+        input_close(p);
+        return true;
+    default: return false;
+    }
+}
+
+void kvm_display_input_pairing_event(kvm_display_input_pairing_t *p,
+                                     const kvm_display_input_event_t *e, uint64_t now_ms)
+{
+    if (!p || !e || p->state == KVM_DISPLAY_INPUT_CLOSED) return;
+    switch (e->type) {
+    case KVM_DISPLAY_INPUT_EVENT_SCAN: {
+        if (p->state != KVM_DISPLAY_INPUT_SCANNING || p->connecting ||
+            e->index >= KVM_DISPLAY_INPUT_SCAN_MAX) return;
+        kvm_display_input_scan_t *entry = &p->scan[e->index];
+        entry->used = true;
+        entry->index = e->index;
+        entry->kind = e->kind;
+        entry->rssi = e->rssi;
+        copy_name(entry->name, sizeof(entry->name), e->name, sizeof(e->name));
+        return;
+    }
+    case KVM_DISPLAY_INPUT_EVENT_PASSKEY:
+        if (!input_window_open(p) || !p->connecting || e->passkey > 999999u) return;
+        p->state = KVM_DISPLAY_INPUT_PASSKEY;
+        p->passkey = e->passkey;
+        if (e->kind) p->kind = e->kind;
+        return;
+    case KVM_DISPLAY_INPUT_EVENT_PAIRED:
+        /* Also over a result: a device that made it just before the UI's own
+           deadline is paired, and that is what the owner must see. */
+        if (e->kind) p->kind = e->kind;
+        if (e->name[0]) copy_name(p->name, sizeof(p->name), e->name, sizeof(e->name));
+        input_result(p, 0, false, now_ms);
+        return;
+    case KVM_DISPLAY_INPUT_EVENT_FAILED: {
+        uint8_t reason = e->reason >= 1 && e->reason <= 5 ? e->reason
+                                                          : KVM_DISPLAY_INPUT_REASON_AUTH_FAILED;
+        if (input_window_open(p)) input_result(p, reason, false, now_ms);
+        else if (p->state == KVM_DISPLAY_INPUT_RESULT && p->refused) {
+            p->reason = reason; /* the central's own reason for the refusal */
+            p->refused = false;
+        }
+        return;
+    }
+    default: return;
+    }
+}
+
+void kvm_display_input_pairing_tick(kvm_display_input_pairing_t *p, uint64_t now_ms,
+                                    bool host_session)
+{
+    if (!p) return;
+    if (input_window_open(p)) {
+        if (host_session) {
+            input_cancel_central(p);
+            input_result(p, KVM_DISPLAY_INPUT_REASON_BUSY, false, now_ms);
+        } else if (now_ms >= p->deadline_ms) {
+            input_cancel_central(p);
+            input_result(p, KVM_DISPLAY_INPUT_REASON_TIMEOUT, false, now_ms);
+        }
+    } else if (p->state == KVM_DISPLAY_INPUT_RESULT && now_ms >= p->deadline_ms) {
+        input_close(p);
+    }
+}
+
+bool kvm_display_input_pairing_blocks_guest(const kvm_display_input_pairing_t *p)
+{
+    return p && p->state != KVM_DISPLAY_INPUT_CLOSED;
+}
+
+void kvm_display_input_pairing_guest_refused(kvm_display_input_pairing_t *p, uint64_t now_ms)
+{
+    if (p) p->guest_busy_until_ms = now_ms + KVM_DISPLAY_INPUT_GUEST_BUSY_MS;
+}
+
+static bool scan_before(const kvm_display_input_scan_t *a, const kvm_display_input_scan_t *b)
+{
+    return a->rssi != b->rssi ? a->rssi > b->rssi : a->index < b->index;
+}
+
+void kvm_display_input_pairing_status(const kvm_display_input_pairing_t *p, uint64_t now_ms,
+                                      kvm_display_status_t *s)
+{
+    if (!p || !s) return;
+    s->input_pair_state = (uint8_t)p->state;
+    s->input_pair_count = 0;
+    memset(s->input_pair_rows, 0, sizeof(s->input_pair_rows));
+    memset(s->input_pair_index, 0, sizeof(s->input_pair_index));
+    s->input_pair_passkey = p->state == KVM_DISPLAY_INPUT_PASSKEY ? p->passkey : 0;
+    s->input_pair_reason = p->state == KVM_DISPLAY_INPUT_RESULT ? p->reason : 0;
+    s->input_pair_kind = p->kind;
+    s->input_pair_connecting = p->connecting;
+    s->input_pair_guest_busy = p->state != KVM_DISPLAY_INPUT_CLOSED &&
+                               now_ms < p->guest_busy_until_ms;
+    copy_name(s->input_pair_name, sizeof(s->input_pair_name), p->name, sizeof(p->name));
+    s->input_pair_window = p->window;
+    s->input_pair_deadline_ms = input_window_open(p) ? p->deadline_ms : 0;
+    if (p->state != KVM_DISPLAY_INPUT_SCANNING || p->connecting) return;
+    /* Selection sort of the used entries: strongest first, at most four. */
+    bool taken[KVM_DISPLAY_INPUT_SCAN_MAX] = {false};
+    for (uint8_t row = 0; row < 4u; ++row) {
+        int best = -1;
+        for (uint8_t i = 0; i < KVM_DISPLAY_INPUT_SCAN_MAX; ++i) {
+            if (!p->scan[i].used || taken[i]) continue;
+            if (best < 0 || scan_before(&p->scan[i], &p->scan[best])) best = i;
+        }
+        if (best < 0) break;
+        taken[best] = true;
+        const kvm_display_input_scan_t *entry = &p->scan[best];
+        const char *label = entry->name[0] ? entry->name :
+                            entry->kind == KVM_DISPLAY_INPUT_KEYBOARD ? "Keyboard" :
+                            entry->kind == KVM_DISPLAY_INPUT_MOUSE ? "Mouse" : "Input device";
+        copy_name(s->input_pair_rows[row], sizeof(s->input_pair_rows[row]), label,
+                  entry->name[0] ? sizeof(entry->name) : strlen(label) + 1u);
+        s->input_pair_index[row] = entry->index;
+        s->input_pair_count = (uint8_t)(row + 1u);
+    }
+}

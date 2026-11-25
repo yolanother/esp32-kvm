@@ -4,7 +4,381 @@
 #include "display_model.h"
 #include "display_pairing.h"
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
+
+/* ---- Input-device pairing (worker state machine + view + touch) ---- */
+static int begin_calls, select_calls, cancel_calls, last_select;
+static bool begin_ok, select_ok;
+static bool fake_begin(void *c) { (void)c; begin_calls++; return begin_ok; }
+static bool fake_select(void *c, uint8_t index) { (void)c; select_calls++; last_select = index; return select_ok; }
+static void fake_cancel(void *c) { (void)c; cancel_calls++; }
+
+static void input_reset(kvm_display_input_pairing_t *p)
+{
+    begin_calls = select_calls = cancel_calls = 0;
+    last_select = -1;
+    begin_ok = select_ok = true;
+    kvm_display_input_pairing_init(p, (kvm_display_input_ops_t){fake_begin, fake_select, fake_cancel, NULL});
+}
+/* The worker's snapshot, the way publish_status builds it, then the view. */
+static void input_view(const kvm_display_input_pairing_t *p, uint64_t now,
+                       kvm_display_status_t *s, kvm_display_view_t *v)
+{
+    memset(s, 0, sizeof *s);
+    s->touch_available = true;
+    s->paired_guests = 1;
+    s->guest_slots = s->ready_slots = 1; s->ready_mask = s->occupied_mask = 1;
+    kvm_display_input_pairing_status(p, now, s);
+    kvm_display_make_view(s, now, v);
+}
+static bool input_touch_request(const kvm_display_status_t *s, uint16_t x, uint16_t y,
+                                kvm_display_input_request_t *r)
+{
+    kvm_display_input_action_t a;
+    uint8_t row = 0xff;
+    return kvm_display_input_touch_action(s, x, y, &a, &row) &&
+           kvm_display_input_request(s, a, row, r);
+}
+static kvm_display_input_event_t scan_ev(uint8_t index, int8_t rssi, uint8_t kind, const char *name)
+{
+    kvm_display_input_event_t e;
+    memset(&e, 0, sizeof e);
+    e.type = KVM_DISPLAY_INPUT_EVENT_SCAN;
+    e.index = index; e.rssi = rssi; e.kind = kind;
+    snprintf(e.name, sizeof e.name, "%s", name);
+    return e;
+}
+static kvm_display_input_event_t ev(kvm_display_input_event_type_t type, uint8_t kind,
+                                    uint32_t passkey, uint8_t reason)
+{
+    kvm_display_input_event_t e;
+    memset(&e, 0, sizeof e);
+    e.type = type; e.kind = kind; e.passkey = passkey; e.reason = reason;
+    return e;
+}
+static kvm_display_input_request_t begin_req(void)
+{
+    kvm_display_input_request_t r = {KVM_DISPLAY_INPUT_PAIR_BEGIN, 0, 0, 0};
+    return r;
+}
+
+static void input_pairing_tests(void)
+{
+    kvm_display_input_pairing_t p;
+    kvm_display_status_t s;
+    kvm_display_view_t v;
+    kvm_display_input_request_t r;
+    kvm_display_input_action_t a;
+    kvm_display_pair_action_t guest_action;
+    uint8_t row;
+
+    /* Entry: "Add keyboard or mouse" sits beside the guest settings gear,
+       under the same show_guest_settings gate; the gear itself is unchanged. */
+    input_reset(&p);
+    input_view(&p, 1000, &s, &v);
+    assert(v.screen == KVM_DISPLAY_ACTIVE && v.show_guest_settings && v.show_input_entry);
+    assert(kvm_display_input_touch_action(&s, 160, 214, &a, &row) && a == KVM_DISPLAY_INPUT_PAIR_BEGIN);
+    assert(kvm_display_pair_touch_action(&s, 210, 214, &guest_action) &&
+           guest_action == KVM_DISPLAY_PAIR_BEGIN);
+    assert(!kvm_display_input_touch_action(&s, 210, 214, &a, &row)); /* the gear stays guest pairing */
+    assert(!kvm_display_input_touch_action(&s, 160, 150, &a, &row));
+    s.paired_guests = 0; /* no guest settings, no entry */
+    kvm_display_make_view(&s, 1000, &v);
+    assert(!v.show_input_entry && !kvm_display_input_touch_action(&s, 160, 214, &a, &row));
+    s.paired_guests = 1; s.touch_available = false;
+    assert(!kvm_display_input_touch_action(&s, 160, 214, &a, &row));
+    s.touch_available = true; s.pairing_state = KVM_DISPLAY_PAIRING_WAITING; s.pairing_deadline_ms = 9000;
+    assert(!kvm_display_input_touch_action(&s, 160, 214, &a, &row)); /* guest window open */
+
+    /* Refused with a host session or an open guest window: BUSY, central untouched. */
+    input_reset(&p);
+    assert(!kvm_display_input_pairing_request(&p, begin_req(), 1000, true, false));
+    assert(begin_calls == 0 && p.state == KVM_DISPLAY_INPUT_RESULT &&
+           p.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
+    input_view(&p, 1000, &s, &v);
+    assert(v.screen == KVM_DISPLAY_INPUT_PAIR && strcmp(v.primary, "BUSY") == 0);
+    assert(strcmp(v.detail, "Close PC app or guest pairing") == 0);
+    input_reset(&p);
+    assert(!kvm_display_input_pairing_request(&p, begin_req(), 1000, false, true));
+    assert(begin_calls == 0 && p.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
+    /* The result dismisses itself back to the guest view. */
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_RESULT_MS - 1, false);
+    assert(p.state == KVM_DISPLAY_INPUT_RESULT);
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_RESULT_MS, false);
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED);
+    input_view(&p, 6000, &s, &v);
+    assert(v.screen == KVM_DISPLAY_ACTIVE && s.input_pair_state == 0);
+
+    /* Scanning view. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    assert(begin_calls == 1 && p.state == KVM_DISPLAY_INPUT_SCANNING);
+    assert(!kvm_display_input_pairing_request(&p, begin_req(), 1100, false, false)); /* one window */
+    assert(begin_calls == 1);
+    assert(kvm_display_input_pairing_blocks_guest(&p));
+    input_view(&p, 1000, &s, &v);
+    assert(s.input_pair_state == 1 && v.screen == KVM_DISPLAY_INPUT_PAIR);
+    assert(strcmp(v.title, "ADD KEYBOARD/MOUSE") == 0);
+    assert(strcmp(v.primary, "SEARCHING") == 0 && v.input_row_count == 0);
+    assert(strcmp(v.footer, "30s remaining") == 0);
+    assert(!v.show_input_entry && !v.show_guest_settings && v.input_cancel);
+    /* Guest pairing zones are dead while the input window is open. */
+    assert(!kvm_display_pair_touch_action(&s, 210, 214, &guest_action));
+    assert(!kvm_display_pair_touch_action(&s, 120, 180, &guest_action));
+    {
+        kvm_display_pair_request_t gr;
+        assert(!kvm_display_pair_request(&s, 1000, KVM_DISPLAY_PAIR_BEGIN, &gr));
+    }
+
+    /* Rows arrive unsorted, more than four, one index updated: strongest four shown. */
+    {
+        kvm_display_input_event_t e;
+        e = scan_ev(0, -80, KVM_DISPLAY_INPUT_MOUSE, "Mouse A");
+        kvm_display_input_pairing_event(&p, &e, 1100);
+        e = scan_ev(1, -40, KVM_DISPLAY_INPUT_KEYBOARD, "Keyboard K");
+        kvm_display_input_pairing_event(&p, &e, 1100);
+        e = scan_ev(2, -60, KVM_DISPLAY_INPUT_MOUSE, "");
+        kvm_display_input_pairing_event(&p, &e, 1100);
+        e = scan_ev(3, -90, KVM_DISPLAY_INPUT_KEYBOARD, "Far");
+        kvm_display_input_pairing_event(&p, &e, 1100);
+        e = scan_ev(4, -50, 0, "Mid");
+        kvm_display_input_pairing_event(&p, &e, 1100);
+        e = scan_ev(0, -30, KVM_DISPLAY_INPUT_MOUSE, "Mouse A"); /* repeated index updates */
+        kvm_display_input_pairing_event(&p, &e, 1200);
+        e = scan_ev(200, -10, 0, "Bogus"); /* out of range index is ignored */
+        kvm_display_input_pairing_event(&p, &e, 1200);
+    }
+    input_view(&p, 2000, &s, &v);
+    assert(s.input_pair_count == 4 && v.input_row_count == 4);
+    assert(strcmp(s.input_pair_rows[0], "Mouse A") == 0 && s.input_pair_index[0] == 0);
+    assert(strcmp(s.input_pair_rows[1], "Keyboard K") == 0 && s.input_pair_index[1] == 1);
+    assert(strcmp(s.input_pair_rows[2], "Mid") == 0 && s.input_pair_index[2] == 4);
+    assert(strcmp(s.input_pair_rows[3], "Mouse") == 0 && s.input_pair_index[3] == 2);
+    assert(strcmp(v.input_rows[3], "Mouse") == 0 && v.primary[0] == '\0');
+    assert(strcmp(v.footer, "29s remaining") == 0);
+    /* Touch rows are 44 px tall from y 44; each maps to its displayed row. */
+    for (uint8_t i = 0; i < 4; ++i) {
+        assert(kvm_display_input_touch_action(&s, 120, (uint16_t)(44 + 44 * i), &a, &row));
+        assert(a == KVM_DISPLAY_INPUT_PAIR_SELECT && row == i);
+        assert(kvm_display_input_touch_action(&s, 20, (uint16_t)(87 + 44 * i), &a, &row) && row == i);
+    }
+    assert(!kvm_display_input_touch_action(&s, 120, 132 + 100, &a, &row));
+    assert(kvm_display_input_touch_action(&s, 210, 20, &a, &row) && a == KVM_DISPLAY_INPUT_PAIR_CANCEL);
+    /* Displayed row 2 is the central's stable scan index 4. */
+    assert(input_touch_request(&s, 120, 140, &r));
+    assert(r.action == KVM_DISPLAY_INPUT_PAIR_SELECT && r.row == 2 && r.scan_index == 4);
+    assert(r.window == p.window && r.window != 0);
+    /* A request from an older window is ignored. */
+    {
+        kvm_display_input_request_t stale = r;
+        stale.window = r.window - 1;
+        assert(!kvm_display_input_pairing_request(&p, stale, 3000, false, false));
+        assert(select_calls == 0);
+    }
+    assert(kvm_display_input_pairing_request(&p, r, 3000, false, false));
+    assert(select_calls == 1 && last_select == 4 && p.connecting);
+    input_view(&p, 3000, &s, &v);
+    assert(strcmp(v.primary, "CONNECTING") == 0 && strcmp(v.detail, "Mid") == 0);
+    assert(v.input_row_count == 0 && strcmp(v.footer, "30s remaining") == 0); /* deadline re-armed at select */
+    assert(!kvm_display_input_touch_action(&s, 120, 64, &a, &row)); /* no rows while connecting */
+    /* Scan rows after the select are ignored. */
+    {
+        kvm_display_input_event_t e = scan_ev(5, -20, 0, "Late");
+        kvm_display_input_pairing_event(&p, &e, 3100);
+        input_view(&p, 3100, &s, &v);
+        assert(s.input_pair_count == 0);
+    }
+
+    /* Passkey: TYPE ON KEYBOARD and six zero-padded digits. */
+    {
+        kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_PASSKEY, KVM_DISPLAY_INPUT_KEYBOARD, 1234, 0);
+        kvm_display_input_pairing_event(&p, &e, 4000);
+    }
+    assert(p.state == KVM_DISPLAY_INPUT_PASSKEY);
+    input_view(&p, 4000, &s, &v);
+    assert(s.input_pair_state == 2 && s.input_pair_passkey == 1234);
+    assert(strcmp(v.title, "TYPE ON KEYBOARD") == 0 && strcmp(v.primary, "001234") == 0);
+    assert(strcmp(v.detail, "Then press Enter") == 0);
+    assert(kvm_display_input_touch_action(&s, 210, 20, &a, &row) && a == KVM_DISPLAY_INPUT_PAIR_CANCEL);
+
+    /* Paired, then auto-dismissed. */
+    {
+        kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_PAIRED, KVM_DISPLAY_INPUT_KEYBOARD, 0, 0);
+        snprintf(e.name, sizeof e.name, "%s", "Keyboard K");
+        kvm_display_input_pairing_event(&p, &e, 5000);
+    }
+    assert(p.state == KVM_DISPLAY_INPUT_RESULT && p.reason == 0);
+    assert(kvm_display_input_pairing_blocks_guest(&p)); /* until the result is dismissed */
+    input_view(&p, 5000, &s, &v);
+    assert(s.input_pair_state == 3 && s.input_pair_reason == 0);
+    assert(strcmp(v.primary, "KEYBOARD PAIRED") == 0 && strcmp(v.detail, "Keyboard K") == 0);
+    /* A failure after the result does not overwrite it. */
+    {
+        kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_FAILED, 0, 0, 2);
+        kvm_display_input_pairing_event(&p, &e, 5100);
+        assert(p.reason == 0);
+    }
+    /* Touch dismisses the result at once. */
+    input_view(&p, 5200, &s, &v);
+    assert(input_touch_request(&s, 210, 20, &r) && r.action == KVM_DISPLAY_INPUT_PAIR_CANCEL);
+    assert(kvm_display_input_pairing_request(&p, r, 5200, false, false));
+    assert(p.state == KVM_DISPLAY_INPUT_CLOSED && cancel_calls == 0); /* nothing to cancel */
+
+    /* Failure reasons 1..5 carry their text. */
+    {
+        static const char *const primary[6] = {"", "NOT SUPPORTED", "TIMED OUT",
+                                               "PAIRING FAILED", "BUSY", "NO FREE SLOT"};
+        for (uint8_t reason = 1; reason <= 5; ++reason) {
+            input_reset(&p);
+            assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+            kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_FAILED, 0, 0, reason);
+            kvm_display_input_pairing_event(&p, &e, 2000);
+            assert(p.state == KVM_DISPLAY_INPUT_RESULT && p.reason == reason);
+            input_view(&p, 2000, &s, &v);
+            assert(strcmp(v.primary, primary[reason]) == 0);
+        }
+        input_view(&p, 2000, &s, &v);
+        assert(strcmp(v.detail, "Forget a keyboard or mouse") == 0);
+        input_reset(&p);
+        assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+        kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_FAILED, 0, 0, 1);
+        kvm_display_input_pairing_event(&p, &e, 2000);
+        input_view(&p, 2000, &s, &v);
+        assert(strcmp(v.detail, "Device is not supported") == 0);
+    }
+
+    /* Hard 30 s deadline without any terminal event: the UI closes the window
+       itself and cancels the central. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_WINDOW_MS - 1, false);
+    assert(p.state == KVM_DISPLAY_INPUT_SCANNING && cancel_calls == 0);
+    kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_WINDOW_MS, false);
+    assert(cancel_calls == 1 && p.state == KVM_DISPLAY_INPUT_RESULT &&
+           p.reason == KVM_DISPLAY_INPUT_REASON_TIMEOUT);
+    /* A late PAIRED (the device made it just in time) is the truth and replaces it. */
+    {
+        kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_PAIRED, KVM_DISPLAY_INPUT_MOUSE, 0, 0);
+        kvm_display_input_pairing_event(&p, &e, 31500);
+        assert(p.reason == 0 && p.kind == KVM_DISPLAY_INPUT_MOUSE);
+        input_view(&p, 31500, &s, &v);
+        assert(strcmp(v.primary, "MOUSE PAIRED") == 0);
+    }
+    /* Passkey stage keeps the same hard deadline from the select. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    {
+        kvm_display_input_event_t e = scan_ev(3, -50, KVM_DISPLAY_INPUT_KEYBOARD, "K");
+        kvm_display_input_pairing_event(&p, &e, 1000);
+        input_view(&p, 2000, &s, &v);
+        assert(kvm_display_input_request(&s, KVM_DISPLAY_INPUT_PAIR_SELECT, 0, &r) && r.scan_index == 3);
+        assert(!kvm_display_input_request(&s, KVM_DISPLAY_INPUT_PAIR_SELECT, 1, &r)); /* no such row */
+        assert(kvm_display_input_request(&s, KVM_DISPLAY_INPUT_PAIR_SELECT, 0, &r));
+        assert(kvm_display_input_pairing_request(&p, r, 20000, false, false));
+        e = ev(KVM_DISPLAY_INPUT_EVENT_PASSKEY, KVM_DISPLAY_INPUT_KEYBOARD, 999999, 0);
+        kvm_display_input_pairing_event(&p, &e, 21000);
+        input_view(&p, 21000, &s, &v);
+        assert(strcmp(v.primary, "999999") == 0);
+        kvm_display_input_pairing_tick(&p, 1000 + KVM_DISPLAY_INPUT_WINDOW_MS, false);
+        assert(p.state == KVM_DISPLAY_INPUT_PASSKEY); /* not the begin deadline */
+        kvm_display_input_pairing_tick(&p, 20000 + KVM_DISPLAY_INPUT_WINDOW_MS, false);
+        assert(p.state == KVM_DISPLAY_INPUT_RESULT && cancel_calls == 1 &&
+               p.reason == KVM_DISPLAY_INPUT_REASON_TIMEOUT);
+    }
+    /* A malformed passkey is never shown. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    {
+        kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_PASSKEY, 1, 1000000, 0);
+        kvm_display_input_pairing_event(&p, &e, 1500);
+        assert(p.state != KVM_DISPLAY_INPUT_PASSKEY);
+    }
+
+    /* A host session opening mid-window ends the window: never concurrent. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    kvm_display_input_pairing_tick(&p, 2000, true);
+    assert(cancel_calls == 1 && p.state == KVM_DISPLAY_INPUT_RESULT &&
+           p.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
+
+    /* Cancel at any time: scanning, connecting and passkey all cancel the central. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    input_view(&p, 1500, &s, &v);
+    assert(input_touch_request(&s, 200, 10, &r) && r.action == KVM_DISPLAY_INPUT_PAIR_CANCEL);
+    assert(kvm_display_input_pairing_request(&p, r, 1500, false, false));
+    assert(cancel_calls == 1 && p.state == KVM_DISPLAY_INPUT_CLOSED);
+    assert(!kvm_display_input_pairing_blocks_guest(&p));
+    /* Events with the window closed are ignored. */
+    {
+        kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_FAILED, 0, 0, 3);
+        kvm_display_input_pairing_event(&p, &e, 1600);
+        e = scan_ev(0, -40, 1, "X");
+        kvm_display_input_pairing_event(&p, &e, 1600);
+        assert(p.state == KVM_DISPLAY_INPUT_CLOSED);
+    }
+
+    /* The central refuses begin: BUSY at once, refined by its PAIR_FAILED reason. */
+    input_reset(&p);
+    begin_ok = false;
+    assert(!kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    assert(begin_calls == 1 && p.state == KVM_DISPLAY_INPUT_RESULT &&
+           p.reason == KVM_DISPLAY_INPUT_REASON_BUSY);
+    {
+        kvm_display_input_event_t e = ev(KVM_DISPLAY_INPUT_EVENT_FAILED, 0, 0, 5);
+        kvm_display_input_pairing_event(&p, &e, 1010);
+        assert(p.reason == 5);
+        e.reason = 2; /* only the first reason refines */
+        kvm_display_input_pairing_event(&p, &e, 1020);
+        assert(p.reason == 5);
+    }
+    /* A select the central refuses ends the window too. */
+    input_reset(&p);
+    select_ok = false;
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    {
+        kvm_display_input_event_t e = scan_ev(1, -50, 2, "M");
+        kvm_display_input_pairing_event(&p, &e, 1000);
+        input_view(&p, 1100, &s, &v);
+        assert(kvm_display_input_request(&s, KVM_DISPLAY_INPUT_PAIR_SELECT, 0, &r));
+        assert(!kvm_display_input_pairing_request(&p, r, 1100, false, false));
+        assert(select_calls == 1 && cancel_calls == 1 && p.state == KVM_DISPLAY_INPUT_RESULT);
+        e = ev(KVM_DISPLAY_INPUT_EVENT_FAILED, 0, 0, 1);
+        kvm_display_input_pairing_event(&p, &e, 1110);
+        assert(p.reason == 1);
+    }
+
+    /* A guest pairing request refused for the open input window is visible. */
+    input_reset(&p);
+    assert(kvm_display_input_pairing_request(&p, begin_req(), 1000, false, false));
+    kvm_display_input_pairing_guest_refused(&p, 1000);
+    input_view(&p, 1000, &s, &v);
+    assert(s.input_pair_guest_busy && strcmp(v.title, "GUEST PAIRING BUSY") == 0);
+    input_view(&p, 1000 + KVM_DISPLAY_INPUT_GUEST_BUSY_MS, &s, &v);
+    assert(!s.input_pair_guest_busy && strcmp(v.title, "ADD KEYBOARD/MOUSE") == 0);
+
+    /* Recovery and update keep precedence over the input screen. */
+    input_view(&p, 1000, &s, &v);
+    s.recovery_required = true;
+    kvm_display_make_view(&s, 1000, &v);
+    assert(v.screen == KVM_DISPLAY_RECOVERY);
+    assert(!kvm_display_input_touch_action(&s, 210, 20, &a, &row));
+    s.recovery_required = false; s.updating = true;
+    kvm_display_make_view(&s, 1000, &v);
+    assert(v.screen == KVM_DISPLAY_UPDATE);
+
+    /* NULL safety. */
+    kvm_display_input_pairing_status(NULL, 0, &s);
+    kvm_display_input_pairing_status(&p, 0, NULL);
+    kvm_display_input_pairing_event(NULL, NULL, 0);
+    kvm_display_input_pairing_event(&p, NULL, 0);
+    kvm_display_input_pairing_tick(NULL, 0, false);
+    assert(!kvm_display_input_pairing_request(NULL, begin_req(), 0, false, false));
+    assert(!kvm_display_input_touch_action(NULL, 0, 0, &a, &row));
+    assert(!kvm_display_input_request(NULL, KVM_DISPLAY_INPUT_PAIR_CANCEL, 0, &r));
+    assert(!kvm_display_input_pairing_blocks_guest(NULL));
+}
 
 int main(void)
 {
@@ -315,5 +689,6 @@ int main(void)
     assert(pairing.state == KVM_DISPLAY_PAIRING_TIMEOUT && pairing.number == 0);
     kvm_display_pairing_clear(&pairing);
     assert(pairing.state == KVM_DISPLAY_PAIRING_CLOSED && !pairing.local_owner);
+    input_pairing_tests();
     return 0;
 }
