@@ -590,8 +590,10 @@ static void usb_worker(void *context)
            (BUSY at once; no central RPC from here until the route disarms). */
         kvm_display_input_pairing_tick(&input_pairing, time_ms, router.armed);
         poll_foreign_guest_cancel(time_ms);
-        /* Device input waiting: poll USB briefly so it is not held back 20 ms. */
-        TickType_t wait = pdMS_TO_TICKS(kvm_hub_queue_pending(&hub_queue) ? 2 : 20);
+        /* Device input waiting: wait one tick instead of 20 ms. At this
+           firmware's CONFIG_FREERTOS_HZ=100 one tick is 10 ms; a shorter wait
+           would round down to zero ticks, so one tick is the floor. */
+        TickType_t wait = kvm_hub_queue_pending(&hub_queue) ? 1 : pdMS_TO_TICKS(20);
         if (!wait) wait = 1;
         if (!connected) {
             if (was_connected) {

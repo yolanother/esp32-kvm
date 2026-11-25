@@ -11,7 +11,7 @@ Design: [central.md](central.md), [input hub](../input-hub/README.md),
 
 ## Before you start (the owner does this, never an agent)
 
-1. **Flash the new firmware first.** Items a to q need the build from this branch on the
+1. **Flash the new firmware first.** Items a to r need the build from this branch on the
    board. Before that, quit the desktop app completely: tray icon, **Quit and release**. The
    app owns the board's serial port, and flashing needs it free. Do not stop it any other way.
 2. Build and flash only with the script, never with another tool and **never erase flash**:
@@ -48,8 +48,11 @@ Steps:
    press Enter.
 
 Expected: the rows are listed strongest first (at most four). The result is **KEYBOARD PAIRED**
-with its name, dismissed after about 4 s, and the list shows `KEYBOARD: <name>`. The footer
-badge shows `KB`. Typed keys do nothing visible yet (target 0 is a stub) until item d.
+with `Input goes to <first ready guest's card label>` and the keyboard's name below it,
+dismissed after about 4 s, and the list shows `KEYBOARD: <name>`. The footer badge shows
+`KB`. With at least one guest ready, typing right after pairing (no chord) reaches the
+lowest-numbered ready guest (item r). With no guest ready the result says
+`Input goes to This PC` with the hint `This PC: use Ctrl+Alt+1-3`.
 A keyboard with no boot protocol must show **NOT SUPPORTED** instead.
 
 Result: PASS / FAIL
@@ -62,7 +65,8 @@ keyboard make and model, whether it showed a passkey, the Health log lines (item
 Steps: as item a for the mouse (**ADD KEYBOARD OR MOUSE**, tap its row).
 
 Expected: **MOUSE PAIRED**, the list shows `MOUSE: <name>`, the badge shows `KB MS`. Moving it
-does nothing visible until item d. A mouse the walker rejects shows **NOT SUPPORTED**.
+moves the pointer on the same guest the keyboard types to. A mouse the walker rejects shows
+**NOT SUPPORTED**.
 
 Result: PASS / FAIL
 Capture on FAIL: photo, the mouse make and model, and (if not supported) whether it is a
@@ -88,7 +92,9 @@ Left Ctrl + Left Alt + 0, then Left Ctrl + Left Alt + Esc.
 Expected: keys and pointer go to the selected guest only, the chord keys themselves never
 reach it, the touchscreen highlights the selected card, and nothing is stuck after a switch
 (release the keys on the old guest). 0 and Esc select This PC: typing does nothing anywhere
-(stub). A chord with Right Alt, or with another key held first, must not switch.
+(stub) and the footer shows `This PC: use Ctrl+Alt+1-3` (with or without the app). This
+choice is kept: guests connecting or disconnecting do not move the keyboard back to a guest
+until the next reboot. A chord with Right Alt, or with another key held first, must not switch.
 
 Result: PASS / FAIL (note guest 1 / 2 / 3 separately)
 Capture on FAIL: which guest, which chord, what reached which guest, the card highlight, and
@@ -113,7 +119,10 @@ While armed, type on the board's own keyboard and move its mouse. Release the ro
 Expected: while the PC route is armed, the board's own keyboard and mouse do nothing (no
 double input, no flicker). The PC capture reaches the guest. When released, the board's keyboard
 and mouse work again on the hub target. The app never shows an error from arming (the hub never
-answers BUSY).
+answers BUSY), also when the board's keyboard was typing to that same guest just before the
+app armed it (the hub releases its own arm first, and retries the arm once after a release
+if the guest channel was still armed). An ARM refused with NOT_READY ends the app's session
+and returns input to the PC, so any such drop here is a FAIL.
 
 Result: PASS / FAIL
 Capture on FAIL: the app's route status, what reached the guest, and the log.
@@ -269,10 +278,14 @@ Capture on FAIL: a photo of each screen that is wrong, with the row count, and t
 
 Steps: let the paired keyboard go to sleep (its idle timeout), then press a key.
 
-Expected: the badge drops `KB` when it sleeps (nothing stays pressed), and it reconnects within
-about a second or two of waking (one immediate retry per drop; otherwise within the shared
-25 s schedule), after which typing reaches the selected guest again. A key that wakes the
-keyboard may be lost; that is acceptable.
+Expected: the badge drops `KB` when it sleeps (nothing stays pressed). After the key press
+that wakes it, it reconnects anywhere from at once to about **25 s** later (only the keyboard
+away), or about **50 s** later if the mouse is away too: the immediate retry is spent when the
+link drops (the keyboard is asleep then), so the wake is caught by the shared schedule
+(central.md, Reconnect). Then typing reaches the selected guest again. A key that wakes the
+keyboard may be lost, and a keyboard that advertises only briefly may need a second key
+press; both are acceptable. Record the wake-to-`KB` time on several tries: it decides
+whether the low-duty accept-list connect recorded in central.md is worth building.
 
 Result: PASS / FAIL
 Capture on FAIL: the keyboard model, how long it took to return, whether it returned at all,
@@ -289,8 +302,27 @@ and moves the pointer again.
 Result: PASS / FAIL
 Capture on FAIL: what stopped, for how long, and the log.
 
+## r. Default target: type with no chord after pairing and after boot
+
+Steps:
+1. Right after item a's PAIRED screen, with guests ready, type a word without any chord.
+2. Power-cycle the board (app closed). Once the guests have reconnected, type a word without
+   any chord. Watch which card is highlighted.
+3. Turn off (or disconnect) the guest that receives the typing; type again. Turn it back on.
+4. Press Left Ctrl + Left Alt + 0 (This PC), then power-cycle guests on and off once more.
+
+Expected: in 1 and 2 the word reaches the **lowest-numbered ready guest** and that card is
+highlighted; nothing is lost to This PC. In 3 typing moves to the next ready guest and
+**stays there** when the first one comes back (no jump back). In 4 the keyboard stays on
+This PC (the footer shows `This PC: use Ctrl+Alt+1-3`) until a chord, card or PLUS chooses a
+guest or the board reboots. Nothing of this is stored: after a reboot step 2 applies again.
+
+Result: PASS / FAIL
+Capture on FAIL: which guests were ready and in which order they connected, the highlighted
+card, where the typing went, and the log.
+
 ## Summary line to return
 
-`a __ b __ c __ d1 __ d2 __ d3 __ e __ f __ g __ h __ i __ j __ k __ l __ m __ n __ o __ p __ q __`
+`a __ b __ c __ d1 __ d2 __ d3 __ e __ f __ g __ h __ i __ j __ k __ l __ m __ n __ o __ p __ q __ r __`
 (PASS, FAIL or NOT RUN for each), the firmware build you flashed (its `esp32_kvm.bin` size and
 date), and the captures for every FAIL.

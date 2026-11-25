@@ -152,6 +152,26 @@ address on **one global schedule**:
 - An open *guest* pairing window does not pause reconnect (only the input window does); a
   reconnect uses the existing bond, so `sm_mitm` does not matter to it.
 
+**What this cadence means for waking a sleeping keyboard.** The immediate retry happens when
+the link drops, which is when the keyboard falls asleep, so it normally fails. After that a
+sleeping keyboard is only reached by the shared schedule: an attempt is open 10 s out of
+every 25 to 27 s while it is the only device away, and only every 50 to 54 s for that kind
+while the mouse is away too. A key press that wakes the keyboard is therefore picked up
+anywhere from at once (an attempt is open) to about **25 s** later (only the keyboard away),
+or about **50 s** later (both away). If the keyboard advertises only briefly after waking
+and that burst falls in a gap, it is missed altogether and needs another key press. This is
+an accepted trade-off for guest airtime (R3) and is not changed here; the owner's hardware
+checks (checklist items c and p) come first.
+
+Recommendation, recorded for after those checks: evaluate replacing the 10 s attempts with
+one low-duty background connect on the controller's filter accept list (both stored
+identities in the list, `ble_gap_connect` with the accept-list filter and a long scan
+interval with a short window, for example 30 ms every 1.28 s, about 2 percent duty). A
+waking keyboard would then be caught within about one scan interval instead of up to 25 or
+50 s, at a fraction of today's 40 percent initiator duty. Open points before adopting it:
+RPA resolution in the controller (privacy mode), its effect on guest notify latency, and
+how NimBLE shares the initiator with the scan window.
+
 Reconnect with a resolvable private address (RPA) depends on the controller or host
 resolving it; this is unverified (see [Limits](#limits-and-known-gaps)).
 
@@ -308,7 +328,11 @@ every key and button it holds for that kind. It is delivered exactly once per lo
 
 ## Limits and known gaps
 
-- **This PC (target 0) is a stub until stage 3**: typing at it does nothing (risk R6).
+- **This PC (target 0) is a stub until stage 3**: typing at it does nothing (risk R6). The
+  input hub therefore defaults to the first ready guest until the owner chooses a target
+  (see the [input hub](../input-hub/README.md#targets-and-the-hub-target)).
+- A sleeping keyboard can take up to about 25 s (50 s with the mouse away too) to reconnect
+  after the key press that wakes it (see [Reconnect](#reconnect)).
 - RPA reconnect, scan airtime and its effect on guest notify latency (R3) are not measured.
 - The worker stack (8192 bytes), the NimBLE host task stack (4096 bytes) and heap headroom
   are not measured (the firmware logs a `Health:` line with all three high-water marks, see
