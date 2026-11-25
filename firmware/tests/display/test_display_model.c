@@ -44,10 +44,10 @@ int main(void)
     kvm_display_make_view(&status, 1000, &view);
     assert(view.screen == KVM_DISPLAY_ACTIVE);
     assert(view.usb_dim);
-    assert(strcmp(view.title, "DOUBTECH HID") == 0);
+    assert(strcmp(view.title, "KEYBOARD CONTROL") == 0);
     assert(strcmp(view.detail, "1 guest connected") == 0);
     assert(strcmp(view.footer, "USB off") == 0);
-    assert(strcmp(view.primary, "INPUT PAUSED") != 0);
+    assert(strcmp(view.primary, "DISARMED") == 0);
     status.usb_connected = true;
     status.show_guest_list = true;
     status.touch_available = true;
@@ -168,34 +168,52 @@ int main(void)
     /* No host session: the guest view stays, only usb_dim/footer change. */
     {
         kvm_display_status_t s = {0};
-        kvm_display_view_t on = {0}, off, prev;
-        s.guest_slots = 2; s.ready_slots = 2; s.ready_mask = 3; s.occupied_mask = 3;
-        s.guest_ready = true; s.selected_slot = 0;
-        for (int i = 0; i < 6; ++i) {
-            s.usb_connected = s.host_session = (i % 2) == 0;
-            kvm_display_make_view(&s, 5000, &prev);
+        kvm_display_view_t on, off;
+        /* Toggling the session never changes the screen except usb_dim and
+           footer, for every guest count, hub target and selected slot. */
+        for (uint8_t ready = 0; ready <= 3; ++ready)
+        for (uint8_t hub = 0; hub <= 3; ++hub)
+        for (uint8_t sel = 0; sel <= 3; ++sel) {
+            memset(&s, 0, sizeof s);
+            s.guest_slots = ready; s.ready_slots = ready;
+            s.ready_mask = s.occupied_mask = (uint8_t)((1u << ready) - 1u);
+            s.guest_ready = true; s.selected_slot = sel; s.hub_target = hub;
+            s.usb_connected = s.host_session = true;
+            kvm_display_make_view(&s, 5000, &on);
+            s.usb_connected = s.host_session = false;
             kvm_display_make_view(&s, 5000, &off);
-            assert(memcmp(&prev, &off, sizeof prev) == 0);
-            if (s.usb_connected) on = prev;
-            else {
-                assert(off.screen == on.screen && off.screen == KVM_DISPLAY_ACTIVE);
-                assert(off.usb_dim && !on.usb_dim);
-                assert(off.card_visible_mask == on.card_visible_mask);
-                assert(off.card_ready_mask == on.card_ready_mask);
-                assert(off.selected_card == on.selected_card);
-                assert(strcmp(off.primary, on.primary) == 0);
-                assert(strcmp(off.detail, on.detail) == 0);
-                assert(strcmp(off.footer, "USB off") == 0);
-            }
+            assert(on.screen == KVM_DISPLAY_ACTIVE && off.screen == on.screen);
+            assert(strcmp(on.title, "KEYBOARD CONTROL") == 0);
+            assert(strcmp(off.title, on.title) == 0);
+            assert(strcmp(off.primary, on.primary) == 0);
+            assert(strcmp(off.detail, on.detail) == 0);
+            assert(off.card_visible_mask == on.card_visible_mask);
+            assert(off.card_ready_mask == on.card_ready_mask);
+            assert(off.selected_card == on.selected_card);
+            assert(on.selected_card == (hub <= ready ? hub : 0)); /* unoccupied: This PC */
+            assert(!on.usb_dim && off.usb_dim);
+            assert(strcmp(off.footer, "USB off") == 0);
+            assert(strcmp(on.footer, "Selected target is highlighted") == 0);
+            /* Everything else is identical once usb_dim and footer are aligned. */
+            off.usb_dim = false;
+            memcpy(off.footer, on.footer, sizeof off.footer);
+            assert(memcmp(&on, &off, sizeof on) == 0);
         }
         /* usb_off_no_guest_shows_guest_view_not_pause */
         memset(&s, 0, sizeof s);
         kvm_display_make_view(&s, 5000, &off);
-        assert(off.screen == KVM_DISPLAY_GUEST_LIST && off.usb_dim);
-        assert(off.selectable_slots == 0);
-        assert(strcmp(off.detail, "No guests connected") == 0);
+        assert(off.screen == KVM_DISPLAY_ACTIVE && off.usb_dim);
+        assert(strcmp(off.title, "KEYBOARD CONTROL") == 0);
+        assert(strcmp(off.detail, "No guest connected") == 0);
         assert(strcmp(off.footer, "USB off") == 0);
-        assert(strcmp(off.primary, "INPUT PAUSED") != 0);
+        assert(off.card_visible_mask == 1u && off.selected_card == 0);
+        /* An armed host route drives the highlight while the session is on. */
+        s.usb_connected = s.host_session = true; s.armed = true; s.guest_ready = true;
+        s.guest_slots = s.ready_slots = 2; s.ready_mask = s.occupied_mask = 3;
+        s.selected_slot = 2; s.hub_target = 1;
+        kvm_display_make_view(&s, 5000, &on);
+        assert(on.selected_card == 2);
+        memset(&s, 0, sizeof s);
         /* fault_still_pauses and armed-without-ready still pause with no session */
         s.fault = true;
         kvm_display_make_view(&s, 5000, &off);

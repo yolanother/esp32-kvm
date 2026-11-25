@@ -72,8 +72,8 @@ int main(void)
     assert(status.pairing_state == KVM_DISPLAY_PAIRING_CLOSED);
     assert(status.pairing_challenge_id == 0 && status.pairing_deadline_ms == 0);
     kvm_display_make_view(&status, now, &view);
-    assert(view.screen == KVM_DISPLAY_GUEST_LIST && view.usb_dim);
-    assert(strcmp(view.detail, "No guests connected") == 0);
+    assert(view.screen == KVM_DISPLAY_ACTIVE && view.usb_dim);
+    assert(strcmp(view.detail, "No guest connected") == 0);
 
     kvm_transport_core_reset(&core);
     kvm_transport_display_status(&core, &router, true, false, now, &status);

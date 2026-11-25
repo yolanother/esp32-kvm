@@ -82,28 +82,7 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
             COPY_TEXT(v->primary, "PAIRING EXPIRED");
             COPY_TEXT(v->detail, "Retry pairing");
         }
-    } else if (!s->usb_connected) {
-        /* No host session is not a pause: the device owns its own input, so the
-           guest view stays up with a dim badge. Fault and recovery were handled
-           above and still pause. Showing the same screen as the session view
-           (only usb_dim and footer differ) keeps it from flapping. */
-        v->usb_dim = true;
-        COPY_TEXT(v->footer, "USB off");
-        if (s->ready_slots) {
-            v->screen = KVM_DISPLAY_ACTIVE;
-            COPY_TEXT(v->title, "DOUBTECH HID");
-            /* The device-input target, not the (absent) host route, is selected. */
-            v->selected_card = s->hub_target <= 3 ? s->hub_target : 0;
-            if (s->hub_target == 0) COPY_TEXT(v->primary, "HOST");
-            else snprintf(v->primary, sizeof(v->primary), "GUEST %u", s->hub_target);
-            snprintf(v->detail, sizeof(v->detail), "%u guest%s connected",
-                     s->ready_slots, s->ready_slots == 1 ? "" : "s");
-        } else {
-            v->screen = KVM_DISPLAY_GUEST_LIST;
-            COPY_TEXT(v->title, "GUESTS");
-            COPY_TEXT(v->detail, "No guests connected");
-        }
-    } else if (s->show_guest_list) {
+    } else if (s->usb_connected && s->show_guest_list) {
         v->screen = KVM_DISPLAY_GUEST_LIST;
         COPY_TEXT(v->title, "GUESTS");
         COPY_TEXT(v->primary, "SELECT TARGET");
@@ -123,6 +102,20 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
                      s->ready_slots, s->ready_slots == 1 ? "" : "s");
         else COPY_TEXT(v->detail, "No guest connected");
         COPY_TEXT(v->footer, "Selected target is highlighted");
+        /* Highlight rule: with a host route armed the host's selected slot is
+           the live target; otherwise (disarmed, or no host session) the device
+           input hub target is. A target whose card is not shown falls back to
+           This PC so something is always highlighted. */
+        uint8_t target = (s->usb_connected && s->armed) ? s->selected_slot : s->hub_target;
+        v->selected_card = (target <= 3u && (v->card_visible_mask & (1u << target))) ? target : 0;
+        /* No host session is not a pause: the same view, dimmed, with a badge.
+           Only usb_dim and the footer differ from the session view, so toggling
+           the session never changes the screen. Fault, recovery, update and
+           pairing were handled above and keep their precedence. */
+        if (!s->usb_connected) {
+            v->usb_dim = true;
+            COPY_TEXT(v->footer, "USB off");
+        }
     }
 }
 
