@@ -1,0 +1,4 @@
+version: "0.1.0"
+description: "HID-over-GATT central support: boot keyboard and mouse parsers and a bounded report-map walker"
+dependencies:
+  idf: ">=5.5"
