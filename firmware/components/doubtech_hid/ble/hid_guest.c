@@ -618,6 +618,13 @@ esp_err_t doubtech_hid_pairing_open(void)
     return ESP_OK;
 }
 
+bool doubtech_hid_pairing_active(void)
+{
+    if (!started) return false;
+    expire_window();
+    return pairing.window_active;
+}
+
 void doubtech_hid_pairing_cancel(void)
 {
     bool pending = pairing.challenge_active || pairing.challenge_approved;

@@ -1,11 +1,14 @@
 # Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
 # Fails when a product name ("kvm", any case) appears in the shipped files of the
-# doubtech_hid_central component (sources, headers, Kconfig, CMakeLists.txt,
-# idf_component.yml). tests/ and Markdown are not scanned. Allowed: the legacy
+# doubtech_hid_central component (sources, headers including include/, Kconfig,
+# CMakeLists.txt, idf_component.yml). tests/ and Markdown are not scanned. Allowed: the legacy
 # NVS namespace token kvm_bonds and the copyright line.
 $ErrorActionPreference = 'Stop'
 $component = Split-Path -Parent $PSScriptRoot
-$files = @(Get-ChildItem -Path $component -File | Where-Object { $_.Extension -in '.c', '.h' -or $_.Name -in 'Kconfig', 'CMakeLists.txt', 'idf_component.yml' })
+$tests = Join-Path $component 'tests'
+$files = @(Get-ChildItem -Path $component -File -Recurse | Where-Object {
+        -not $_.FullName.StartsWith($tests, [StringComparison]::OrdinalIgnoreCase) -and
+        ($_.Extension -in '.c', '.h' -or $_.Name -in 'Kconfig', 'CMakeLists.txt', 'idf_component.yml') })
 $offenders = @()
 foreach ($file in $files) {
     $lineNo = 0

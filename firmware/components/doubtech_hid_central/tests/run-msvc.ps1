@@ -12,7 +12,7 @@ $binDir = Join-Path $msvc.FullName 'bin/HostX64/x64'
 $compiler = Join-Path $binDir 'cl.exe'
 $output = Join-Path $env:TEMP 'esp32-kvm-hid-central-test'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
-$includes = @("/I$($msvc.FullName)/include", "/I$($kit.FullName)/ucrt", "/I$repo/firmware/components/doubtech_hid_central")
+$includes = @("/I$($msvc.FullName)/include", "/I$($kit.FullName)/ucrt", "/I$repo/firmware/components/doubtech_hid_central", "/I$repo/firmware/components/doubtech_hid_central/include")
 $libraries = @("/LIBPATH:$($msvc.FullName)/lib/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/um/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/ucrt/x64")
 [string[]]$sanitize = @()
 if (Test-Path (Join-Path $binDir 'clang_rt.asan_dynamic-x86_64.dll')) {
@@ -25,8 +25,14 @@ $component = "$repo/firmware/components/doubtech_hid_central"
 $mocks = "/I$repo/firmware/components/doubtech_hid/tests/mocks"
 $suites = @(
     @{ Name = 'test_hogp_parse'; Sources = @('hogp_parse.c'); Extra = @() },
-    @{ Name = 'test_central_registry'; Sources = @('central_registry.c', 'central_store.c'); Extra = @($mocks) }
+    @{ Name = 'test_central_registry'; Sources = @('central_registry.c', 'central_store.c'); Extra = @($mocks) },
+    # The pure discovery machine and scan list include the public header, which needs esp_err.h.
+    @{ Name = 'test_central_gatt'; Sources = @('central_gatt.c', 'hogp_parse.c'); Extra = @($mocks) },
+    @{ Name = 'test_central_scan'; Sources = @('central_scan.c'); Extra = @($mocks) }
 )
+# Optional suite names select a subset (for example: run-msvc.ps1 test_central_gatt).
+$selected = @($args)
+if ($selected.Count) { $suites = @($suites | Where-Object { $selected -contains $_.Name }) }
 foreach ($suite in $suites) {
     $name = $suite.Name
     $sources = @($suite.Sources | ForEach-Object { Join-Path $component $_ })

@@ -239,6 +239,15 @@ sink is set, the bond store cannot be queried, eight guest bonds are stored, or 
 cases also publish `DOUBTECH_HID_PAIRING_CAPACITY`); `ESP_FAIL` if the 60-second
 timer cannot be armed (the window is closed again).
 
+### `bool doubtech_hid_pairing_active(void)`
+
+Returns `true` while the guest pairing window is open (including a pending
+numeric comparison). An expired window is closed first, which publishes
+`DOUBTECH_HID_PAIRING_TIMEOUT` like any other expiry check. Returns `false` before
+`doubtech_hid_start`. Call it on the NimBLE host thread. Another role sharing the
+host (the input-device central) checks it so its own pairing window, which clears
+`ble_hs_cfg.sm_mitm`, never overlaps a guest window.
+
 ### `void doubtech_hid_pairing_cancel(void)`
 
 Closes the window and any pending challenge, terminates the link that owned a

@@ -91,6 +91,9 @@ bool doubtech_hid_host_synced(void);
 void doubtech_hid_pairing_set_events(doubtech_hid_pairing_event_fn callback, void *context);
 /** Opens pairing for 60 seconds; caller must run on the NimBLE host thread. */
 esp_err_t doubtech_hid_pairing_open(void);
+/** True while the guest pairing window is open (an expired window closes first);
+ * call on the NimBLE host thread. Another role uses it to keep windows exclusive. */
+bool doubtech_hid_pairing_active(void);
 /** Cancels pairing; caller must run on the NimBLE host thread. */
 void doubtech_hid_pairing_cancel(void);
 /** Confirms or rejects a pending numeric comparison on the host thread.

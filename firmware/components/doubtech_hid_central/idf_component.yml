@@ -1,4 +1,4 @@
 version: "0.1.0"
-description: "HID-over-GATT central support: boot keyboard and mouse parsers and a bounded report-map walker"
+description: "HID-over-GATT central: pairs and connects one BLE keyboard and one mouse on a shared NimBLE host, with boot and report-map parsers"
 dependencies:
   idf: ">=5.5"

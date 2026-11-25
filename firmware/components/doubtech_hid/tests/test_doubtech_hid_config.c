@@ -160,6 +160,25 @@ static void host_synced_false_before_sync_true_after(void)
     assert(!doubtech_hid_host_synced());
 }
 
+/* Another role (the input-device central) checks this before its own window. */
+static void pairing_active_follows_window(void)
+{
+    check_gap_name = false;
+    assert(!doubtech_hid_pairing_active());
+    assert(doubtech_hid_start(NULL) == 0);
+    ble_hs_cfg.sync_cb();
+    doubtech_hid_pairing_set_events(event_sink, NULL);
+    assert(!doubtech_hid_pairing_active());
+    assert(doubtech_hid_pairing_open() == ESP_OK);
+    assert(doubtech_hid_pairing_active());
+    doubtech_hid_pairing_cancel();
+    assert(!doubtech_hid_pairing_active());
+    assert(doubtech_hid_pairing_open() == ESP_OK);
+    time_us += 61 * 1000 * 1000; /* past the 60 s window */
+    assert(!doubtech_hid_pairing_active());
+    assert(last_event.type == DOUBTECH_HID_PAIRING_TIMEOUT);
+}
+
 static void foreign_ignored(void) { check_gap_name = false; pairing_open_ignores_foreign_bonds(); }
 static void eight_guests_refused(void) { check_gap_name = false; pairing_open_refused_at_eight_guests(); }
 
@@ -179,6 +198,7 @@ int main(int argc, char **argv)
         {"start_twice_is_safe", start_twice_is_safe},
         {"reserve_above_8_rejected", reserve_above_8_rejected},
         {"host_synced_false_before_sync_true_after", host_synced_false_before_sync_true_after},
+        {"pairing_active_follows_window", pairing_active_follows_window},
         {"pairing_open_ignores_foreign_bonds", foreign_ignored},
         {"pairing_open_refused_at_eight_guests", eight_guests_refused},
     };

@@ -3,7 +3,7 @@
 # Windows with installed MSVC and Windows SDK headers, without device access.
 $ErrorActionPreference = 'Stop'
 $testNames = if ($args.Count) { $args } else { @('test_hid_report', 'test_hid_gatt', 'test_hid_guest', 'test_hid_keyboard_diag', 'test_hid_keyboard_gatt', 'test_hid_discovery', 'test_hid_official_diag', 'test_auto_pairing', 'test_doubtech_hid_config') }
-$configCases = @('config_null_uses_defaults', 'name_exactly_18_bytes_accepted', 'name_19_bytes_rejected', 'name_empty_rejected', 'max_length_name_fits_advertising_packet', 'name_multibyte_counts_bytes', 'name_multibyte_18_bytes_accepted', 'dis_strings_bounded', 'advertised_name_and_dis_follow_config', 'legacy_identity_is_unchanged', 'start_twice_is_safe', 'reserve_above_8_rejected', 'host_synced_false_before_sync_true_after', 'pairing_open_ignores_foreign_bonds', 'pairing_open_refused_at_eight_guests')
+$configCases = @('config_null_uses_defaults', 'name_exactly_18_bytes_accepted', 'name_19_bytes_rejected', 'name_empty_rejected', 'max_length_name_fits_advertising_packet', 'name_multibyte_counts_bytes', 'name_multibyte_18_bytes_accepted', 'dis_strings_bounded', 'advertised_name_and_dis_follow_config', 'legacy_identity_is_unchanged', 'start_twice_is_safe', 'reserve_above_8_rejected', 'host_synced_false_before_sync_true_after', 'pairing_active_follows_window', 'pairing_open_ignores_foreign_bonds', 'pairing_open_refused_at_eight_guests')
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
 $msvcRoot = 'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC'
 $kitRoot = 'C:/Program Files (x86)/Windows Kits/10'
