@@ -8,7 +8,6 @@
 #include "esp_log.h"
 #include "esp_app_desc.h"
 #include "esp_timer.h"
-#include "driver/usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
 #define TRACE_SIZE 16384
 static char trace[TRACE_SIZE];
@@ -59,8 +58,9 @@ bool kvm_transport_diagnostics_requested(const uint8_t *bytes, size_t length)
     return false;
 }
 
-void kvm_transport_diagnostics_dump(void)
+void kvm_transport_diagnostics_dump_to(const kvm_transport_link_t *link)
 {
+    if (!link || !link->write) return;
     char identity[160];
     const esp_app_desc_t *app = esp_app_get_description();
     int identity_length = snprintf(identity, sizeof(identity),
@@ -72,18 +72,23 @@ void kvm_transport_diagnostics_dump(void)
     for (size_t i = 0; i < length; ++i)
         snapshot[i] = trace[(start + i) % TRACE_SIZE];
     portEXIT_CRITICAL(&lock);
-    usb_serial_jtag_write_bytes(identity, identity_length, pdMS_TO_TICKS(100));
+    link->write(link->context, (const uint8_t *)identity, (size_t)identity_length, pdMS_TO_TICKS(100));
     for (size_t at = 0; at < length;) {
         size_t chunk = length - at > 256 ? 256 : length - at;
-        int written = usb_serial_jtag_write_bytes(snapshot + at, chunk, pdMS_TO_TICKS(100));
+        int written = link->write(link->context, (const uint8_t *)snapshot + at, chunk, pdMS_TO_TICKS(100));
         if (written <= 0) break;
         at += (size_t)written;
     }
-    usb_serial_jtag_write_bytes("\nKVM-TRACE-END\n", 15, pdMS_TO_TICKS(100));
+    link->write(link->context, (const uint8_t *)"\nKVM-TRACE-END\n", 15, pdMS_TO_TICKS(100));
 }
 #else
 void kvm_transport_diagnostics_init(void) {}
 bool kvm_transport_diagnostics_requested(const uint8_t *bytes, size_t length)
 { (void)bytes; (void)length; return false; }
-void kvm_transport_diagnostics_dump(void) {}
+void kvm_transport_diagnostics_dump_to(const kvm_transport_link_t *link) { (void)link; }
 #endif
+
+void kvm_transport_diagnostics_dump(void)
+{
+    kvm_transport_diagnostics_dump_to(kvm_transport_link_usj());
+}

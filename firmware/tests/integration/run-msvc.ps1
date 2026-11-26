@@ -12,6 +12,11 @@ $output = Join-Path $env:TEMP 'esp32-kvm-integration-test'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 $includes = @("/I$($msvc.FullName)/include", "/I$($kit.FullName)/ucrt", "/I$repo/firmware/components/router", "/I$repo/firmware/components/transport", "/I$repo/firmware/components/display", "/I$repo/protocol/schema")
 $libraries = @("/LIBPATH:$($msvc.FullName)/lib/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/um/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/ucrt/x64")
+& (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 @includes (Join-Path $PSScriptRoot 'test_transport_link.c') (Join-Path $repo 'firmware/components/transport/transport_link.c') "/Fo:$output/" "/Fe:$output/test_transport_link.exe" /link @libraries
+if ($LASTEXITCODE -ne 0) { throw 'Transport link test compile failed' }
+& (Join-Path $output 'test_transport_link.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Transport link test failed' }
+Write-Output 'PASS transport link write loop'
 & (Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe') /nologo /W4 /WX /std:c11 @includes (Join-Path $PSScriptRoot 'test_transport_router.c') (Join-Path $repo 'firmware/components/transport/transport_core.c') (Join-Path $repo 'firmware/components/router/router.c') "/Fo:$output/" "/Fe:$output/test_transport_router.exe" /link @libraries
 if ($LASTEXITCODE -ne 0) { throw 'Integration compile failed' }
 & (Join-Path $output 'test_transport_router.exe')

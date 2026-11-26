@@ -10,14 +10,23 @@
 #include "esp_err.h"
 #include "display_model.h"
 #include "transport_hub.h"
+#include "transport_link.h"
 #include <stddef.h>
 
 /** Opt-in trace commands always release routing and close the host session. */
 void kvm_transport_diagnostics_init(void);
 bool kvm_transport_diagnostics_requested(const uint8_t *bytes, size_t length);
+/** Writes the trace over the USB Serial/JTAG link (dump_to with that link). */
 void kvm_transport_diagnostics_dump(void);
+/** Writes the trace over `link`, 100 ms per write, stopping at a refused chunk. */
+void kvm_transport_diagnostics_dump_to(const kvm_transport_link_t *link);
 
-/** Installs fixed USB CDC and starts the disarmed router worker. */
+/** Starts the disarmed router worker on an already usable byte link (worker
+ * name, priority and stack are fixed). ESP_ERR_INVALID_STATE once started,
+ * ESP_ERR_INVALID_ARG for a NULL link or a missing callback. */
+esp_err_t kvm_transport_usb_start(const kvm_transport_link_t *link);
+/** Installs fixed USB Serial/JTAG CDC, then kvm_transport_usb_start() on its
+ * link; the driver is uninstalled again if the worker cannot start. */
 esp_err_t kvm_transport_usb_serial_jtag_start(void);
 /** Queues a physical button request for the serialized USB/router task. */
 void kvm_transport_button_event(kvm_display_event_t event);

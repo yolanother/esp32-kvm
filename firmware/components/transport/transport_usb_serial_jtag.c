@@ -1,5 +1,7 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the repository LICENSE.
  * Bridges binary framed routing traffic through ESP32-S3 USB Serial/JTAG CDC.
+ * The worker reaches the host only through a byte link (transport_link.h);
+ * kvm_transport_usb_serial_jtag_start() gives it the USB Serial/JTAG one.
  * One worker serializes transport and router calls, rotates the session on
  * disconnect, ticks the fail-local lease, and queues NimBLE pairing events
  * for serialized minor-one STATUS. It refreshes three authenticated
@@ -64,6 +66,8 @@
 static kvm_transport_core_t core;
 static kvm_router_t router;
 static bool started;
+/* The worker's byte link; set once before the worker starts. */
+static const kvm_transport_link_t *usb_link;
 static TaskHandle_t usb_task;
 static QueueHandle_t pairing_queue;
 static QueueHandle_t pairing_touch_queue;
@@ -467,23 +471,26 @@ static uint64_t new_session(void)
     return session;
 }
 
+/* Response write budget: each try waits at most 50 ms (pdMS_TO_TICKS(50) =
+   5 ticks at CONFIG_FREERTOS_HZ=100) and the first try that moves no byte
+   gives up, so a stalled host costs the worker at most 5 ticks = 50 ms per
+   response before the core resets. Tries that move bytes continue, exactly
+   as the former direct usb_serial_jtag_write_bytes loop did. */
+#define KVM_USB_WRITE_TRY_TICKS pdMS_TO_TICKS(50)
+#define KVM_USB_WRITE_MAX_TRIES 1u
+
 static void send_binary(void *context, const uint8_t *bytes, size_t length)
 {
     (void)context;
-    size_t at = 0;
-    while (at < length) {
-        int written = usb_serial_jtag_write_bytes(bytes + at, length - at, pdMS_TO_TICKS(50));
-        if (written <= 0) {
-            kvm_transport_core_reset(&core);
-            return;
-        }
-        at += (size_t)written;
-    }
+    if (!kvm_transport_link_write_all(usb_link, bytes, length, KVM_USB_WRITE_TRY_TICKS,
+                                      KVM_USB_WRITE_MAX_TRIES))
+        kvm_transport_core_reset(&core);
 }
 
 static void usb_worker(void *context)
 {
     (void)context;
+    const kvm_transport_link_t *link = usb_link;
     uint8_t bytes[128];
     bool was_connected = false;
     bool guest_ready = false;
@@ -509,7 +516,7 @@ static void usb_worker(void *context)
             kvm_transport_core_reset(&core);
             was_connected = false;
         }
-        bool connected = usb_serial_jtag_is_connected();
+        bool connected = link->connected(link->context);
         uint64_t time_ms = now_ms(NULL);
         if (time_ms - last_health_ms >= KVM_HEALTH_LOG_MS || time_ms < last_health_ms) {
             last_health_ms = time_ms;
@@ -625,13 +632,13 @@ static void usb_worker(void *context)
             }
             was_connected = true;
         }
-        int read = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), wait);
+        int read = link->read(link->context, bytes, sizeof(bytes), wait);
         size_t host_bytes = 0;
         if (read > 0) {
             if (kvm_transport_diagnostics_requested(bytes, (size_t)read)) {
                 kvm_router_emergency_release(&router);
                 kvm_transport_core_reset(&core);
-                kvm_transport_diagnostics_dump();
+                kvm_transport_diagnostics_dump_to(link);
                 was_connected = false;
             } else host_bytes = (size_t)read;
         }
@@ -656,15 +663,11 @@ static void delete_queues(void)
     }
 }
 
-esp_err_t kvm_transport_usb_serial_jtag_start(void)
+esp_err_t kvm_transport_usb_start(const kvm_transport_link_t *link)
 {
     if (started) return ESP_ERR_INVALID_STATE;
-    usb_serial_jtag_driver_config_t config = {
-        .rx_buffer_size = KVM_USB_BUFFER_SIZE,
-        .tx_buffer_size = KVM_USB_BUFFER_SIZE,
-    };
-    esp_err_t result = usb_serial_jtag_driver_install(&config);
-    if (result != ESP_OK) return result;
+    if (!link || !link->connected || !link->read || !link->write) return ESP_ERR_INVALID_ARG;
+    usb_link = link;
     pairing_queue = xQueueCreate(8, sizeof(doubtech_hid_pairing_event_t));
     pairing_touch_queue = xQueueCreate(4, sizeof(kvm_display_pair_request_t));
     target_touch_queue = xQueueCreate(4, sizeof(uint8_t));
@@ -676,7 +679,6 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     if (!pairing_queue || !pairing_touch_queue || !target_touch_queue || !central_event_queue ||
         !input_touch_queue) {
         delete_queues();
-        (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }
     doubtech_hid_pairing_set_events(pairing_event, NULL);
@@ -690,7 +692,6 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
     if (!kvm_router_set_capacity(&router, KVM_ROUTER_MAX_SLOTS)) {
         doubtech_hid_pairing_set_events(NULL, NULL);
         delete_queues();
-        (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_INVALID_STATE;
     }
     atomic_store(&hub_queue_ready, true);
@@ -698,9 +699,23 @@ esp_err_t kvm_transport_usb_serial_jtag_start(void)
         atomic_store(&hub_queue_ready, false);
         doubtech_hid_pairing_set_events(NULL, NULL);
         delete_queues();
-        (void)usb_serial_jtag_driver_uninstall();
         return ESP_ERR_NO_MEM;
     }
     started = true;
     return ESP_OK;
+}
+
+esp_err_t kvm_transport_usb_serial_jtag_start(void)
+{
+    if (started) return ESP_ERR_INVALID_STATE;
+    usb_serial_jtag_driver_config_t config = {
+        .rx_buffer_size = KVM_USB_BUFFER_SIZE,
+        .tx_buffer_size = KVM_USB_BUFFER_SIZE,
+    };
+    esp_err_t result = usb_serial_jtag_driver_install(&config);
+    if (result != ESP_OK) return result;
+    result = kvm_transport_usb_start(kvm_transport_link_usj());
+    /* Same order as before: the worker's resources are released first. */
+    if (result != ESP_OK) (void)usb_serial_jtag_driver_uninstall();
+    return result;
 }
