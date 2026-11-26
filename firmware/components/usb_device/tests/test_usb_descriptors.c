@@ -113,7 +113,7 @@ static void test_endpoints(void)
     check_ep(KVM_USB_EP_CDC_NOTIF_IN, 0x03, 8, 16, 16);
     check_ep(KVM_USB_EP_CDC_OUT, 0x02, 64, 0, 0);
     check_ep(KVM_USB_EP_CDC_IN, 0x02, 64, 0, 0);
-    /* No endpoint number is reused in the same direction and none exceeds the bulk limit. */
+    /* Exactly five endpoint descriptors besides EP0. */
     int total = 0;
     for (int i = 0; find_desc(0x05, i) != NULL; i++) total++;
     assert(total == 5);
@@ -127,7 +127,7 @@ static void test_hid_interface(uint8_t itf, uint8_t subclass, uint8_t protocol, 
     const uint8_t *h = i + i[0];
     assert(h[0] == 9 && h[1] == 0x21);
     assert(le16(h + 2) == 0x0111);
-    assert(h[5] == 1 && h[6] == 0x22);
+    assert(h[4] == 0 && h[5] == 1 && h[6] == 0x22); /* bCountryCode 0, one class descriptor: report */
     assert(le16(h + 7) == *report_len);
     assert(h + h[0] == find_ep(ep));
 }
@@ -177,19 +177,31 @@ static hid_walk_t walk_report(const uint8_t *r, size_t len)
 static void test_keyboard_report(void)
 {
     const uint8_t *r = kvm_usb_keyboard_report_desc;
-    assert(kvm_usb_keyboard_report_desc_len == 63);
+    assert(kvm_usb_keyboard_report_desc_len == 65);
     assert(r[0] == 0x05 && r[1] == 0x01 && r[2] == 0x09 && r[3] == 0x06 && r[4] == 0xA1 && r[5] == 0x01);
     assert(r[kvm_usb_keyboard_report_desc_len - 1] == 0xC0);
     hid_walk_t w = walk_report(r, kvm_usb_keyboard_report_desc_len);
     assert(w.ok && w.id_items == 0); /* no Report ID: boot keyboard compatible */
     assert(w.in_bits[0] == 64);      /* modifier, reserved, six keys = 8 bytes */
     assert(w.out_bits[0] == 8);      /* five LEDs plus three padding bits */
-    /* The five LED usages: Num Lock..Kana (usage page 8, 1..5). */
-    static const uint8_t leds[] = { 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02 };
-    bool found = false;
-    for (size_t i = 0; i + sizeof(leds) <= kvm_usb_keyboard_report_desc_len; i++)
-        if (memcmp(r + i, leds, sizeof(leds)) == 0) found = true;
-    assert(found);
+    /* Modifiers E0..E7 as eight 1-bit fields, the reserved byte, the five LEDs (usage page 8, 1..5) with
+     * padding, then the key array, in this order. */
+    static const uint8_t mods[] = { 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02 };
+    static const uint8_t reserved[] = { 0x95, 0x01, 0x75, 0x08, 0x81, 0x01 };
+    static const uint8_t leds[] = { 0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02, 0x95, 0x01, 0x75, 0x03, 0x91, 0x01 };
+    /* Six 8-bit keys, logical and usage range 0..0xFF as two-byte items so 0xFF is not read as negative. */
+    static const uint8_t keys[] = { 0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x05, 0x07, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x81, 0x00 };
+    const uint8_t *seqs[] = { mods, reserved, leds, keys };
+    const size_t lens[] = { sizeof(mods), sizeof(reserved), sizeof(leds), sizeof(keys) };
+    size_t cursor = 6;
+    for (size_t s = 0; s < 4; s++) {
+        bool found = false;
+        for (size_t i = cursor; i + lens[s] <= kvm_usb_keyboard_report_desc_len; i++) {
+            if (memcmp(r + i, seqs[s], lens[s]) == 0) { found = true; cursor = i + lens[s]; break; }
+        }
+        assert(found);
+    }
+    assert(cursor == kvm_usb_keyboard_report_desc_len - 1); /* only the end collection remains */
 }
 
 static void test_pointer_report(void)
@@ -213,7 +225,9 @@ static void test_pointer_report(void)
     static const uint8_t wheel[] = { 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06 };
     /* AC Pan: consumer page, usage 0x0238. */
     static const uint8_t pan[] = { 0x05, 0x0C, 0x0A, 0x38, 0x02, 0x95, 0x01, 0x81, 0x06 };
-    static const uint8_t consumer[] = { 0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, KVM_USB_REPORT_ID_CONSUMER };
+    static const uint8_t consumer[] = { 0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, KVM_USB_REPORT_ID_CONSUMER,
+        /* usages and logical range 0..0x3FF in one 16-bit array field */
+        0x19, 0x00, 0x2A, 0xFF, 0x03, 0x15, 0x00, 0x26, 0xFF, 0x03, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00 };
     const uint8_t *seqs[] = { buttons, axes, wheel, pan, consumer };
     const size_t lens[] = { sizeof(buttons), sizeof(axes), sizeof(wheel), sizeof(pan), sizeof(consumer) };
     size_t cursor = 0;

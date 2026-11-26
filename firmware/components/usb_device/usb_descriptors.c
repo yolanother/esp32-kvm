@@ -25,7 +25,7 @@
 
 #define LE16(v) (uint8_t)((v) & 0xFF), (uint8_t)(((v) >> 8) & 0xFF)
 
-#define KEYBOARD_REPORT_LEN 63
+#define KEYBOARD_REPORT_LEN 65
 #define POINTER_REPORT_LEN 100
 #define CONFIG_TOTAL_LEN 125
 
@@ -46,7 +46,7 @@ void kvm_usb_device_descriptor(uint16_t vid, uint16_t pid, uint8_t out[18])
     memcpy(out, d, sizeof(d));
 }
 
-const uint8_t kvm_usb_config_descriptor[CONFIG_TOTAL_LEN] = {
+const uint8_t kvm_usb_config_descriptor[] = {
     CONFIG_HEADER(CONFIG_TOTAL_LEN),
     /* Interface 0: boot keyboard. */
     ITF(KVM_USB_ITF_KEYBOARD, 1, CLASS_HID, 0x01, 0x01),
@@ -61,7 +61,7 @@ const uint8_t kvm_usb_config_descriptor[CONFIG_TOTAL_LEN] = {
     ITF(KVM_USB_ITF_CDC_COMM, 1, CLASS_CDC, 0x02, 0x00),
     5, DT_CS_INTERFACE, 0x00, LE16(0x0110),                   /* header, CDC 1.10 */
     5, DT_CS_INTERFACE, 0x01, 0x00, KVM_USB_ITF_CDC_DATA,     /* call management */
-    4, DT_CS_INTERFACE, 0x02, 0x02,                           /* ACM: line coding + break */
+    4, DT_CS_INTERFACE, 0x02, 0x02,                           /* ACM: line coding and serial state, no Send_Break */
     5, DT_CS_INTERFACE, 0x06, KVM_USB_ITF_CDC_COMM, KVM_USB_ITF_CDC_DATA, /* union */
     EP(KVM_USB_EP_CDC_NOTIF_IN, EP_INTERRUPT, 8, 16),
     ITF(KVM_USB_ITF_CDC_DATA, 2, CLASS_CDC_DATA, 0x00, 0x00),
@@ -71,21 +71,21 @@ const uint8_t kvm_usb_config_descriptor[CONFIG_TOTAL_LEN] = {
 const size_t kvm_usb_config_descriptor_len = sizeof(kvm_usb_config_descriptor);
 
 /* Boot keyboard: 8 input bytes (modifiers, reserved, six keys), 5 LED output bits + 3 pad. No Report ID. */
-const uint8_t kvm_usb_keyboard_report_desc[KEYBOARD_REPORT_LEN] = {
+const uint8_t kvm_usb_keyboard_report_desc[] = {
     0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,       /* Generic Desktop, Keyboard, Application */
     0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,       /* Key codes: modifiers E0..E7 */
     0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
     0x95, 0x01, 0x75, 0x08, 0x81, 0x01,       /* reserved byte */
     0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02, /* LEDs */
     0x95, 0x01, 0x75, 0x03, 0x91, 0x01,       /* LED padding */
-    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, /* six keys */
+    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x05, 0x07, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x81, 0x00, /* six keys */
     0xC0,
 };
 const size_t kvm_usb_keyboard_report_desc_len = sizeof(kvm_usb_keyboard_report_desc);
 
 /* Report ID 1 mouse (7 data bytes): 5 buttons + 3 pad, X/Y int16, wheel int8, AC Pan int8.
  * Report ID 2 consumer control: one 16-bit usage. */
-const uint8_t kvm_usb_pointer_report_desc[POINTER_REPORT_LEN] = {
+const uint8_t kvm_usb_pointer_report_desc[] = {
     0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, KVM_USB_REPORT_ID_MOUSE,
     0x09, 0x01, 0xA1, 0x00,
     0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x95, 0x05, 0x75, 0x01, 0x81, 0x02,
@@ -101,6 +101,8 @@ const uint8_t kvm_usb_pointer_report_desc[POINTER_REPORT_LEN] = {
 const size_t kvm_usb_pointer_report_desc_len = sizeof(kvm_usb_pointer_report_desc);
 
 _Static_assert(sizeof(kvm_usb_config_descriptor) == CONFIG_TOTAL_LEN, "wTotalLength must equal the array size");
+_Static_assert(sizeof(kvm_usb_keyboard_report_desc) == KEYBOARD_REPORT_LEN, "keyboard wDescriptorLength must equal the array size");
+_Static_assert(sizeof(kvm_usb_pointer_report_desc) == POINTER_REPORT_LEN, "pointer wDescriptorLength must equal the array size");
 
 bool kvm_usb_config_parse(const uint8_t *desc, size_t len, kvm_usb_config_summary_t *out)
 {
