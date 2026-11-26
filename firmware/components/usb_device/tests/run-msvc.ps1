@@ -13,7 +13,7 @@ $binDir = Join-Path $msvc.FullName 'bin/HostX64/x64'
 $compiler = Join-Path $binDir 'cl.exe'
 $output = Join-Path $env:TEMP 'esp32-kvm-usb-device-test'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
-$includes = @("/I$($msvc.FullName)/include", "/I$($kit.FullName)/ucrt", "/I$repo/firmware/components/usb_device")
+$includes = @("/I$($msvc.FullName)/include", "/I$($kit.FullName)/ucrt", "/I$repo/firmware/components/usb_device", "/I$repo/firmware/components/router")
 $libraries = @("/LIBPATH:$($msvc.FullName)/lib/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/um/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/ucrt/x64")
 [string[]]$sanitize = @()
 if (Test-Path (Join-Path $binDir 'clang_rt.asan_dynamic-x86_64.dll')) {
@@ -24,7 +24,8 @@ if (Test-Path (Join-Path $binDir 'clang_rt.asan_dynamic-x86_64.dll')) {
 $component = "$repo/firmware/components/usb_device"
 $suites = @(
     @{ Name = 'test_usb_mode'; Sources = @('usb_mode.c') },
-    @{ Name = 'test_usb_descriptors'; Sources = @('usb_descriptors.c') }
+    @{ Name = 'test_usb_descriptors'; Sources = @('usb_descriptors.c') },
+    @{ Name = 'test_usb_hid_sink'; Sources = @('usb_hid_sink.c', 'usb_descriptors.c') }
 )
 # Optional suite names select a subset (for example: run-msvc.ps1 test_usb_descriptors).
 $selected = @($args)
