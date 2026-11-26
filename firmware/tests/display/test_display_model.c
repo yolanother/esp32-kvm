@@ -589,10 +589,14 @@ static void input_devices_tests(void)
     assert(kvm_display_input_pairing_blocks_guest(&p));
     input_view(&p, 1000, &s, &v);
     assert(v.screen == KVM_DISPLAY_INPUT_PAIR && strcmp(v.title, "INPUT DEVICES") == 0);
-    assert(v.input_row_count == 3 && v.input_cancel);
+    /* Three device rows, then the USB mode entry (a row below them, y 176..220). */
+    assert(v.input_row_count == 4 && v.input_cancel);
     assert(strcmp(v.input_rows[0], "KEYBOARD: K380") == 0);
     assert(strcmp(v.input_rows[1], "MOUSE: not paired") == 0);
     assert(strcmp(v.input_rows[2], "ADD KEYBOARD OR MOUSE") == 0);
+    assert(strcmp(v.input_rows[3], "USB MODE") == 0);
+    /* The device-list touch zones are unchanged: the USB row is not one of them. */
+    assert(!kvm_display_input_touch_action(&s, 120, 198, &a, &row));
     assert(!v.show_input_entry && !v.show_guest_settings);
 
     /* First tap on a paired row asks for confirmation; nothing is forgotten. */
@@ -715,6 +719,409 @@ static void input_devices_tests(void)
     input_view(&p, 40000, &s, &v);
     assert(s.input_dev_stored == (1u << KVM_DISPLAY_INPUT_KEYBOARD) &&
            strcmp(s.input_dev_names[0], "K380") == 0);
+}
+
+/* ---- USB mode fields (spec Decision 22): serial mode is today's screen ---- */
+
+/* One status of the stage 2 session-toggle matrix. */
+static kvm_display_status_t toggle_status(uint8_t ready, uint8_t hub, uint8_t sel, bool kbd,
+                                          bool mouse, bool session)
+{
+    kvm_display_status_t s;
+    memset(&s, 0, sizeof s);
+    s.guest_slots = ready; s.ready_slots = ready;
+    s.ready_mask = s.occupied_mask = (uint8_t)((1u << ready) - 1u);
+    s.guest_ready = true; s.selected_slot = sel; s.hub_target = hub;
+    s.input_kbd = kbd; s.input_mouse = mouse;
+    s.usb_connected = s.host_session = session;
+    return s;
+}
+
+static void usb_badge_tests(void)
+{
+    kvm_display_status_t s;
+    char out[48], base[48];
+    /* Serial mode (usb_mode 0, and any value but 1): today's eight strings,
+       whatever pc_hid and usb_reason say. */
+    static const char *const serial_want[8] = {
+        "USB off", "USB off | KB", "USB off | MS", "USB off | KB MS",
+        "USB on", "USB on | KB", "USB on | MS", "USB on | KB MS"};
+    static const uint8_t serial_modes[3] = {0, 2, 255};
+    for (unsigned m = 0; m < 8; ++m)
+    for (unsigned mode = 0; mode < 3; ++mode)
+    for (uint8_t pc = 0; pc <= 3; ++pc)
+    for (uint8_t reason = 0; reason <= 8; ++reason) {
+        memset(&s, 0, sizeof s);
+        s.usb_connected = (m & 4u) != 0; s.input_kbd = (m & 1u) != 0;
+        s.input_mouse = (m & 2u) != 0;
+        s.usb_mode = serial_modes[mode]; s.pc_hid = pc; s.usb_reason = reason;
+        kvm_display_badge_text(&s, out, sizeof out);
+        assert(strcmp(out, serial_want[m]) == 0);
+    }
+    /* Composite mode: PC state, then " | App" with a host session, then KB/MS. */
+    static const char *const composite_want[3][8] = {
+        {"USB off", "USB off | KB", "USB off | MS", "USB off | KB MS",
+         "USB off | App", "USB off | App | KB", "USB off | App | MS", "USB off | App | KB MS"},
+        {"PC asleep", "PC asleep | KB", "PC asleep | MS", "PC asleep | KB MS",
+         "PC asleep | App", "PC asleep | App | KB", "PC asleep | App | MS", "PC asleep | App | KB MS"},
+        {"PC on", "PC on | KB", "PC on | MS", "PC on | KB MS",
+         "PC on | App", "PC on | App | KB", "PC on | App | MS", "PC on | App | KB MS"}};
+    for (uint8_t pc = 0; pc <= 2; ++pc)
+    for (unsigned m = 0; m < 8; ++m) {
+        memset(&s, 0, sizeof s);
+        s.usb_mode = 1; s.pc_hid = pc;
+        s.usb_connected = s.host_session = (m & 4u) != 0;
+        s.input_kbd = (m & 1u) != 0; s.input_mouse = (m & 2u) != 0;
+        kvm_display_badge_text(&s, out, sizeof out);
+        assert(strcmp(out, composite_want[pc][m]) == 0);
+    }
+    /* An out-of-range PC state is "not enumerated". */
+    memset(&s, 0, sizeof s);
+    s.usb_mode = 1; s.pc_hid = 9;
+    kvm_display_badge_text(&s, out, sizeof out);
+    assert(strcmp(out, "USB off") == 0);
+    /* Truncation stays safe in composite mode too. */
+    s.pc_hid = 2; s.usb_connected = s.input_kbd = s.input_mouse = true;
+    char guard[8]; memset(guard, 'x', sizeof guard);
+    kvm_display_badge_text(&s, guard, 6);
+    assert(strcmp(guard, "PC on") == 0 && guard[6] == 'x');
+
+    /* Serial mode: the whole stage 2 toggle matrix gives byte-identical views
+       (and badges) for every pc_hid / usb_reason / non-1 usb_mode value. */
+    for (uint8_t ready = 0; ready <= 3; ++ready)
+    for (uint8_t hub = 0; hub <= 3; ++hub)
+    for (uint8_t sel = 0; sel <= 3; ++sel)
+    for (uint8_t kbd = 0; kbd <= 1; ++kbd)
+    for (uint8_t mouse = 0; mouse <= 1; ++mouse)
+    for (uint8_t session = 0; session <= 1; ++session) {
+        kvm_display_status_t t = toggle_status(ready, hub, sel, kbd != 0, mouse != 0, session != 0);
+        kvm_display_view_t want, got;
+        kvm_display_make_view(&t, 5000, &want);
+        kvm_display_badge_text(&t, base, sizeof base);
+        for (unsigned mode = 0; mode < 3; ++mode)
+        for (uint8_t pc = 0; pc <= 3; ++pc)
+        for (uint8_t reason = 0; reason <= 8; reason = (uint8_t)(reason + 4u)) {
+            kvm_display_status_t u = t;
+            u.usb_mode = serial_modes[mode]; u.pc_hid = pc; u.usb_reason = reason;
+            kvm_display_make_view(&u, 5000, &got);
+            assert(memcmp(&want, &got, sizeof want) == 0);
+            kvm_display_badge_text(&u, out, sizeof out);
+            assert(strcmp(out, base) == 0);
+        }
+        /* Today's rules, stated once more for the record. */
+        assert(want.usb_dim == !session);
+        assert(want.footer_hint == (kbd && hub == 0));
+    }
+
+    /* Composite mode: dim only when the PC is not enumerated, in both session
+       states; the hint only when the PC is unavailable; toggling the session
+       changes the footer badge (" | App") and nothing else. */
+    for (uint8_t ready = 0; ready <= 3; ++ready)
+    for (uint8_t hub = 0; hub <= 3; ++hub)
+    for (uint8_t sel = 0; sel <= 3; ++sel)
+    for (uint8_t kbd = 0; kbd <= 1; ++kbd)
+    for (uint8_t mouse = 0; mouse <= 1; ++mouse)
+    for (uint8_t pc = 0; pc <= 2; ++pc) {
+        kvm_display_view_t on, off, serial_on;
+        kvm_display_status_t t = toggle_status(ready, hub, sel, kbd != 0, mouse != 0, true);
+        kvm_display_make_view(&t, 5000, &serial_on);
+        t.usb_mode = 1; t.pc_hid = pc;
+        kvm_display_make_view(&t, 5000, &on);
+        char badge_on[48], badge_off[48];
+        kvm_display_badge_text(&t, badge_on, sizeof badge_on);
+        t.usb_connected = t.host_session = false;
+        kvm_display_make_view(&t, 5000, &off);
+        kvm_display_badge_text(&t, badge_off, sizeof badge_off);
+        bool hint = kbd && hub == 0 && pc != 2;
+        assert(on.screen == KVM_DISPLAY_ACTIVE && off.screen == KVM_DISPLAY_ACTIVE);
+        assert(on.usb_dim == (pc == 0) && off.usb_dim == on.usb_dim);
+        assert(on.footer_hint == hint && off.footer_hint == hint);
+        if (hint) {
+            assert(strcmp(on.footer, "This PC: use Ctrl+Alt+1-3") == 0);
+            assert(strcmp(off.footer, on.footer) == 0);
+        } else {
+            assert(strcmp(on.footer, badge_on) == 0 && strstr(on.footer, " | App"));
+            assert(strcmp(off.footer, badge_off) == 0 && !strstr(off.footer, "App"));
+        }
+        memcpy(off.footer, on.footer, sizeof off.footer);
+        assert(memcmp(&on, &off, sizeof on) == 0);
+        /* Against the serial-mode view: only dim, footer and hint may differ. */
+        serial_on.usb_dim = on.usb_dim;
+        serial_on.footer_hint = on.footer_hint;
+        memcpy(serial_on.footer, on.footer, sizeof on.footer);
+        assert(memcmp(&serial_on, &on, sizeof on) == 0);
+    }
+    /* An armed host route never shows the hint, whatever the PC state. */
+    for (uint8_t pc = 0; pc <= 2; ++pc) {
+        kvm_display_view_t v;
+        kvm_display_status_t t = toggle_status(1, 0, 1, true, false, true);
+        t.armed = true; t.usb_mode = 1; t.pc_hid = pc;
+        kvm_display_make_view(&t, 5000, &v);
+        assert(v.screen == KVM_DISPLAY_ACTIVE && !v.footer_hint);
+    }
+    /* A paired keyboard whose input goes to This PC: the hint in serial mode
+       and with the PC unavailable, the device name once the PC takes input. */
+    {
+        kvm_display_view_t v;
+        memset(&s, 0, sizeof s);
+        s.touch_available = true;
+        s.input_pair_state = KVM_DISPLAY_INPUT_RESULT;
+        s.input_pair_reason = 0;
+        s.input_pair_kind = KVM_DISPLAY_INPUT_KEYBOARD;
+        snprintf(s.input_pair_name, sizeof s.input_pair_name, "K380");
+        kvm_display_make_view(&s, 5000, &v);
+        assert(strcmp(v.footer, "This PC: use Ctrl+Alt+1-3") == 0);
+        s.pc_hid = 2;
+        kvm_display_make_view(&s, 5000, &v);
+        assert(strcmp(v.footer, "This PC: use Ctrl+Alt+1-3") == 0); /* serial ignores pc_hid */
+        s.usb_mode = 1; s.pc_hid = 1;
+        kvm_display_make_view(&s, 5000, &v);
+        assert(strcmp(v.footer, "This PC: use Ctrl+Alt+1-3") == 0);
+        s.pc_hid = 2;
+        kvm_display_make_view(&s, 5000, &v);
+        assert(strcmp(v.footer, "K380") == 0);
+    }
+}
+
+/* ---- USB mode screen: display-local, requests only through the worker ---- */
+
+/* The device list open (worker state), touch available, a not-built image. */
+static kvm_display_status_t usb_list_status(void)
+{
+    kvm_display_status_t s;
+    memset(&s, 0, sizeof s);
+    s.touch_available = true;
+    s.paired_guests = 1;
+    s.usb_reason = KVM_DISPLAY_USB_REASON_NOT_BUILT;
+    s.input_pair_state = KVM_DISPLAY_INPUT_DEVICES;
+    s.input_pair_window = 5;
+    return s;
+}
+
+/* One display iteration: expire and gate, project the UI, derive the view. */
+static void usb_frame(kvm_display_usb_ui_t *ui, kvm_display_status_t *s, uint64_t now,
+                      kvm_display_view_t *v)
+{
+    kvm_display_usb_tick(ui, s, now);
+    kvm_display_usb_status(ui, now, s);
+    kvm_display_make_view(s, now, v);
+}
+
+/* Opens the screen from the list's USB row; the worker then closes the list. */
+static void usb_open(kvm_display_usb_ui_t *ui, kvm_display_status_t *s, uint64_t now,
+                     kvm_display_view_t *v)
+{
+    kvm_display_usb_request_t req = (kvm_display_usb_request_t)0;
+    kvm_display_usb_ui_init(ui);
+    *s = usb_list_status();
+    usb_frame(ui, s, now, v);
+    assert(kvm_display_usb_touch(ui, s, 120, 198, now, &req) == KVM_DISPLAY_USB_TOUCH_OPENED);
+    s->input_pair_state = KVM_DISPLAY_INPUT_CLOSED;
+    usb_frame(ui, s, now, v);
+    assert(v->screen == KVM_DISPLAY_USB_MODE);
+}
+
+static void usb_screen_tests(void)
+{
+    kvm_display_usb_ui_t ui;
+    kvm_display_status_t s;
+    kvm_display_view_t v;
+    kvm_display_usb_request_t req = (kvm_display_usb_request_t)0;
+    kvm_display_pair_action_t pair_action;
+    kvm_display_input_action_t input_action;
+    uint8_t row = 0;
+
+    /* Request values are the interface's. */
+    assert(KVM_DISPLAY_USB_USE_COMPOSITE == 1 && KVM_DISPLAY_USB_USE_SERIAL == 2 &&
+           KVM_DISPLAY_USB_SERIAL_ONCE == 3);
+    /* Reason text for every kvm_usb_reason_t value. */
+    static const char *const reasons[9] = {
+        "Serial is the default", "Saved setting", "Not in this build",
+        "Serial forced by this build", "Restart: serial this boot",
+        "BOOT button: serial this boot", "Crash reset: serial this boot",
+        "Turned off after failed starts", "Unknown"};
+    for (uint8_t r = 0; r <= 8; ++r) assert(strcmp(kvm_display_usb_reason_text(r), reasons[r]) == 0);
+    assert(strcmp(kvm_display_usb_reason_text(200), "Unknown") == 0);
+    assert(KVM_DISPLAY_USB_REASON_DEFAULT == 0 && KVM_DISPLAY_USB_REASON_STORED == 1 &&
+           KVM_DISPLAY_USB_REASON_NOT_BUILT == 2 && KVM_DISPLAY_USB_REASON_FORCED_BY_BUILD == 3 &&
+           KVM_DISPLAY_USB_REASON_SERIAL_ONCE == 4 && KVM_DISPLAY_USB_REASON_ESCAPE_BUTTON == 5 &&
+           KVM_DISPLAY_USB_REASON_ABNORMAL_RESET == 6 && KVM_DISPLAY_USB_REASON_UNCONFIRMED_LIMIT == 7);
+
+    /* Closed UI: nothing in the snapshot, so every other test's view holds. */
+    kvm_display_usb_ui_init(&ui);
+    s = usb_list_status();
+    usb_frame(&ui, &s, 1000, &v);
+    assert(!s.usb_screen && s.usb_confirm == 0 && s.usb_notice == 0);
+    assert(v.screen == KVM_DISPLAY_INPUT_PAIR);
+    /* Only the list's USB row opens it; the device rows stay the worker's. */
+    assert(kvm_display_usb_touch(&ui, &s, 120, 64, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 152, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    assert(kvm_display_usb_touch(&ui, &s, 210, 20, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    assert(kvm_display_usb_touch(&ui, &s, 4, 198, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    assert(!ui.open);
+    /* Not from the main screen (no zone of its own there). */
+    s.input_pair_state = KVM_DISPLAY_INPUT_CLOSED;
+    assert(kvm_display_usb_touch(&ui, &s, 120, 198, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    /* Gated like the list: never with a guest armed or a guest window open. */
+    s = usb_list_status();
+    s.armed = true; s.guest_ready = true;
+    assert(kvm_display_usb_touch(&ui, &s, 120, 198, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    s = usb_list_status();
+    s.pairing_state = KVM_DISPLAY_PAIRING_WAITING; s.pairing_deadline_ms = 9000;
+    assert(kvm_display_usb_touch(&ui, &s, 120, 198, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    s = usb_list_status();
+    s.touch_available = false;
+    assert(kvm_display_usb_touch(&ui, &s, 120, 198, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    assert(!ui.open);
+
+    /* The screen: mode, reason, three actions, the close control. */
+    usb_open(&ui, &s, 1000, &v);
+    assert(s.usb_screen);
+    assert(strcmp(v.title, "USB MODE: SERIAL") == 0);
+    assert(strcmp(v.detail, "Not in this build") == 0);
+    assert(v.input_row_count == 3 && v.input_cancel);
+    assert(strcmp(v.input_rows[0], "USE USB HID MODE") == 0);
+    assert(strcmp(v.input_rows[1], "USE SERIAL MODE") == 0);
+    assert(strcmp(v.input_rows[2], "RESTART IN SERIAL MODE") == 0);
+    assert(strcmp(v.footer, "Tap an action twice") == 0);
+    assert(!v.show_guest_settings && !v.show_input_entry && !v.usb_dim && !v.footer_hint);
+    /* No guest pairing or input entry zone under it. */
+    assert(!kvm_display_pair_touch_action(&s, 210, 214, &pair_action));
+    assert(!kvm_display_input_touch_action(&s, 160, 214, &input_action, &row));
+    {
+        kvm_display_pair_request_t pr;
+        assert(!kvm_display_pair_request(&s, 1000, KVM_DISPLAY_PAIR_BEGIN, &pr));
+    }
+    /* A press outside every zone does nothing. */
+    assert(kvm_display_usb_touch(&ui, &s, 120, 200, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    assert(kvm_display_usb_touch(&ui, &s, 2, 64, 1000, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+
+    /* USE_COMPOSITE on a build without support: "Not in this build", nothing sent,
+       no confirmation armed, not even by a second tap. */
+    assert(kvm_display_usb_touch(&ui, &s, 120, 64, 1100, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    usb_frame(&ui, &s, 1100, &v);
+    assert(strcmp(v.footer, "Not in this build") == 0 && s.usb_confirm == 0);
+    assert(strcmp(v.input_rows[0], "USE USB HID MODE") == 0);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 64, 1200, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    s.usb_reason = KVM_DISPLAY_USB_REASON_FORCED_BY_BUILD; /* the rescue build too */
+    usb_frame(&ui, &s, 1200, &v);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 64, 1300, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 64, 1400, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    s.usb_reason = KVM_DISPLAY_USB_REASON_NOT_BUILT;
+
+    /* USE_SERIAL: the first tap asks, a tap on another action re-arms that one,
+       its second tap within 5 s sends it. */
+    assert(kvm_display_usb_touch(&ui, &s, 120, 108, 2000, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    usb_frame(&ui, &s, 2000, &v);
+    assert(s.usb_confirm == KVM_DISPLAY_USB_USE_SERIAL);
+    assert(strcmp(v.input_rows[1], "TAP AGAIN TO CONFIRM") == 0);
+    assert(strcmp(v.footer, "Tap again within 5s") == 0);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 152, 2500, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    usb_frame(&ui, &s, 2500, &v);
+    assert(s.usb_confirm == KVM_DISPLAY_USB_SERIAL_ONCE);
+    assert(strcmp(v.input_rows[1], "USE SERIAL MODE") == 0);
+    assert(strcmp(v.input_rows[2], "TAP AGAIN TO CONFIRM") == 0);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 152, 2500 + KVM_DISPLAY_USB_CONFIRM_MS - 1, &req) ==
+           KVM_DISPLAY_USB_TOUCH_SEND);
+    assert(req == KVM_DISPLAY_USB_SERIAL_ONCE);
+    usb_frame(&ui, &s, 7600, &v);
+    assert(s.usb_confirm == 0 && strcmp(v.footer, "Restarting...") == 0);
+    assert(strcmp(v.input_rows[2], "RESTART IN SERIAL MODE") == 0);
+
+    /* USE_SERIAL on an image that is already serial is still a confirmed restart. */
+    usb_open(&ui, &s, 10000, &v);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 108, 10000, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 108, 11000, &req) == KVM_DISPLAY_USB_TOUCH_SEND);
+    assert(req == KVM_DISPLAY_USB_USE_SERIAL);
+
+    /* The confirmation lapses after 5 s: a late tap only asks again. */
+    usb_open(&ui, &s, 20000, &v);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 108, 20000, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    usb_frame(&ui, &s, 20000 + KVM_DISPLAY_USB_CONFIRM_MS, &v);
+    assert(s.usb_confirm == 0 && strcmp(v.input_rows[1], "USE SERIAL MODE") == 0);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 108, 20000 + KVM_DISPLAY_USB_CONFIRM_MS, &req) ==
+           KVM_DISPLAY_USB_TOUCH_HANDLED);
+    assert(KVM_DISPLAY_USB_CONFIRM_MS == 5000u);
+
+    /* A build with composite support: USE_COMPOSITE is a confirmed request. */
+    usb_open(&ui, &s, 30000, &v);
+    s.usb_reason = KVM_DISPLAY_USB_REASON_DEFAULT;
+    usb_frame(&ui, &s, 30000, &v);
+    assert(strcmp(v.detail, "Serial is the default") == 0);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 64, 30000, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    usb_frame(&ui, &s, 30100, &v);
+    assert(strcmp(v.input_rows[0], "TAP AGAIN TO CONFIRM") == 0);
+    assert(kvm_display_usb_touch(&ui, &s, 120, 64, 31000, &req) == KVM_DISPLAY_USB_TOUCH_SEND);
+    assert(req == KVM_DISPLAY_USB_USE_COMPOSITE);
+    /* Composite mode reads as such, with its reason. */
+    s.usb_mode = 1; s.usb_reason = KVM_DISPLAY_USB_REASON_STORED; s.pc_hid = 2;
+    usb_frame(&ui, &s, 31100, &v);
+    assert(strcmp(v.title, "USB MODE: USB HID") == 0 && strcmp(v.detail, "Saved setting") == 0);
+    assert(!v.usb_dim);
+    s.usb_mode = 0; s.usb_reason = KVM_DISPLAY_USB_REASON_ESCAPE_BUTTON; s.pc_hid = 0;
+    usb_frame(&ui, &s, 31200, &v);
+    assert(strcmp(v.detail, "BOOT button: serial this boot") == 0);
+
+    /* The worker's result outranks the local notice, never a pending confirm. */
+    static const char *const results[5] = {"", "Not in this build", "Busy, try again",
+                                           "Restarting...", "Mode change failed"};
+    for (uint8_t r = 1; r <= 4; ++r) {
+        usb_open(&ui, &s, 40000, &v);
+        s.usb_result = r;
+        usb_frame(&ui, &s, 40000, &v);
+        assert(strcmp(v.footer, results[r]) == 0);
+        assert(kvm_display_usb_touch(&ui, &s, 120, 108, 40100, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+        usb_frame(&ui, &s, 40100, &v);
+        assert(strcmp(v.footer, "Tap again within 5s") == 0);
+    }
+    s.usb_result = 0;
+
+    /* The close control closes it; nothing is sent. */
+    usb_open(&ui, &s, 50000, &v);
+    assert(kvm_display_usb_touch(&ui, &s, 210, 20, 50000, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+    usb_frame(&ui, &s, 50000, &v);
+    assert(!ui.open && !s.usb_screen && v.screen == KVM_DISPLAY_ACTIVE);
+
+    /* It closes by itself when the gate fails or when idle. */
+    {
+        static const int gates = 6;
+        for (int g = 0; g < gates; ++g) {
+            usb_open(&ui, &s, 60000, &v);
+            assert(kvm_display_usb_touch(&ui, &s, 120, 108, 60000, &req) == KVM_DISPLAY_USB_TOUCH_HANDLED);
+            switch (g) {
+            case 0: s.armed = true; s.guest_ready = true; break;
+            case 1: s.pairing_state = KVM_DISPLAY_PAIRING_WAITING; s.pairing_deadline_ms = 99000; break;
+            case 2: s.pairing_state = KVM_DISPLAY_PAIRING_CHALLENGE; s.pairing_deadline_ms = 99000;
+                    s.pairing_challenge_id = 3; s.pairing_number = 12; break;
+            case 3: s.input_pair_state = KVM_DISPLAY_INPUT_SCANNING; break;
+            case 4: s.touch_available = false; break;
+            default: s.updating = true; break;
+            }
+            usb_frame(&ui, &s, 60100, &v);
+            assert(!ui.open && !s.usb_screen && s.usb_confirm == 0 && v.screen != KVM_DISPLAY_USB_MODE);
+            /* A tap in the old action zone sends nothing. */
+            assert(kvm_display_usb_touch(&ui, &s, 120, 108, 60200, &req) != KVM_DISPLAY_USB_TOUCH_SEND);
+        }
+    }
+    usb_open(&ui, &s, 70000, &v);
+    usb_frame(&ui, &s, 70000 + KVM_DISPLAY_USB_IDLE_MS - 1, &v);
+    assert(ui.open);
+    usb_frame(&ui, &s, 70000 + KVM_DISPLAY_USB_IDLE_MS, &v);
+    assert(!ui.open && v.screen == KVM_DISPLAY_ACTIVE);
+    /* A rejected or timed-out guest window is idle, as for the gear. */
+    usb_open(&ui, &s, 80000, &v);
+    s.pairing_state = KVM_DISPLAY_PAIRING_TIMEOUT;
+    usb_frame(&ui, &s, 80000, &v);
+    assert(ui.open && v.screen == KVM_DISPLAY_USB_MODE);
+
+    /* NULL safety. */
+    kvm_display_usb_ui_init(NULL);
+    kvm_display_usb_tick(NULL, &s, 0);
+    kvm_display_usb_status(NULL, 0, &s);
+    kvm_display_usb_status(&ui, 0, NULL);
+    assert(kvm_display_usb_touch(NULL, &s, 0, 0, 0, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    assert(kvm_display_usb_touch(&ui, NULL, 0, 0, 0, &req) == KVM_DISPLAY_USB_TOUCH_NONE);
+    assert(kvm_display_usb_touch(&ui, &s, 0, 0, 0, NULL) == KVM_DISPLAY_USB_TOUCH_NONE);
 }
 
 int main(void)
@@ -1051,5 +1458,7 @@ int main(void)
     assert(pairing.state == KVM_DISPLAY_PAIRING_CLOSED && !pairing.local_owner);
     input_pairing_tests();
     input_devices_tests();
+    usb_badge_tests();
+    usb_screen_tests();
     return 0;
 }

@@ -18,12 +18,45 @@ static bool guest_pairing_idle(const kvm_display_status_t *s)
            s->pairing_state == KVM_DISPLAY_PAIRING_TIMEOUT;
 }
 
+/* Composite USB mode; any other usb_mode value is the serial (legacy) screen. */
+static bool composite_mode(const kvm_display_status_t *s)
+{
+    return s->usb_mode == 1u;
+}
+
+/* PC HID state for the badge and the dim rule: out-of-range reads as off. */
+static uint8_t pc_hid_state(const kvm_display_status_t *s)
+{
+    return s->pc_hid <= 2u ? s->pc_hid : 0u;
+}
+
+/* This PC takes device input only in composite mode with the PC ready. */
+static bool pc_unavailable(const kvm_display_status_t *s)
+{
+    return !composite_mode(s) || pc_hid_state(s) != 2u;
+}
+
+/* The USB mode screen's gate: the device list's, minus the list itself (it
+ * may still be closing when the screen opens over it). */
+static bool usb_screen_allowed(const kvm_display_status_t *s)
+{
+    return s->touch_available && !s->fault && !s->armed && !s->updating &&
+           !s->recovery_required && guest_pairing_idle(s) &&
+           (s->input_pair_state == KVM_DISPLAY_INPUT_CLOSED ||
+            s->input_pair_state == KVM_DISPLAY_INPUT_DEVICES);
+}
+
+static bool usb_screen_shown(const kvm_display_status_t *s)
+{
+    return s->usb_screen && usb_screen_allowed(s);
+}
+
 /* The "Add keyboard or mouse" entry shares the guest settings gear's gate. */
 static bool input_entry_available(const kvm_display_status_t *s)
 {
     return s->touch_available && s->paired_guests > 0 && !s->fault && !s->armed &&
            !s->updating && !s->recovery_required && guest_pairing_idle(s) &&
-           s->input_pair_state == KVM_DISPLAY_INPUT_CLOSED;
+           s->input_pair_state == KVM_DISPLAY_INPUT_CLOSED && !usb_screen_shown(s);
 }
 
 /* The input screen is shown unless recovery, update or a pause outranks it. */
@@ -35,14 +68,17 @@ static bool input_screen_shown(const kvm_display_status_t *s)
            !(s->armed && !s->guest_ready);
 }
 
-/* Typing on This PC goes nowhere until stage 3: tell the owner how to reach a guest. */
+/* Typing on This PC goes nowhere while the PC has no USB HID (serial mode, or
+ * composite with the PC asleep or not enumerated): tell the owner how to
+ * reach a guest. */
 #define THIS_PC_HINT "This PC: use Ctrl+Alt+1-3"
 
-/* Keyboard connected, device input on This PC and no host route armed: the
- * same in either session state, so it never makes the screen flash. */
+/* Keyboard connected, device input on This PC, no host route armed and the PC
+ * unavailable: the same in either session state, so it never makes the
+ * screen flash. */
 static bool this_pc_hint(const kvm_display_status_t *s)
 {
-    return s->input_kbd && s->hub_target == 0 && !s->armed;
+    return s->input_kbd && s->hub_target == 0 && !s->armed && pc_unavailable(s);
 }
 
 static const char *input_kind_text(uint8_t kind)
@@ -97,6 +133,9 @@ static void make_devices_view(const kvm_display_status_t *s, kvm_display_view_t 
             join_text(row, sizeof(v->input_rows[0]), input_kind_text(kind), ": ", name[0] ? name : "paired");
     }
     COPY_TEXT(v->input_rows[KVM_DISPLAY_INPUT_ADD_ROW], "ADD KEYBOARD OR MOUSE");
+    /* The USB mode screen's entry, below the device rows (kvm_display_usb_touch). */
+    v->input_row_count = KVM_DISPLAY_INPUT_USB_ROW + 1u;
+    COPY_TEXT(v->input_rows[KVM_DISPLAY_INPUT_USB_ROW], "USB MODE");
     if (s->input_dev_confirm == KVM_DISPLAY_INPUT_KEYBOARD || s->input_dev_confirm == KVM_DISPLAY_INPUT_MOUSE) {
         join_text(v->title, sizeof(v->title), "FORGET ", input_dev_label(s, s->input_dev_confirm), "?");
         COPY_TEXT(v->footer, "Tap again within 5s");
@@ -161,7 +200,7 @@ static void make_input_view(const kvm_display_status_t *s, uint64_t now_ms,
             else snprintf(label, sizeof(label), "Guest %u", (unsigned)target);
             snprintf(v->primary, sizeof(v->primary), "%s PAIRED", input_kind_text(s->input_pair_kind));
             join_text(v->detail, sizeof(v->detail), "Input goes to ", label, NULL);
-            if (target == 0) COPY_TEXT(v->footer, THIS_PC_HINT);
+            if (target == 0 && pc_unavailable(s)) COPY_TEXT(v->footer, THIS_PC_HINT);
             else COPY_TEXT(v->footer, s->input_pair_name);
         } else {
             uint8_t reason = s->input_pair_reason <= KVM_DISPLAY_INPUT_REASON_CANCELLED
@@ -186,6 +225,35 @@ static void make_input_view(const kvm_display_status_t *s, uint64_t now_ms,
     }
 }
 
+static const char *const usb_action_rows[3] = {
+    "USE USB HID MODE", "USE SERIAL MODE", "RESTART IN SERIAL MODE"};
+
+/* The USB mode screen: mode in the title, the boot reason, three action rows
+ * (the input rows' geometry) and the close control. */
+static void make_usb_view(const kvm_display_status_t *s, kvm_display_view_t *v)
+{
+    static const char *const results[5] = {
+        "", "Not in this build", "Busy, try again", "Restarting...", "Mode change failed"};
+    v->screen = KVM_DISPLAY_USB_MODE;
+    v->input_cancel = s->touch_available;
+    COPY_TEXT(v->title, composite_mode(s) ? "USB MODE: USB HID" : "USB MODE: SERIAL");
+    COPY_TEXT(v->detail, kvm_display_usb_reason_text(s->usb_reason));
+    v->input_row_count = 3u;
+    for (uint8_t i = 0; i < 3u; ++i)
+        COPY_TEXT(v->input_rows[i], s->usb_confirm == i + 1u ? "TAP AGAIN TO CONFIRM"
+                                                             : usb_action_rows[i]);
+    if (s->usb_confirm >= KVM_DISPLAY_USB_USE_COMPOSITE && s->usb_confirm <= KVM_DISPLAY_USB_SERIAL_ONCE)
+        COPY_TEXT(v->footer, "Tap again within 5s");
+    else if (s->usb_result >= KVM_DISPLAY_USB_RESULT_NOT_BUILT && s->usb_result <= KVM_DISPLAY_USB_RESULT_FAILED)
+        COPY_TEXT(v->footer, results[s->usb_result]);
+    else if (s->usb_notice == KVM_DISPLAY_USB_NOTICE_NOT_BUILT)
+        COPY_TEXT(v->footer, "Not in this build");
+    else if (s->usb_notice == KVM_DISPLAY_USB_NOTICE_SENT)
+        COPY_TEXT(v->footer, "Restarting...");
+    else
+        COPY_TEXT(v->footer, "Tap an action twice");
+}
+
 void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
                            kvm_display_view_t *v)
 {
@@ -198,7 +266,8 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
     v->card_ready_mask = 1u;
     v->selected_card = s->selected_slot <= 3 ? s->selected_slot : 0;
     v->show_guest_settings = s->paired_guests > 0 && s->touch_available &&
-                             s->input_pair_state == KVM_DISPLAY_INPUT_CLOSED;
+                             s->input_pair_state == KVM_DISPLAY_INPUT_CLOSED &&
+                             !usb_screen_shown(s);
     v->show_input_entry = input_entry_available(s);
     for (uint8_t i = 0; i < 3; ++i) {
         if (!(s->occupied_mask & (1u << i))) continue;
@@ -232,6 +301,8 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
                   !s->usb_connected ? "USB disconnected" : "Guest not ready");
         COPY_TEXT(v->footer, s->armed && !s->guest_ready ?
                   "Use host to release" : "Reconnect host to resume");
+    } else if (usb_screen_shown(s)) {
+        make_usb_view(s, v);
     } else if (input_screen_shown(s)) {
         make_input_view(s, now_ms, v);
     } else if (s->pairing_state != KVM_DISPLAY_PAIRING_CLOSED &&
@@ -295,8 +366,15 @@ void kvm_display_make_view(const kvm_display_status_t *s, uint64_t now_ms,
         /* No host session is not a pause: the same view, dimmed, with a badge.
            Only usb_dim and the footer differ from the session view, so toggling
            the session never changes the screen. Fault, recovery, update and
-           pairing were handled above and keep their precedence. */
-        if (!s->usb_connected) {
+           pairing were handled above and keep their precedence.
+           Composite mode (spec Decision 22): the footer is always the badge
+           ("PC on | App | KB"), dimmed only while the PC is not enumerated, so
+           the session only changes " | App" in the footer. The renderer's
+           dimmed-badge substitution yields the same text. */
+        if (composite_mode(s)) {
+            v->usb_dim = pc_hid_state(s) == 0u;
+            kvm_display_badge_text(s, v->footer, sizeof(v->footer));
+        } else if (!s->usb_connected) {
             v->usb_dim = true;
             COPY_TEXT(v->footer, "USB off");
         }
@@ -319,6 +397,8 @@ bool kvm_display_pair_request(const kvm_display_status_t *s, uint64_t now_ms,
         s->updating || s->armed) return false;
     /* No guest pairing action while the input-device window or its result shows. */
     if (s->input_pair_state != KVM_DISPLAY_INPUT_CLOSED) return false;
+    /* Nor under the USB mode screen (the gear is hidden there). */
+    if (usb_screen_shown(s)) return false;
     switch (action) {
     case KVM_DISPLAY_PAIR_BEGIN:
         if (s->pairing_state != KVM_DISPLAY_PAIRING_CLOSED &&
@@ -349,6 +429,7 @@ bool kvm_display_pair_touch_action(const kvm_display_status_t *s,
     if (!s || !action || !s->touch_available || s->fault || s->armed ||
         s->updating || s->recovery_required) return false;
     if (s->input_pair_state != KVM_DISPLAY_INPUT_CLOSED) return false;
+    if (usb_screen_shown(s)) return false;
     switch (s->pairing_state) {
     case KVM_DISPLAY_PAIRING_CLOSED:
     case KVM_DISPLAY_PAIRING_REJECTED:
@@ -538,7 +619,116 @@ void kvm_display_badge_text(const kvm_display_status_t *status, char *out, size_
     if (!out || n == 0) return;
     out[0] = '\0';
     if (!status) return;
-    snprintf(out, n, "%s%s%s%s", status->usb_connected ? "USB on" : "USB off",
+    const char *link = status->usb_connected ? "USB on" : "USB off";
+    const char *app = "";
+    if (composite_mode(status)) {
+        /* "USB off" now means not enumerated; the host session is " | App". */
+        uint8_t pc = pc_hid_state(status);
+        link = pc == 2u ? "PC on" : pc == 1u ? "PC asleep" : "USB off";
+        app = status->usb_connected ? " | App" : "";
+    }
+    snprintf(out, n, "%s%s%s%s%s", link, app,
              status->input_kbd || status->input_mouse ? " |" : "",
              status->input_kbd ? " KB" : "", status->input_mouse ? " MS" : "");
+}
+
+/* ---- USB mode screen ---- */
+
+const char *kvm_display_usb_reason_text(uint8_t reason)
+{
+    static const char *const text[8] = {
+        "Serial is the default",          /* DEFAULT */
+        "Saved setting",                  /* STORED (composite from NVS) */
+        "Not in this build",              /* NOT_BUILT */
+        "Serial forced by this build",    /* FORCED_BY_BUILD (rescue image) */
+        "Restart: serial this boot",      /* SERIAL_ONCE */
+        "BOOT button: serial this boot",  /* ESCAPE_BUTTON */
+        "Crash reset: serial this boot",  /* ABNORMAL_RESET */
+        "Turned off after failed starts", /* UNCONFIRMED_LIMIT (mode 0 persisted) */
+    };
+    return reason < 8u ? text[reason] : "Unknown";
+}
+
+/* Composite can be requested unless this image says it cannot start it. The
+ * worker checks the build itself and refuses as well. */
+static bool usb_composite_available(const kvm_display_status_t *s)
+{
+    return s->usb_reason != KVM_DISPLAY_USB_REASON_NOT_BUILT &&
+           s->usb_reason != KVM_DISPLAY_USB_REASON_FORCED_BY_BUILD;
+}
+
+void kvm_display_usb_ui_init(kvm_display_usb_ui_t *ui)
+{
+    if (ui) memset(ui, 0, sizeof(*ui));
+}
+
+void kvm_display_usb_tick(kvm_display_usb_ui_t *ui, const kvm_display_status_t *s, uint64_t now_ms)
+{
+    if (!ui || !ui->open) return;
+    if (!s || !usb_screen_allowed(s) || now_ms >= ui->idle_until_ms) {
+        memset(ui, 0, sizeof(*ui));
+        return;
+    }
+    if (ui->confirm && now_ms >= ui->confirm_until_ms) ui->confirm = 0;
+    if (ui->notice && now_ms >= ui->notice_until_ms) ui->notice = KVM_DISPLAY_USB_NOTICE_NONE;
+}
+
+void kvm_display_usb_status(const kvm_display_usb_ui_t *ui, uint64_t now_ms, kvm_display_status_t *s)
+{
+    if (!ui || !s) return;
+    s->usb_screen = ui->open;
+    s->usb_confirm = ui->open && ui->confirm && now_ms < ui->confirm_until_ms ? ui->confirm : 0;
+    s->usb_notice = ui->open && ui->notice && now_ms < ui->notice_until_ms ? ui->notice
+                                                                           : KVM_DISPLAY_USB_NOTICE_NONE;
+}
+
+static void usb_notice(kvm_display_usb_ui_t *ui, uint8_t notice, uint64_t now_ms)
+{
+    ui->notice = notice;
+    ui->notice_until_ms = now_ms + KVM_DISPLAY_USB_NOTICE_MS;
+}
+
+kvm_display_usb_touch_t kvm_display_usb_touch(kvm_display_usb_ui_t *ui,
+                                              const kvm_display_status_t *s,
+                                              uint16_t x, uint16_t y, uint64_t now_ms,
+                                              kvm_display_usb_request_t *request)
+{
+    if (!ui || !s || !request) return KVM_DISPLAY_USB_TOUCH_NONE;
+    bool in_rows = x >= KVM_DISPLAY_INPUT_ROW_X && x < KVM_DISPLAY_INPUT_ROW_X + KVM_DISPLAY_INPUT_ROW_W &&
+                   y >= KVM_DISPLAY_INPUT_ROW_Y;
+    uint32_t index = in_rows ? (uint32_t)(y - KVM_DISPLAY_INPUT_ROW_Y) / KVM_DISPLAY_INPUT_ROW_H : 0xFFu;
+    if (!ui->open) {
+        /* The entry: the device list's USB row, under the list's own gate. */
+        if (!input_list_usable(s) || !usb_screen_allowed(s) || index != KVM_DISPLAY_INPUT_USB_ROW)
+            return KVM_DISPLAY_USB_TOUCH_NONE;
+        memset(ui, 0, sizeof(*ui));
+        ui->open = true;
+        ui->idle_until_ms = now_ms + KVM_DISPLAY_USB_IDLE_MS;
+        return KVM_DISPLAY_USB_TOUCH_OPENED;
+    }
+    if (!usb_screen_allowed(s)) return KVM_DISPLAY_USB_TOUCH_NONE; /* the next tick closes it */
+    if (x >= KVM_DISPLAY_INPUT_CANCEL_X && x < KVM_DISPLAY_INPUT_CANCEL_X + KVM_DISPLAY_INPUT_CANCEL_W &&
+        y < KVM_DISPLAY_INPUT_CANCEL_H) {
+        memset(ui, 0, sizeof(*ui));
+        return KVM_DISPLAY_USB_TOUCH_HANDLED;
+    }
+    if (index >= 3u) return KVM_DISPLAY_USB_TOUCH_NONE;
+    kvm_display_usb_request_t action = (kvm_display_usb_request_t)(index + 1u);
+    ui->idle_until_ms = now_ms + KVM_DISPLAY_USB_IDLE_MS;
+    if (action == KVM_DISPLAY_USB_USE_COMPOSITE && !usb_composite_available(s)) {
+        ui->confirm = 0;
+        usb_notice(ui, KVM_DISPLAY_USB_NOTICE_NOT_BUILT, now_ms);
+        return KVM_DISPLAY_USB_TOUCH_HANDLED;
+    }
+    if (ui->confirm == (uint8_t)action && now_ms < ui->confirm_until_ms) {
+        ui->confirm = 0;
+        usb_notice(ui, KVM_DISPLAY_USB_NOTICE_SENT, now_ms);
+        *request = action;
+        return KVM_DISPLAY_USB_TOUCH_SEND;
+    }
+    /* First tap, a lapsed confirm, or another action: (re-)arm this one. */
+    ui->confirm = (uint8_t)action;
+    ui->confirm_until_ms = now_ms + KVM_DISPLAY_USB_CONFIRM_MS;
+    ui->notice = KVM_DISPLAY_USB_NOTICE_NONE;
+    return KVM_DISPLAY_USB_TOUCH_HANDLED;
 }

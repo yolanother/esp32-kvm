@@ -3,7 +3,9 @@
  * small DMA draw buffers and a low-rate derived screen update. The panel stays
  * opt-in behind a validated board profile. A separate GPIO sampler emits BOOT
  * emergency events even if panel startup fails. Validated CST816 touches send
- * exact pairing requests through the transport worker; no touch routes HID. */
+ * exact pairing requests through the transport worker; no touch routes HID.
+ * The USB mode screen's state lives in this task; only its confirmed requests
+ * leave it, through the worker's queue (the display never calls USB code). */
 #include "display.h"
 #include <stdio.h>
 #include <string.h>
@@ -31,6 +33,9 @@ static kvm_display_event_fn event_callback;
 static kvm_display_pair_fn pair_callback;
 static kvm_display_target_fn target_callback;
 static kvm_display_input_fn input_callback;
+static kvm_display_usb_fn usb_callback;
+/* The USB mode screen: display-task state; only confirmed requests leave it. */
+static kvm_display_usb_ui_t usb_ui;
 static kvm_display_status_t latest_status;
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool started;
@@ -306,8 +311,13 @@ static void display_worker(void *context)
         next = latest_status;
         portEXIT_CRITICAL(&status_lock);
         next.touch_available = touch_started;
+        uint64_t frame_ms = (uint64_t)esp_timer_get_time() / 1000;
+        /* The USB mode screen closes on its own gate and timers, then joins
+           the snapshot like touch_available (closed: all 0, today's view). */
+        kvm_display_usb_tick(&usb_ui, &next, frame_ms);
+        kvm_display_usb_status(&usb_ui, frame_ms, &next);
         kvm_display_view_t view;
-        kvm_display_make_view(&next, (uint64_t)esp_timer_get_time() / 1000, &view);
+        kvm_display_make_view(&next, frame_ms, &view);
         char badge[48];
         kvm_display_badge_text(&next, badge, sizeof badge);
         /* The badge only replaces the footer on the dimmed active screen, and
@@ -328,28 +338,31 @@ static void display_worker(void *context)
             lv_label_set_text(footer_label, use_badge ? badge : view.footer);
             snprintf(shown_badge, sizeof shown_badge, "%s", use_badge ? badge : "");
             bool input_screen = view.screen == KVM_DISPLAY_INPUT_PAIR;
+            /* The USB mode screen reuses the input rows (three actions, y 44..176)
+               and the close control; its reason line sits below the rows. */
+            bool usb_screen = view.screen == KVM_DISPLAY_USB_MODE;
+            bool list_screen = input_screen || usb_screen;
             /* The input rows reach y 220; its countdown footer sits below them.
                Beside the entry and gear buttons the footer ends before x 142.
                (TOP_LEFT at x 12 equals the original TOP_MID for width 216.) */
             lv_obj_set_width(footer_label, view.show_input_entry && touch_started
                                                ? KVM_DISPLAY_INPUT_ENTRY_X - 16 : LCD_WIDTH - 24);
-            lv_obj_align(footer_label, LV_ALIGN_TOP_LEFT, 12, input_screen ? 220 : 210);
+            lv_obj_align(footer_label, LV_ALIGN_TOP_LEFT, 12,
+                         usb_screen ? 212 : input_screen ? 220 : 210);
+            lv_obj_align(detail_label, LV_ALIGN_TOP_MID, 0, usb_screen ? 180 : 94);
             bool cards = view.screen == KVM_DISPLAY_ACTIVE;
             bool device_rows = input_screen && view.input_row_count > 0;
-            if (cards || device_rows) {
-                lv_obj_add_flag(primary_label, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_remove_flag(primary_label, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_remove_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
-            }
+            if (cards || device_rows || usb_screen) lv_obj_add_flag(primary_label, LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_remove_flag(primary_label, LV_OBJ_FLAG_HIDDEN);
+            if (cards || device_rows) lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_remove_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
             for (unsigned i = 0; i < 3; ++i) {
                 lv_label_set_text(row_labels[i], view.rows[i]);
-                if (cards || input_screen) lv_obj_add_flag(row_labels[i], LV_OBJ_FLAG_HIDDEN);
+                if (cards || list_screen) lv_obj_add_flag(row_labels[i], LV_OBJ_FLAG_HIDDEN);
                 else lv_obj_remove_flag(row_labels[i], LV_OBJ_FLAG_HIDDEN);
             }
             for (unsigned i = 0; i < 4; ++i) {
-                if (input_screen && i < view.input_row_count) {
+                if (list_screen && i < view.input_row_count) {
                     lv_label_set_text(input_row_labels[i], view.input_rows[i]);
                     lv_obj_remove_flag(input_rows[i], LV_OBJ_FLAG_HIDDEN);
                 } else {
@@ -359,10 +372,10 @@ static void display_worker(void *context)
             for (unsigned i = 0; i < 4; ++i) update_target_card(i, &view);
             set_action(input_entry_action, view.show_input_entry && touch_started
                                                ? LV_SYMBOL_KEYBOARD : NULL);
-            set_action(input_cancel_action, input_screen && view.input_cancel && touch_started
+            set_action(input_cancel_action, list_screen && view.input_cancel && touch_started
                                                 ? LV_SYMBOL_CLOSE : NULL);
             if (touch_started && !next.recovery_required && !next.updating &&
-                !next.fault && !next.armed && !input_screen &&
+                !next.fault && !next.armed && !list_screen &&
                 next.input_pair_state == KVM_DISPLAY_INPUT_CLOSED) {
                 switch (next.pairing_state) {
                 case KVM_DISPLAY_PAIRING_CLOSED:
@@ -414,9 +427,37 @@ static void display_worker(void *context)
                 uint8_t input_row = 0;
                 uint64_t touch_ms = (uint64_t)esp_timer_get_time() / 1000;
                 bool accepted = false;
-                /* Input-device pairing first: its zones only exist on its own
+                /* The USB mode screen first: its entry is the device list's
+                   fourth row (no device-list zone there), and while it shows
+                   no other handler sees the press. It only queues requests. */
+                bool usb_screen = view.screen == KVM_DISPLAY_USB_MODE;
+                if ((!last_touch_ms || touch_ms - last_touch_ms >= 750u) && usb_callback) {
+                    kvm_display_usb_request_t usb_request = (kvm_display_usb_request_t)0;
+                    switch (kvm_display_usb_touch(&usb_ui, &next, point.x, point.y, touch_ms,
+                                                  &usb_request)) {
+                    case KVM_DISPLAY_USB_TOUCH_SEND:
+                        usb_callback(usb_request);
+                        accepted = true;
+                        break;
+                    case KVM_DISPLAY_USB_TOUCH_OPENED:
+                        /* The screen replaces the list: close the list in the
+                           worker (nothing to cancel on the central there). */
+                        if (input_callback &&
+                            kvm_display_input_request(&next, KVM_DISPLAY_INPUT_PAIR_CANCEL, 0, &input_request))
+                            input_callback(input_request);
+                        accepted = true;
+                        break;
+                    case KVM_DISPLAY_USB_TOUCH_HANDLED:
+                        accepted = true;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                /* Input-device pairing next: its zones only exist on its own
                    screen or (the entry) where no card or guest zone lies. */
-                if ((!last_touch_ms || touch_ms - last_touch_ms >= 750u) && input_callback &&
+                if (!accepted && !usb_screen && (!last_touch_ms || touch_ms - last_touch_ms >= 750u) &&
+                    input_callback &&
                     kvm_display_input_touch_action(&next, point.x, point.y,
                                                    &input_action, &input_row) &&
                     kvm_display_input_request(&next, input_action, input_row, &input_request)) {
@@ -436,7 +477,7 @@ static void display_worker(void *context)
                         accepted = true;
                     }
                 }
-                if (!accepted && (!last_touch_ms || touch_ms - last_touch_ms >= 750u) &&
+                if (!accepted && !usb_screen && (!last_touch_ms || touch_ms - last_touch_ms >= 750u) &&
                     kvm_display_pair_touch_action(&next, point.x, point.y, &action) &&
                     kvm_display_pair_request(&next, touch_ms, action, &request) && pair_callback) {
                     pair_callback(request);
@@ -453,6 +494,11 @@ static void display_worker(void *context)
 void kvm_display_set_input_fn(kvm_display_input_fn input_fn)
 {
     if (!started) input_callback = input_fn; /* read by the display task it precedes */
+}
+
+void kvm_display_set_usb_fn(void (*fn)(kvm_display_usb_request_t))
+{
+    if (!started) usb_callback = fn; /* read by the display task it precedes */
 }
 
 esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn,

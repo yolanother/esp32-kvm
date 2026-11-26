@@ -60,7 +60,73 @@ typedef struct {
     uint8_t input_dev_confirm;         /* DEVICES: kind awaiting the confirm tap, 0 none */
     uint8_t input_dev_notice;          /* DEVICES footer: KVM_DISPLAY_INPUT_NOTICE_* */
     uint8_t input_dev_notice_kind;     /* the kind the notice is about */
+    /* USB mode facts, filled by the USB worker (kvm_transport_display_usb).
+       All 0 is today's serial-mode screen; only usb_mode == 1 changes it. */
+    uint8_t usb_mode;                  /* 0 USB Serial/JTAG (legacy), 1 composite USB HID */
+    uint8_t pc_hid;                    /* composite: 0 not enumerated, 1 suspended, 2 ready */
+    uint8_t usb_reason;                /* this boot's KVM_DISPLAY_USB_REASON_* */
+    uint8_t usb_result;                /* worker's answer to a request: KVM_DISPLAY_USB_RESULT_* */
+    /* USB mode screen, display-local (kvm_display_usb_status); the worker
+       leaves these 0. */
+    bool usb_screen;                   /* the screen is open */
+    uint8_t usb_confirm;               /* action awaiting its confirm tap, 0 none */
+    uint8_t usb_notice;                /* KVM_DISPLAY_USB_NOTICE_* */
 } kvm_display_status_t;
+
+/** Boot reasons, equal to kvm_usb_reason_t (usb_mode.h; the transport checks it). */
+#define KVM_DISPLAY_USB_REASON_DEFAULT 0u
+#define KVM_DISPLAY_USB_REASON_STORED 1u
+#define KVM_DISPLAY_USB_REASON_NOT_BUILT 2u
+#define KVM_DISPLAY_USB_REASON_FORCED_BY_BUILD 3u
+#define KVM_DISPLAY_USB_REASON_SERIAL_ONCE 4u
+#define KVM_DISPLAY_USB_REASON_ESCAPE_BUTTON 5u
+#define KVM_DISPLAY_USB_REASON_ABNORMAL_RESET 6u
+#define KVM_DISPLAY_USB_REASON_UNCONFIRMED_LIMIT 7u
+
+/** USB mode requests from the screen. The display only produces them (through
+ *  kvm_display_set_usb_fn); the USB worker decides and acts. */
+typedef enum {
+    KVM_DISPLAY_USB_USE_COMPOSITE = 1, KVM_DISPLAY_USB_USE_SERIAL = 2,
+    KVM_DISPLAY_USB_SERIAL_ONCE = 3
+} kvm_display_usb_request_t;
+
+/** The worker's answer to the latest request (kvm_display_status_t.usb_result). */
+#define KVM_DISPLAY_USB_RESULT_NONE 0u
+#define KVM_DISPLAY_USB_RESULT_NOT_BUILT 1u   /* composite refused: not in this build */
+#define KVM_DISPLAY_USB_RESULT_BUSY 2u        /* a guest is armed or a guest window is open */
+#define KVM_DISPLAY_USB_RESULT_RESTARTING 3u  /* released everything, restarting */
+#define KVM_DISPLAY_USB_RESULT_FAILED 4u      /* the mode could not be stored; not restarted */
+/** How long the worker keeps a result in the snapshot. */
+#define KVM_DISPLAY_USB_RESULT_MS 4000u
+
+/** Display-local footer notices on the USB mode screen. */
+#define KVM_DISPLAY_USB_NOTICE_NONE 0u
+#define KVM_DISPLAY_USB_NOTICE_NOT_BUILT 1u   /* composite tapped on a build without it */
+#define KVM_DISPLAY_USB_NOTICE_SENT 2u        /* a confirmed request went to the worker */
+/** The second tap on the same action sends it only within this time. */
+#define KVM_DISPLAY_USB_CONFIRM_MS 5000u
+/** A notice stays this long. */
+#define KVM_DISPLAY_USB_NOTICE_MS 4000u
+/** The screen closes after this long without a touch. */
+#define KVM_DISPLAY_USB_IDLE_MS 30000u
+
+/** Display-task state of the USB mode screen (never shared with the worker). */
+typedef struct {
+    bool open;
+    uint8_t confirm;             /* kvm_display_usb_request_t awaiting the second tap */
+    uint64_t confirm_until_ms;
+    uint8_t notice;              /* KVM_DISPLAY_USB_NOTICE_* */
+    uint64_t notice_until_ms;
+    uint64_t idle_until_ms;
+} kvm_display_usb_ui_t;
+
+/** What a press did on the USB mode screen or its entry. */
+typedef enum {
+    KVM_DISPLAY_USB_TOUCH_NONE,     /* not a USB zone: other handlers may take it */
+    KVM_DISPLAY_USB_TOUCH_HANDLED,  /* the screen changed; nothing to send */
+    KVM_DISPLAY_USB_TOUCH_OPENED,   /* opened from the device list: close that list */
+    KVM_DISPLAY_USB_TOUCH_SEND      /* a confirmed request: pass *request to the worker */
+} kvm_display_usb_touch_t;
 
 /** Input-device screen states (kvm_display_status_t.input_pair_state). DEVICES
  *  is the list behind the entry: one row per kind (tap twice to forget) and
@@ -80,6 +146,9 @@ typedef enum {
 /** DEVICES rows: keyboard, mouse, then "Add keyboard or mouse". */
 #define KVM_DISPLAY_INPUT_DEVICE_ROWS 3u
 #define KVM_DISPLAY_INPUT_ADD_ROW 2u
+/** The list's fourth row (y 176..220) opens the USB mode screen; it is not a
+ *  device-list touch zone (kvm_display_usb_touch handles it). */
+#define KVM_DISPLAY_INPUT_USB_ROW 3u
 
 /** Device kinds, equal to DOUBTECH_HID_CENTRAL_KEYBOARD / _MOUSE. */
 #define KVM_DISPLAY_INPUT_KEYBOARD 1u
@@ -138,7 +207,7 @@ typedef struct {
 typedef enum {
     KVM_DISPLAY_ACTIVE, KVM_DISPLAY_GUEST_LIST, KVM_DISPLAY_PAIRING,
     KVM_DISPLAY_PAUSED, KVM_DISPLAY_UPDATE, KVM_DISPLAY_RECOVERY,
-    KVM_DISPLAY_INPUT_PAIR
+    KVM_DISPLAY_INPUT_PAIR, KVM_DISPLAY_USB_MODE
 } kvm_display_screen_t;
 
 /** Fixed-size view copied by LVGL; no pairing secret is persisted or logged. */
@@ -238,10 +307,45 @@ void kvm_display_buttons_init(kvm_display_buttons_t *state, bool plus_down,
 kvm_display_event_t kvm_display_buttons_sample(kvm_display_buttons_t *state,
                                                 bool plus_down, bool boot_down,
                                                 uint64_t now_ms);
-/** Writes the footer badge, e.g. "USB off | KB MS": USB state, then KB/MS when connected.
- *  Always NUL-terminates when n > 0; truncates safely. */
+/** Writes the footer badge. Serial mode (usb_mode != 1), as before: "USB on"
+ *  or "USB off" for the host session, then " | KB MS" for connected input
+ *  devices, e.g. "USB off | KB MS". Composite mode (usb_mode == 1): "PC on",
+ *  "PC asleep" or "USB off" (not enumerated) from pc_hid, then " | App" with a
+ *  host session, then " | KB MS", e.g. "PC on | App | KB". Always
+ *  NUL-terminates when n > 0; truncates safely. */
 void kvm_display_badge_text(const kvm_display_status_t *status, char *out, size_t n);
 /** Formats a short target label, including an explicit disarmed state. */
 const char *kvm_display_target_label(const kvm_display_status_t *status);
+
+/* ---- USB mode screen (spec Decision 22) ----
+ * Opened from the INPUT DEVICES list's "USB MODE" row, under the list's gate
+ * (touch, no guest armed, no guest pairing window). It shows the mode, this
+ * boot's reason and three actions; each needs a second tap on the same row
+ * within KVM_DISPLAY_USB_CONFIRM_MS, a tap on another row re-arms that one.
+ * USE_COMPOSITE on an image without composite support (reason NOT_BUILT or
+ * FORCED_BY_BUILD) only shows "Not in this build". The display task owns the
+ * state, projects it with kvm_display_usb_status before kvm_display_make_view,
+ * and only hands confirmed requests to the worker; it never calls USB code. */
+
+/** Short on-screen text for a KVM_DISPLAY_USB_REASON_* value ("Unknown" otherwise). */
+const char *kvm_display_usb_reason_text(uint8_t reason);
+/** Starts closed. */
+void kvm_display_usb_ui_init(kvm_display_usb_ui_t *ui);
+/** Closes the screen when its gate fails (guest armed, guest pairing, an input
+ *  pairing window or result, fault, update, recovery, no touch) or after
+ *  KVM_DISPLAY_USB_IDLE_MS without a touch; expires the confirm and notice. */
+void kvm_display_usb_tick(kvm_display_usb_ui_t *ui, const kvm_display_status_t *status,
+                          uint64_t now_ms);
+/** Writes usb_screen, usb_confirm and usb_notice (still-valid ones only). */
+void kvm_display_usb_status(const kvm_display_usb_ui_t *ui, uint64_t now_ms,
+                            kvm_display_status_t *status);
+/** Applies one press against the projected snapshot: the device list's USB
+ *  row (OPENED), and on the open screen the close control or an action row
+ *  (HANDLED, or SEND with *request set on the confirming tap). NONE for any
+ *  other press and whenever the gate fails. */
+kvm_display_usb_touch_t kvm_display_usb_touch(kvm_display_usb_ui_t *ui,
+                                              const kvm_display_status_t *status,
+                                              uint16_t x, uint16_t y, uint64_t now_ms,
+                                              kvm_display_usb_request_t *request);
 
 #endif

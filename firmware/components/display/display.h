@@ -20,6 +20,14 @@ typedef void (*kvm_display_input_fn)(kvm_display_input_request_t request);
 
 /** Sets the input-device pairing touch consumer; call before kvm_display_start. */
 void kvm_display_set_input_fn(kvm_display_input_fn input_fn);
+
+/** Delivers a confirmed USB mode screen request to the serialized USB worker;
+ *  must not block (the display task calls it). */
+typedef void (*kvm_display_usb_fn)(kvm_display_usb_request_t request);
+/** Sets the USB mode request consumer; call before kvm_display_start. The
+ *  display never calls USB or boot code itself; without a consumer the
+ *  screen's entry row does nothing. */
+void kvm_display_set_usb_fn(void (*fn)(kvm_display_usb_request_t));
 /** Starts BOOT sampling, then optionally the validated board LCD and touch. */
 esp_err_t kvm_display_start(bool enable_panel, kvm_display_event_fn event_fn,
                             kvm_display_pair_fn pair_fn, kvm_display_target_fn target_fn);

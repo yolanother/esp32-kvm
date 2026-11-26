@@ -42,6 +42,7 @@ void app_main(void)
     const bool enable_panel = false;
 #endif
     kvm_display_set_input_fn(kvm_transport_input_touch);
+    kvm_display_set_usb_fn(kvm_transport_usb_request);
     esp_err_t display_result = kvm_display_start(enable_panel, kvm_transport_button_event,
                                                  kvm_transport_pairing_touch,
                                                  kvm_transport_target_touch);

@@ -23,7 +23,12 @@
  * call; the stored names it lists come from doubtech_hid_central_stored().
  * Reconnecting stored devices is the central's own schedule.
  * Every host read also feeds the two USB mode magic matchers (serial once,
- * serial mode); a match releases everything, resets the core and restarts. */
+ * serial mode); a match releases everything, resets the core and restarts.
+ * The touchscreen's USB mode screen queues confirmed requests here
+ * (kvm_transport_usb_request); the worker refuses composite on an image
+ * without it and any restart while a guest is armed or a guest window is
+ * open, and otherwise does the same release before the usb_boot restart. The
+ * snapshot carries this boot's USB mode and reason and the latest result. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "transport_hub.h"
@@ -60,6 +65,27 @@
 #error "ESP32 KVM M0 loopback reserves native USB for binary Serial/JTAG CDC"
 #endif
 
+/* The screen's copies of the usb_mode.h values (display_model.h has no
+   dependency on usb_device). */
+_Static_assert(KVM_DISPLAY_USB_REASON_DEFAULT == KVM_USB_REASON_DEFAULT &&
+               KVM_DISPLAY_USB_REASON_STORED == KVM_USB_REASON_STORED &&
+               KVM_DISPLAY_USB_REASON_NOT_BUILT == KVM_USB_REASON_NOT_BUILT &&
+               KVM_DISPLAY_USB_REASON_FORCED_BY_BUILD == KVM_USB_REASON_FORCED_BY_BUILD &&
+               KVM_DISPLAY_USB_REASON_SERIAL_ONCE == KVM_USB_REASON_SERIAL_ONCE &&
+               KVM_DISPLAY_USB_REASON_ESCAPE_BUTTON == KVM_USB_REASON_ESCAPE_BUTTON &&
+               KVM_DISPLAY_USB_REASON_ABNORMAL_RESET == KVM_USB_REASON_ABNORMAL_RESET &&
+               KVM_DISPLAY_USB_REASON_UNCONFIRMED_LIMIT == KVM_USB_REASON_UNCONFIRMED_LIMIT,
+               "display USB reasons must equal kvm_usb_reason_t");
+_Static_assert(KVM_USB_MODE_SERIAL_JTAG == 0 && KVM_USB_MODE_COMPOSITE == 1,
+               "kvm_display_status_t.usb_mode is kvm_usb_mode_t");
+
+/* Whether this image can start composite USB (same rule as usb_boot.c). */
+#if defined(CONFIG_KVM_USB_COMPOSITE_SUPPORT) && !defined(CONFIG_KVM_USB_FORCE_SERIAL)
+#define KVM_USB_COMPOSITE_AVAILABLE true
+#else
+#define KVM_USB_COMPOSITE_AVAILABLE false
+#endif
+
 #define KVM_USB_BUFFER_SIZE 1024
 /* Bytes. The worker runs the router, the input hub, the central bridge and the
    central start (NVS load); 8192 is headroom, not a measurement: the Health
@@ -88,6 +114,14 @@ static QueueHandle_t central_event_queue;
 /* Input-device pairing screen: worker-owned, fed by touch and central events. */
 static kvm_display_input_pairing_t input_pairing;
 static QueueHandle_t input_touch_queue;
+/* USB mode screen requests: pushed by the display task, popped by the worker,
+ * both under usb_request_lock (a few instructions; never blocks). */
+static kvm_transport_usb_queue_t usb_requests;
+static portMUX_TYPE usb_request_lock = portMUX_INITIALIZER_UNLOCKED;
+/* Worker-owned: this boot's USB facts and the latest request result. */
+static kvm_usb_boot_snapshot_t usb_boot;
+static uint8_t usb_result;
+static uint64_t usb_result_until_ms;
 
 static void hub_queue_lock(void *context) { (void)context; portENTER_CRITICAL(&hub_lock); }
 static void hub_queue_unlock(void *context) { (void)context; portEXIT_CRITICAL(&hub_lock); }
@@ -234,6 +268,27 @@ static bool guest_pairing_open(void)
 void kvm_transport_input_touch(kvm_display_input_request_t request)
 {
     if (input_touch_queue) (void)xQueueSend(input_touch_queue, &request, 0);
+}
+
+void kvm_transport_usb_request(kvm_display_usb_request_t request)
+{
+    portENTER_CRITICAL(&usb_request_lock);
+    (void)kvm_transport_usb_queue_push(&usb_requests, request);
+    portEXIT_CRITICAL(&usb_request_lock);
+}
+
+static bool pop_usb_request(kvm_display_usb_request_t *request)
+{
+    portENTER_CRITICAL(&usb_request_lock);
+    bool popped = kvm_transport_usb_queue_pop(&usb_requests, request);
+    portEXIT_CRITICAL(&usb_request_lock);
+    return popped;
+}
+
+static void set_usb_result(uint8_t result, uint64_t time_ms)
+{
+    usb_result = result;
+    usb_result_until_ms = time_ms + KVM_DISPLAY_USB_RESULT_MS;
 }
 
 static void drain_input_touch(uint64_t time_ms)
@@ -416,6 +471,12 @@ static void publish_status(bool connected, bool guest_ready, uint8_t paired_gues
     status.input_mouse = doubtech_hid_central_connected(DOUBTECH_HID_CENTRAL_MOUSE);
     status.hub_target = hub_worker.hub.target;
     kvm_display_input_pairing_status(&input_pairing, (uint64_t)(esp_timer_get_time() / 1000), &status);
+    /* This boot's USB mode and reason for the badge and the USB mode screen.
+       No PC HID exists before the composite glue (tasks 10 and 12): pc_hid 0. */
+    kvm_transport_display_usb((uint8_t)usb_boot.decision.mode, (uint8_t)usb_boot.decision.reason,
+                              0u, &status);
+    status.usb_result = (uint64_t)(esp_timer_get_time() / 1000) < usb_result_until_ms
+                            ? usb_result : KVM_DISPLAY_USB_RESULT_NONE;
     /* USB can remain electrically connected after the verified host session
        closes. Keep the authenticated BLE slot visible in either case. */
     if (!connected || !core.session_open || !router.session_open) {
@@ -514,6 +575,10 @@ static void usb_worker(void *context)
             (void)xQueueReset(pairing_touch_queue);
             kvm_display_pairing_clear(&display_pairing);
             (void)xQueueReset(input_touch_queue);
+            /* A pending USB mode request does not survive an emergency release. */
+            portENTER_CRITICAL(&usb_request_lock);
+            usb_requests.count = 0;
+            portEXIT_CRITICAL(&usb_request_lock);
             (void)kvm_display_input_pairing_request(&input_pairing,
                 (kvm_display_input_request_t){.action = KVM_DISPLAY_INPUT_PAIR_CANCEL,
                                               .window = input_pairing.window},
@@ -604,6 +669,35 @@ static void usb_worker(void *context)
            (BUSY at once; no central RPC from here until the route disarms). */
         kvm_display_input_pairing_tick(&input_pairing, time_ms, router.armed);
         poll_foreign_guest_cancel(time_ms);
+        /* Confirmed USB mode screen requests. Composite on an image without
+           it is refused before anything is touched; a restart waits for no
+           armed guest and no guest window (the screen's own gate). */
+        kvm_display_usb_request_t usb_request;
+        while (pop_usb_request(&usb_request)) {
+            kvm_transport_usb_action_t action = kvm_transport_usb_action(
+                usb_request, KVM_USB_COMPOSITE_AVAILABLE, router.armed, guest_pairing_open());
+            if (action == KVM_TRANSPORT_USB_ACTION_NONE) continue;
+            set_usb_result(kvm_transport_usb_action_result(action), time_ms);
+            if (!kvm_transport_usb_action_reboots(action)) {
+                ESP_LOGW("esp32-kvm", "USB mode request %d refused (%s)", (int)usb_request,
+                         action == KVM_TRANSPORT_USB_ACTION_NOT_BUILT ? "not in this build" : "busy");
+                continue;
+            }
+            ESP_LOGW("esp32-kvm", "USB mode request %d from the screen: restarting", (int)usb_request);
+            publish_status(connected, guest_ready, paired_guests, slots); /* "Restarting..." */
+            /* The same release as the magic strings: hub and router (all keys
+               up on every target), then the session. The restart helpers wait
+               100 ms so the release reports can leave. */
+            kvm_hub_worker_release(&hub_worker);
+            kvm_router_emergency_release(&router);
+            kvm_transport_core_reset(&core);
+            was_connected = false;
+            if (action == KVM_TRANSPORT_USB_ACTION_SERIAL_ONCE) kvm_usb_reboot_serial_once();
+            else kvm_usb_reboot_with_mode(action == KVM_TRANSPORT_USB_ACTION_COMPOSITE_MODE
+                                              ? KVM_USB_MODE_COMPOSITE : KVM_USB_MODE_SERIAL_JTAG);
+            /* Only a composite request whose mode write failed comes back. */
+            set_usb_result(KVM_DISPLAY_USB_RESULT_FAILED, now_ms(NULL));
+        }
         /* Device input waiting: wait one tick instead of 20 ms. At this
            firmware's CONFIG_FREERTOS_HZ=100 one tick is 10 ms; a shorter wait
            would round down to zero ticks, so one tick is the floor. */
@@ -694,6 +788,7 @@ esp_err_t kvm_transport_usb_start(const kvm_transport_link_t *link)
     if (started) return ESP_ERR_INVALID_STATE;
     if (!link || !link->connected || !link->read || !link->write) return ESP_ERR_INVALID_ARG;
     usb_link = link;
+    usb_boot = kvm_usb_boot_last(); /* decided in app_main before the transport starts */
     pairing_queue = xQueueCreate(8, sizeof(doubtech_hid_pairing_event_t));
     pairing_touch_queue = xQueueCreate(4, sizeof(kvm_display_pair_request_t));
     target_touch_queue = xQueueCreate(4, sizeof(uint8_t));
