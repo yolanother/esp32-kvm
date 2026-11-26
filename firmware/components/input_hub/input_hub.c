@@ -5,7 +5,9 @@
  * the router is armed and never arms to retry. A refused or not-ready request on
  * a live slot keeps the arm and held state (the channel may still hold keys) and
  * marks the hub dirty for a resend; only a slot known disconnected is abandoned.
- * Keyboard chords (Left Ctrl + Left Alt + key) switch the target. */
+ * Keyboard chords (Left Ctrl + Left Alt + key) switch the target. Guests and This
+ * PC (once a PC output is bound) share one state machine through a channel view:
+ * which output, context and callback slot a target uses. */
 #include "input_hub.h"
 #include <string.h>
 
@@ -14,6 +16,71 @@
 #define HID_KEY_3 0x20u
 #define HID_KEY_0 0x27u
 #define HID_KEY_ESC 0x29u
+
+/* The output a target goes through: a guest uses the hub output at its own slot,
+ * This PC uses the PC output at slot 0. */
+typedef struct {
+    const kvm_router_output_t *out;
+    void *context;
+    uint8_t slot;
+    bool pc;
+} hub_channel_t;
+
+/* False for the stub target 0 (no PC output bound): it has no output at all. */
+static bool target_channel(const kvm_input_hub_t *hub, uint8_t target, hub_channel_t *ch)
+{
+    if (target == 0) {
+        if (!hub->pc_enabled) {
+            return false;
+        }
+        ch->out = &hub->pc_output;
+        ch->context = hub->pc_context;
+        ch->slot = 0;
+        ch->pc = true;
+        return true;
+    }
+    ch->out = &hub->output;
+    ch->context = hub->context;
+    ch->slot = target;
+    ch->pc = false;
+    return true;
+}
+
+/* The channel the hub holds armed, if any (at most one is). */
+static bool armed_channel(const kvm_input_hub_t *hub, hub_channel_t *ch)
+{
+    if (hub->pc_armed) {
+        return target_channel(hub, 0, ch);
+    }
+    return hub->armed_slot != 0 && target_channel(hub, hub->armed_slot, ch);
+}
+
+static bool channel_armed(const kvm_input_hub_t *hub, const hub_channel_t *ch)
+{
+    return ch->pc ? hub->pc_armed : hub->armed_slot == ch->slot;
+}
+
+static void mark_armed(kvm_input_hub_t *hub, const hub_channel_t *ch)
+{
+    if (ch->pc) {
+        hub->pc_armed = true;
+        hub->pc_live = true; /* the arm proves it is live */
+    } else {
+        hub->armed_slot = ch->slot;
+        hub->live_mask |= (uint8_t)(1u << (ch->slot - 1u)); /* the arm proves it is live */
+    }
+}
+
+static void forget_arm(kvm_input_hub_t *hub)
+{
+    hub->armed_slot = 0;
+    hub->pc_armed = false;
+}
+
+static bool channel_ready(const hub_channel_t *ch)
+{
+    return ch->out->ready != NULL && ch->out->ready(ch->context, ch->slot);
+}
 
 static bool keys_held(const kvm_input_hub_t *hub)
 {
@@ -44,7 +111,7 @@ static void clear_local(kvm_input_hub_t *hub)
 {
     clear_held(hub);
     clear_want(hub);
-    hub->armed_slot = 0;
+    forget_arm(hub);
     memset(hub->raw_keys, 0, sizeof hub->raw_keys);
     hub->chord_latched = false;
     hub->switch_pending = false;
@@ -60,16 +127,17 @@ static bool slot_gone(const kvm_input_hub_t *hub, uint8_t slot)
            (hub->live_mask & (1u << (slot - 1u))) == 0;
 }
 
-static bool slot_ready(const kvm_input_hub_t *hub, uint8_t slot)
+/* The channel form: a guest by its live bit, the PC by pc_live (unmounted). */
+static bool channel_gone(const kvm_input_hub_t *hub, const hub_channel_t *ch)
 {
-    return hub->output.ready != NULL && hub->output.ready(hub->context, slot);
+    return ch->pc ? !hub->pc_live : slot_gone(hub, ch->slot);
 }
 
 /* Forgets the arm and held state of a slot known disconnected, without emitting. */
 static void abandon_gone(kvm_input_hub_t *hub)
 {
     clear_held(hub);
-    hub->armed_slot = 0;
+    forget_arm(hub);
     hub->dirty = false;
 }
 
@@ -85,28 +153,29 @@ static void clear_parts(kvm_input_hub_t *hub, unsigned parts)
     if (parts & UP_CONSUMER) hub->consumer = 0;
 }
 
-/* Sends the selected all-up parts to the armed slot: keyboard all-up and zero pointer
- * always, zero consumer only when held. Each part clears its held state only when its
- * send succeeds. Never sends to an unarmed slot. A known-disconnected slot has the selected
- * held state abandoned and counts as success. A live slot that is not ready or refuses keeps
- * the state and marks the hub dirty. Returns true when none of the selected state is left. */
+/* Sends the selected all-up parts to the armed channel: keyboard all-up and zero pointer
+ * always, zero consumer only when held, in that order. Each part clears its held state only
+ * when its send succeeds. Never sends to an unarmed channel. A known-disconnected channel has
+ * the selected held state abandoned and counts as success. A live channel that is not ready
+ * or refuses keeps the state and marks the hub dirty. Returns true when none of the selected
+ * state is left. */
 static bool send_up(kvm_input_hub_t *hub, unsigned parts)
 {
     kvm_router_input_t up;
-    uint8_t slot = hub->armed_slot;
+    hub_channel_t ch;
     bool ok = true;
-    if (slot == 0 || slot_gone(hub, slot)) {
+    if (!armed_channel(hub, &ch) || channel_gone(hub, &ch)) {
         clear_parts(hub, parts);
         return true;
     }
-    if (hub->output.send == NULL || !slot_ready(hub, slot)) {
+    if (ch.out->send == NULL || !channel_ready(&ch)) {
         hub->dirty = true; /* busy or not ready: the channel may still hold the keys */
         return false;
     }
     if (parts & UP_KEYS) {
         memset(&up, 0, sizeof up);
         up.kind = KVM_ROUTER_KEYBOARD;
-        if (hub->output.send(hub->context, slot, &up)) {
+        if (ch.out->send(ch.context, ch.slot, &up)) {
             memset(hub->keys, 0, sizeof hub->keys);
         } else {
             ok = false;
@@ -115,7 +184,7 @@ static bool send_up(kvm_input_hub_t *hub, unsigned parts)
     if (parts & UP_POINTER) {
         memset(&up, 0, sizeof up);
         up.kind = KVM_ROUTER_POINTER;
-        if (hub->output.send(hub->context, slot, &up)) {
+        if (ch.out->send(ch.context, ch.slot, &up)) {
             hub->buttons = 0;
         } else {
             ok = false;
@@ -124,7 +193,7 @@ static bool send_up(kvm_input_hub_t *hub, unsigned parts)
     if ((parts & UP_CONSUMER) && hub->consumer != 0) {
         memset(&up, 0, sizeof up);
         up.kind = KVM_ROUTER_CONSUMER;
-        if (hub->output.send(hub->context, slot, &up)) {
+        if (ch.out->send(ch.context, ch.slot, &up)) {
             hub->consumer = 0;
         } else {
             ok = false;
@@ -138,18 +207,40 @@ static bool send_up(kvm_input_hub_t *hub, unsigned parts)
 
 static bool send_all_up(kvm_input_hub_t *hub) { return send_up(hub, UP_ALL); }
 
-/* Releases the arm; keeps armed_slot when a live slot's release is not confirmed, so the
+/* Releases the arm; keeps it when a live channel's release is not confirmed, so the
  * channel is never left armed behind the hub's back (an armed channel refuses the next arm). */
 static bool drop_arm(kvm_input_hub_t *hub)
 {
-    if (hub->armed_slot == 0) {
+    hub_channel_t ch;
+    if (!armed_channel(hub, &ch)) {
         return true;
     }
-    if (hub->output.release != NULL && !hub->output.release(hub->context, hub->armed_slot) &&
-        !slot_gone(hub, hub->armed_slot)) {
+    if (ch.out->release != NULL && !ch.out->release(ch.context, ch.slot) &&
+        !channel_gone(hub, &ch)) {
         return false;
     }
-    hub->armed_slot = 0;
+    forget_arm(hub);
+    return true;
+}
+
+/* Ends the arm for a switch or a yield: every all-up first, the release only after them.
+ * One exception, the PC only: a live PC that is not ready (suspended) cannot take the all-up
+ * now and may stay asleep for hours, so its release, which zeroes the state-based HID sink for
+ * delivery on resume, stands in for the all-up. A sleeping PC thus never blocks a switch to a
+ * guest; a ready PC that refuses, and every guest, keep the retry rule. */
+static bool release_armed(kvm_input_hub_t *hub)
+{
+    hub_channel_t ch;
+    if (send_all_up(hub)) {
+        return drop_arm(hub);
+    }
+    if (!hub->pc_armed || !armed_channel(hub, &ch) || channel_ready(&ch)) {
+        return false;
+    }
+    if (ch.out->release == NULL || !ch.out->release(ch.context, ch.slot)) {
+        return false; /* not confirmed: keep the arm and held state, retry later */
+    }
+    abandon_gone(hub); /* the output owns the zero state now */
     return true;
 }
 
@@ -159,6 +250,27 @@ void kvm_input_hub_init(kvm_input_hub_t *hub, kvm_router_output_t output, void *
     hub->output = output;
     hub->context = context;
     hub->live_mask = KVM_INPUT_HUB_ALL_LIVE;
+    hub->pc_live = true;
+}
+
+static bool switch_target(kvm_input_hub_t *hub, uint8_t target, bool router_armed);
+
+void kvm_input_hub_set_pc_output(kvm_input_hub_t *hub, kvm_router_output_t pc, void *pc_context)
+{
+    hub->pc_output = pc;
+    hub->pc_context = pc_context;
+    hub->pc_enabled = true;
+    hub->explicit_target = true; /* composite mode defaults to This PC as a choice */
+    /* Bound before the router can arm, so releasing a guest arm here is the usual switch. */
+    (void)switch_target(hub, 0, false);
+}
+
+void kvm_input_hub_set_pc_live(kvm_input_hub_t *hub, bool live)
+{
+    hub->pc_live = live;
+    if (!live && hub->pc_armed) {
+        abandon_gone(hub);
+    }
 }
 
 void kvm_input_hub_set_live(kvm_input_hub_t *hub, uint8_t live_mask)
@@ -169,7 +281,7 @@ void kvm_input_hub_set_live(kvm_input_hub_t *hub, uint8_t live_mask)
     }
 }
 
-static bool send_state(kvm_input_hub_t *hub, uint8_t slot, kvm_router_input_kind_t kind)
+static bool send_state(kvm_input_hub_t *hub, const hub_channel_t *ch, kvm_router_input_kind_t kind)
 {
     kvm_router_input_t in;
     memset(&in, 0, sizeof in);
@@ -177,7 +289,7 @@ static bool send_state(kvm_input_hub_t *hub, uint8_t slot, kvm_router_input_kind
     memcpy(in.keyboard, hub->want_keys, sizeof in.keyboard);
     in.buttons = hub->want_buttons;
     in.consumer = hub->want_consumer;
-    if (!hub->output.send(hub->context, slot, &in)) {
+    if (!ch->out->send(ch->context, ch->slot, &in)) {
         return false;
     }
     if (kind == KVM_ROUTER_KEYBOARD) {
@@ -192,7 +304,7 @@ static bool send_state(kvm_input_hub_t *hub, uint8_t slot, kvm_router_input_kind
 
 bool kvm_input_hub_flush(kvm_input_hub_t *hub, bool router_armed)
 {
-    uint8_t slot = hub->armed_slot;
+    hub_channel_t ch;
     bool ok = true;
     if (!hub->dirty) {
         return true;
@@ -201,31 +313,29 @@ bool kvm_input_hub_flush(kvm_input_hub_t *hub, bool router_armed)
         clear_local(hub);
         return true;
     }
-    if (slot == 0) {
-        hub->dirty = false; /* nothing armed: no guest can hold the hub's keys */
+    if (!armed_channel(hub, &ch)) {
+        hub->dirty = false; /* nothing armed: no output can hold the hub's keys */
         return true;
     }
-    if (slot_gone(hub, slot)) {
+    if (channel_gone(hub, &ch)) {
         abandon_gone(hub);
         return true;
     }
-    if (hub->output.send == NULL || !slot_ready(hub, slot)) {
+    if (ch.out->send == NULL || !channel_ready(&ch)) {
         return false;
     }
     if (memcmp(hub->keys, hub->want_keys, sizeof hub->keys) != 0) {
-        ok = send_state(hub, slot, KVM_ROUTER_KEYBOARD) && ok;
+        ok = send_state(hub, &ch, KVM_ROUTER_KEYBOARD) && ok;
     }
     if (hub->buttons != hub->want_buttons) {
-        ok = send_state(hub, slot, KVM_ROUTER_POINTER) && ok;
+        ok = send_state(hub, &ch, KVM_ROUTER_POINTER) && ok;
     }
     if (hub->consumer != hub->want_consumer) {
-        ok = send_state(hub, slot, KVM_ROUTER_CONSUMER) && ok;
+        ok = send_state(hub, &ch, KVM_ROUTER_CONSUMER) && ok;
     }
     hub->dirty = !ok;
     return ok;
 }
-
-static bool switch_target(kvm_input_hub_t *hub, uint8_t target, bool router_armed);
 
 bool kvm_input_hub_set_target(kvm_input_hub_t *hub, uint8_t target, bool router_armed)
 {
@@ -239,7 +349,7 @@ bool kvm_input_hub_set_target(kvm_input_hub_t *hub, uint8_t target, bool router_
 bool kvm_input_hub_auto_target(kvm_input_hub_t *hub, uint8_t ready_mask, bool router_armed)
 {
     uint8_t slot;
-    if (hub->explicit_target) {
+    if (hub->explicit_target || hub->pc_enabled) {
         return false;
     }
     if (hub->target != 0 && (ready_mask & (1u << (hub->target - 1u)))) {
@@ -267,7 +377,7 @@ static bool switch_target(kvm_input_hub_t *hub, uint8_t target, bool router_arme
         hub->switch_pending = false;
         return true;
     }
-    if (!send_all_up(hub) || !drop_arm(hub)) {
+    if (!release_armed(hub)) {
         return false;
     }
     hub->target = target;
@@ -374,17 +484,50 @@ static bool chord_input(kvm_input_hub_t *hub, const kvm_router_input_t *input,
     return true;
 }
 
+/* A report while the router is armed, with a PC output bound: local state is cleared and
+ * nothing is emitted, as without one, but chord tracking survives so a chord can be
+ * reported to the host (and stays swallowed until all keys are up, even once the router
+ * disarms). Without a PC output this is not reached: stage 2 forgets chord state here. */
+static kvm_hub_result_t host_armed_input(kvm_input_hub_t *hub, const kvm_router_input_t *input)
+{
+    uint8_t raw[8];
+    bool latched = hub->chord_latched;
+    bool chord = false;
+    uint8_t target = 0;
+    bool release_all = false;
+    memcpy(raw, hub->raw_keys, sizeof raw);
+    clear_local(hub);
+    if (input->kind != KVM_ROUTER_KEYBOARD) {
+        memcpy(hub->raw_keys, raw, sizeof hub->raw_keys);
+        hub->chord_latched = latched;
+        return KVM_HUB_DROPPED_HOST_ARMED;
+    }
+    memcpy(hub->raw_keys, input->keyboard, sizeof hub->raw_keys);
+    if (latched) {
+        hub->chord_latched = !no_keys(input->keyboard); /* all keys up ends the swallow */
+    } else if (no_keys(raw) && hub_chord(input->keyboard, &target, &release_all)) {
+        hub->chord_latched = true;
+        hub->host_request_target = target; /* Esc and 0 both give 0 */
+        chord = true;
+    }
+    return chord ? KVM_HUB_CHORD_HOST_ARMED : KVM_HUB_DROPPED_HOST_ARMED;
+}
+
 kvm_hub_result_t kvm_input_hub_input(kvm_input_hub_t *hub, const kvm_router_input_t *input,
                                      bool router_armed)
 {
     kvm_hub_result_t chord_result;
+    hub_channel_t ch;
     if (router_armed) {
+        if (hub->pc_enabled) {
+            return host_armed_input(hub, input);
+        }
         /* The host route owns the output: emit nothing, forget local state. */
         clear_local(hub);
         return KVM_HUB_DROPPED_HOST_ARMED;
     }
     if (input->kind == KVM_ROUTER_KEYBOARD && chord_input(hub, input, &chord_result)) {
-        /* The chord is swallowed whole: the guest should hold no keyboard state. */
+        /* The chord is swallowed whole: the target should hold no keyboard state. */
         memset(hub->want_keys, 0, sizeof hub->want_keys);
         return chord_result;
     }
@@ -395,22 +538,21 @@ kvm_hub_result_t kvm_input_hub_input(kvm_input_hub_t *hub, const kvm_router_inpu
     } else if (input->kind == KVM_ROUTER_CONSUMER) {
         hub->want_consumer = input->consumer;
     }
-    if (hub->target == 0) {
-        return KVM_HUB_FORWARDED;
+    if (!target_channel(hub, hub->target, &ch)) {
+        return KVM_HUB_FORWARDED; /* the stage-2 This PC stub swallows it */
     }
-    if (!slot_ready(hub, hub->target)) {
-        /* A live armed guest may still hold the previous state: resend later. */
-        if (hub->armed_slot == hub->target) hub->dirty = true;
+    if (!channel_ready(&ch)) {
+        /* A live armed output may still hold the previous state: resend later. */
+        if (channel_armed(hub, &ch)) hub->dirty = true;
         return KVM_HUB_DROPPED_NOT_READY;
     }
-    if (hub->armed_slot != hub->target) {
-        if (hub->output.arm == NULL || !hub->output.arm(hub->context, hub->target)) {
+    if (!channel_armed(hub, &ch)) {
+        if (ch.out->arm == NULL || !ch.out->arm(ch.context, ch.slot)) {
             return KVM_HUB_DROPPED_NOT_READY;
         }
-        hub->armed_slot = hub->target;
-        hub->live_mask |= (uint8_t)(1u << (hub->target - 1u)); /* the arm proves it is live */
+        mark_armed(hub, &ch);
     }
-    if (hub->output.send == NULL || !hub->output.send(hub->context, hub->target, input)) {
+    if (ch.out->send == NULL || !ch.out->send(ch.context, ch.slot, input)) {
         hub->dirty = true;
         return KVM_HUB_DROPPED_NOT_READY;
     }
@@ -430,8 +572,8 @@ bool kvm_input_hub_yield(kvm_input_hub_t *hub, bool router_armed)
         clear_local(hub);
         return true;
     }
-    /* A failed all-up keeps the arm too, so a retry can still reach the held slot. */
-    return send_all_up(hub) && drop_arm(hub);
+    /* A failed all-up keeps the arm too, so a retry can still reach the held output. */
+    return release_armed(hub);
 }
 
 void kvm_input_hub_device_lost(kvm_input_hub_t *hub, bool router_armed)
