@@ -36,6 +36,13 @@ Updated 2026-11-25. Snapshots of processes and device state below are dated; rec
 
 Merge/push stage 2; flash stage 2; BOOT-button ROM download drill; `firmware/dependencies.lock` approval for esp_tinyusb; permission to edit `.claude/skills/esp32-kvm-firmware/SKILL.md`; dedicated USB PID before any release.
 
+## Stage 3 status (2026-11-25 evening)
+
+- Branch `feature/usb-hid-device`; tasks 1-8 of `docs/superpowers/plans/2026-11-25-usb-hid-device.md` are implemented and reviewed (each with task review and fix rounds; see ledger). Task 6's fix round was not separately re-reviewed (controller ruling, recorded in the ledger). Deferred minors and the binding carry-overs for task 10 and task 12 are in `.superpowers/sdd/2026-11-25-usb-hid-device/progress.md`; copy them out before that workspace is cleaned.
+- **Stop point (owner's choice, "build it, you run the drill"):** task 9 is owner-only. Procedure: `docs/hardware/usb-recovery-drill.md` (prove BOOT-button ROM download mode and the serial-once flag evidence, read-only `espefuse summary`). No HID image may be flashed before it passes and is recorded in `docs/hardware/board-bringup.md`. Task 10 needs the owner's explicit approval of the `firmware/dependencies.lock` change (esp_tinyusb). `.claude/skills/esp32-kvm-firmware/SKILL.md` was deliberately not edited (owner has not agreed).
+- Controller re-ran all 11 suites and guards plus `tools/firmware.ps1 build` on this branch (head before this commit: all exit 0, app 1,051,952 bytes), 2026-11-25 evening. Re-run before resuming.
+- Stage 2 is flashed on the board (2026-11-25 17:17); owner confirmation of screen/guests and the checklist is outstanding.
+
 ## Next safe actions
 
 1. Ask the owner for the approvals above. Completion: merge commit on `main` pushed, or a recorded refusal.
