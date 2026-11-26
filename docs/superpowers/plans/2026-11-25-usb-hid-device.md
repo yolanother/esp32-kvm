@@ -166,12 +166,12 @@
   - `bool kvm_usb_take_serial_once(void);` and `void kvm_usb_set_serial_once(void);` (RTC_NOINIT `{uint32_t magic = 0x55534231; uint32_t inverse;}`)
   - `bool kvm_usb_reset_abnormal(void);` (maps `esp_reset_reason()`: PANIC, INT_WDT, TASK_WDT, WDT, BROWNOUT, CPU_LOCKUP → true)
   - `kvm_usb_boot_decision_t kvm_usb_boot_decide(void);` (gathers inputs, runs the escape window only when `kvm_usb_mode_needs_window`, samples BOOT GPIO0 every 10 ms, BOOT counted when held ≥ 200 ms, applies `persist_serial` and `count_attempt` to NVS before returning)
-  - `kvm_usb_boot_decision_t kvm_usb_boot_last(void);` (for the screen and STATUS)
+  - `kvm_usb_boot_snapshot_t kvm_usb_boot_last(void);` with `typedef struct { kvm_usb_boot_decision_t decision; kvm_usb_boot_inputs_t inputs; int reset_reason; } kvm_usb_boot_snapshot_t;` (usb_mode.h; the decision as applied plus the inputs it used and the `esp_reset_reason()` value, for the screen, STATUS and the diagnostics dump). `kvm_usb_boot_describe()` formats it as `mode= reason= once= escape= abnormal= rst= stored= unconf=`; boot logs it (`kvm-usb: USB boot: ...`) and the diagnostics dump header carries it as a `usb_boot ...` line.
   - `void kvm_usb_reboot_serial_once(void);` and `void kvm_usb_reboot_with_mode(kvm_usb_mode_t mode);` (worker only: release, persist if asked, `esp_restart()`)
 - Magic handling: the worker feeds each read into two `kvm_usb_magic_t` (patterns from Global Constraints) beside the diagnostics matcher; a match does emergency release, core reset, then the reboot call.
 
 - [ ] **Step 1: Tests** (host side): extend `test_usb_mode.c` with a decision trace for "three short composite boots then serial and persist", using the pure function only. ESP-only files are covered by build + task 9.
-- [ ] **Step 2: Implement** the store (namespace `kvm_usb`; open/close per call; commit before return), the RTC flag, `usb_boot.c`. In `main.c` call `kvm_usb_boot_decide()` before `kvm_transport_usb_serial_jtag_start()`; with composite support `n` it never waits and always returns serial (NOT_BUILT), so the boot path is unchanged. Magic strings are active in both modes.
+- [ ] **Step 2: Implement** the store (namespace `kvm_usb`; open/close per call; commit before return), the RTC flag, `usb_boot.c`. In `main.c` call `kvm_usb_boot_decide()` before `kvm_transport_usb_serial_jtag_start()`; with composite support `n` it never waits and always returns serial (NOT_BUILT), so the boot path is unchanged. Magic strings are active in both modes. (Task 10 moves the USJ driver install ahead of `kvm_usb_boot_decide()` so the window runs with USJ live.)
 - [ ] **Step 3: Verify** suites + firmware build with the default config; then prove the rescue variant compiles: temporarily set `CONFIG_KVM_USB_FORCE_SERIAL=y` in the git-ignored `firmware/sdkconfig`, build, and restore the file.
 - [ ] **Step 4: Commit** `Add the USB mode store, serial-once restart and boot-time escape`.
 
@@ -188,7 +188,7 @@
 
 - [ ] **Step 1: Failing tests** in `test_display_model.c`: every badge combination above; serial-mode strings byte-identical to today; dim rule both modes; hint rule. In `test_transport_display_status.c`: new fields copied through.
 - [ ] **Step 2: Run** `firmware/tests/display/run-msvc.ps1` and integration; expect failures.
-- [ ] **Step 3: Implement** model + LVGL screen (entered from the existing guest settings action), showing mode, reason text per `kvm_usb_reason_t`, and the three actions with a confirmation tap. The escape-window prompt "Hold BOOT for serial mode" is drawn if the panel is already up when the window runs (builder decides the order in `app_main`; the window must not depend on the panel).
+- [ ] **Step 3: Implement** model + LVGL screen (entered from the existing guest settings action), showing mode, reason text per `kvm_usb_reason_t`, and the three actions with a confirmation tap. The panel cannot draw the escape-window prompt "Hold BOOT for serial mode": the window runs inside `kvm_usb_boot_decide()`, before `kvm_display_start()`, so the panel is not up yet. Do not move the display start ahead of the window for this. The window must not depend on the panel; its only trace is the `kvm-usb` boot log line and the diagnostics `usb_boot` line. After boot the USB mode screen shows the reason, for example "BOOT button: serial this boot".
 - [ ] **Step 4: Verify** suites + build.
 - [ ] **Step 5: Commit** `Add the USB mode screen and composite-mode badge`.
 
@@ -216,8 +216,8 @@
 
 - [ ] **Step 1 (owner): ROM download drill, before anything new is flashed.** Quit the desktop app. Hold BOOT, plug in, release. Expect `303A:1001` in Device Manager. Run (agent may run with owner approval) `esptool.py --chip esp32s3 --port COMn --before no_reset --after no_reset chip_id`: expect "Staying in bootloader". Run `espefuse.py --port COMn summary` (read-only): record `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE`, `DIS_DOWNLOAD_MODE`, `USB_PHY_SEL`. Unplug, replug without BOOT: the app returns, bonds intact (guests reconnect).
 - [ ] **Step 2 (owner): flash from ROM mode.** BOOT+plug again, then `tools/firmware.ps1 flash -Port COMn` with the phase B image (app-only). Replug: the app runs, bonds intact. This proves the reflash floor.
-- [ ] **Step 3 (owner): serial-side paths on the phase B image.** USB mode screen shows "Serial / Not in this build". Write `"\0KVM-USB-SERIAL-ONCE\n"` with `tools/firmware.ps1` (or the touchscreen action): the board restarts and comes back as `303A:1001`; the screen shows reason "Serial once". A panic is not induced.
-- [ ] **Step 4 (agent, after the owner reports):** record the results with date, image hash and esptool output in `docs/hardware/board-bringup.md` ("Recovery status"); commit `Record the USB recovery drill`. **Gate:** task 10's image must not be flashed unless Steps 1 and 2 passed.
+- [ ] **Step 3 (owner): serial-side paths on the phase B image.** USB mode screen shows "Serial / Not in this build". Write `"\0KVM-USB-SERIAL-ONCE\n"` with `tools/firmware.ps1` (or the touchscreen action): the board restarts and comes back as `303A:1001`; the screen still shows "Serial / Not in this build" (NOT_BUILT beats serial-once in the decision order, so the reason does not change on this image). The proof that the RTC flag survived `esp_restart()` is `once=1` (with `rst=3`, ESP_RST_SW) in the `usb_boot` line of the diagnostics dump header (`"\0KVM-DIAG-LOGS\n"`, `tools/read-ble-trace.py`) and in the `kvm-usb: USB boot:` log line; a later ordinary replug shows `once=0`. A panic is not induced.
+- [ ] **Step 4 (agent, after the owner reports):** record the results with date, image hash, esptool output and the `usb_boot` lines before and after the serial-once restart (`once=0` then `once=1 rst=3`, reason 2 NOT_BUILT both times) in `docs/hardware/board-bringup.md` ("Recovery status"); commit `Record the USB recovery drill`. **Gate:** task 10's image must not be flashed unless Steps 1 and 2 passed.
 
 ## Phase C: TinyUSB CDC transport (agent task 10, owner task 11)
 
@@ -239,7 +239,13 @@
   - `bool kvm_usb_composite_remote_wakeup(void);`
   - `void kvm_usb_composite_stop(void);` (`tinyusb_driver_uninstall`, before a reboot)
 - `const kvm_transport_link_t *kvm_transport_link_cdc(void);` (semaphore-gated read, `tinyusb_cdcacm_write_queue` + `write_flush(0, 0)`, `connected` = mounted and not suspended)
-- `main.c`: decision COMPOSITE → after the escape window, `usb_serial_jtag_driver_uninstall()`, `kvm_usb_composite_start(CONFIG_KVM_USB_COMPOSITE_PID)`, `kvm_transport_usb_start(kvm_transport_link_cdc())`; any start error → `kvm_usb_reboot_serial_once()`. A worker-side timer clears `unconf` after `KVM_USB_CONFIRM_MS` mounted. HID output is not wired yet (target 0 still the stub).
+- `main.c` boot order (spec Decision 8; Review Focus 1). The USB Serial/JTAG driver is installed **before** `kvm_usb_boot_decide()`, so the escape window runs with USJ live. Split `kvm_transport_usb_serial_jtag_start()` into the driver install and the worker start (`kvm_transport_usb_start(kvm_transport_link_usj())`), or make it tolerate an already installed driver. Then:
+  1. Install the USJ driver exactly as today. This maps the PHY back to USJ even after a software reset from composite mode.
+  2. Call `kvm_usb_boot_decide()`. It runs the window when needed and, when it returns COMPOSITE, has already written `unconf + 1` (a failed write returns serial).
+  3. On SERIAL: start the worker on the USJ link, unchanged from today.
+  4. On COMPOSITE: `usb_serial_jtag_driver_uninstall()`, then `kvm_usb_composite_start(CONFIG_KVM_USB_COMPOSITE_PID)` (`tinyusb_driver_install`), then `kvm_transport_usb_start(kvm_transport_link_cdc())`. Any start error → `kvm_usb_reboot_serial_once()`.
+
+  TinyUSB never starts before `kvm_usb_boot_decide()` returns. A worker-side timer clears `unconf` after `KVM_USB_CONFIRM_MS` mounted. HID output is not wired yet (target 0 still the stub).
 
 - [ ] **Step 1:** Add the manifest; run `tools/firmware.ps1 build`; show the owner the `firmware/dependencies.lock` diff and ask for approval to commit it. Without approval stop here and report.
 - [ ] **Step 2: Implement** glue and CDC link; log TinyUSB task stack high-water into the existing Health line.
@@ -298,7 +304,7 @@
 
 - [ ] **Step 1: Failing tests:** C: minor 4 STATUS bytes identical to the existing vectors; minor 5 STATUS contains key 128 with canonical CBOR ordering (after key 6). Rust: decode the new vector; reject key 128 at minor 4; reject `pc_hid = 3`.
 - [ ] **Step 2: Run** `firmware/tests/integration/run-msvc.ps1` and `cargo test --offline -p esp32-kvm-protocol`.
-- [ ] **Step 3: Implement**; the worker fills the status every iteration (mode from `kvm_usb_boot_last`, PC state, hub target, central connected flags).
+- [ ] **Step 3: Implement**; the worker fills the status every iteration (mode from `kvm_usb_boot_last().decision`, PC state, hub target, central connected flags).
 - [ ] **Step 4: Verify** all C suites, `cargo test --offline --workspace`, firmware build; old vectors byte-identical (`git diff --stat tests/vectors` shows only new files).
 - [ ] **Step 5: Commit** `Report USB mode and PC HID state in STATUS (protocol minor 5)`.
 

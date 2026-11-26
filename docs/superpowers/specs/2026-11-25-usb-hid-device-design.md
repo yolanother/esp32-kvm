@@ -203,7 +203,10 @@ C. **Compile-time switch only (separate HID build).** Least firmware code, but e
    and offers "Serial mode" on the touchscreen to clear it.
 7. **Boot decision** (pure function `kvm_usb_mode_decide`, first match wins):
    1. composite support not built, or `FORCE_SERIAL` → serial;
-   2. RTC one-shot "serial once" flag present (Decision 9) → serial, flag consumed;
+   2. RTC one-shot "serial once" flag present (Decision 9) → serial, flag consumed. The flag is
+      consumed on every boot. On an image without composite support row 1 wins, so the reason
+      stays "not built"; the boot snapshot (`once=1` in the boot log and in the diagnostics
+      dump's `usb_boot` line) is the proof that the flag survived the restart;
    3. BOOT pressed during the escape window → serial for this boot, screen offers "Keep serial";
    4. reset reason abnormal (panic, any watchdog, brownout, CPU lockup) → serial for this boot;
    5. `unconf >= 3` → serial and **persist** `mode = 0`, screen shows "USB HID turned off after 3
@@ -217,8 +220,10 @@ C. **Compile-time switch only (separate HID build).** Least firmware code, but e
    PHY to USJ even after a software reset from composite mode (Constraints). In composite mode
    the firmware then waits `KVM_USB_ESCAPE_WINDOW_MS` (1500 ms) with USJ live, sampling BOOT, and
    only then calls `usb_serial_jtag_driver_uninstall()` and `tinyusb_driver_install()` (whose
-   `usb_new_phy` maps the PHY to OTG, `components/usb/usb_phy.c:284`); the screen (when the panel is enabled) shows "Hold BOOT for
-   serial mode". The owner plugs in first and then presses BOOT (pressing BOOT before power is
+   `usb_new_phy` maps the PHY to OTG, `components/usb/usb_phy.c:284`). TinyUSB never starts
+   before the decision returns. No panel prompt is drawn: the window runs before
+   `kvm_display_start()` and must not depend on the panel. The only trace is the `kvm-usb` boot
+   log line, and after boot the USB mode screen shows the reason. The owner plugs in first and then presses BOOT (pressing BOOT before power is
    ROM download mode, which is also safe, Decision 10). The existing "BOOT held at startup does
    not trigger emergency release" rule keeps this hold from releasing the route.
 9. **"Serial once" reboot.** A one-shot flag in `RTC_NOINIT_ATTR` memory (magic plus inverted copy,
