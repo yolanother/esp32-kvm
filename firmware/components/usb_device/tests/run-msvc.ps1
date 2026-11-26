@@ -1,6 +1,7 @@
 # Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
-# Compiles and executes the portable USB mode tests with MSVC and Windows
-# SDK headers, using a temporary output directory outside the source tree.
+# Compiles and executes the portable USB device tests with MSVC and Windows
+# SDK headers (AddressSanitizer when the toolchain ships it), using a temporary
+# output directory outside the source tree.
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
 $msvcRoot = 'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC'
@@ -8,13 +9,32 @@ $kitRoot = 'C:/Program Files (x86)/Windows Kits/10'
 $msvc = Get-ChildItem -LiteralPath $msvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
 $kit = Get-ChildItem -LiteralPath (Join-Path $kitRoot 'Include') -Directory | Sort-Object Name -Descending | Select-Object -First 1
 if ($null -eq $msvc -or $null -eq $kit) { throw 'MSVC or Windows SDK is missing' }
-$compiler = Join-Path $msvc.FullName 'bin/HostX64/x64/cl.exe'
+$binDir = Join-Path $msvc.FullName 'bin/HostX64/x64'
+$compiler = Join-Path $binDir 'cl.exe'
 $output = Join-Path $env:TEMP 'esp32-kvm-usb-device-test'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 $includes = @("/I$($msvc.FullName)/include", "/I$($kit.FullName)/ucrt", "/I$repo/firmware/components/usb_device")
 $libraries = @("/LIBPATH:$($msvc.FullName)/lib/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/um/x64", "/LIBPATH:$kitRoot/Lib/$($kit.Name)/ucrt/x64")
-& $compiler /nologo /W4 /WX /std:c11 @includes (Join-Path $PSScriptRoot 'test_usb_mode.c') (Join-Path $repo 'firmware/components/usb_device/usb_mode.c') "/Fo:$output/" "/Fe:$output/test_usb_mode.exe" /link @libraries
-if ($LASTEXITCODE -ne 0) { throw 'USB mode test compile failed' }
-& (Join-Path $output 'test_usb_mode.exe')
-if ($LASTEXITCODE -ne 0) { throw 'USB mode tests failed' }
-Write-Output 'PASS test_usb_mode'
+[string[]]$sanitize = @()
+if (Test-Path (Join-Path $binDir 'clang_rt.asan_dynamic-x86_64.dll')) {
+    $sanitize = @('/fsanitize=address', '/Zi')
+    $env:PATH = "$binDir;$env:PATH"
+    Write-Output 'AddressSanitizer enabled'
+}
+$component = "$repo/firmware/components/usb_device"
+$suites = @(
+    @{ Name = 'test_usb_mode'; Sources = @('usb_mode.c') },
+    @{ Name = 'test_usb_descriptors'; Sources = @('usb_descriptors.c') }
+)
+# Optional suite names select a subset (for example: run-msvc.ps1 test_usb_descriptors).
+$selected = @($args)
+if ($selected.Count) { $suites = @($suites | Where-Object { $selected -contains $_.Name }) }
+foreach ($suite in $suites) {
+    $name = $suite.Name
+    $sources = @($suite.Sources | ForEach-Object { Join-Path $component $_ })
+    & $compiler /nologo /W4 /WX /std:c11 @sanitize @includes (Join-Path $PSScriptRoot "$name.c") @sources "/Fo:$output/" "/Fd:$output/" "/Fe:$output/$name.exe" /link @libraries
+    if ($LASTEXITCODE -ne 0) { throw "$name compile failed" }
+    & (Join-Path $output "$name.exe")
+    if ($LASTEXITCODE -ne 0) { throw "$name failed" }
+    Write-Output "PASS $name"
+}
