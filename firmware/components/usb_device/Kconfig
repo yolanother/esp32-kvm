@@ -1,0 +1,42 @@
+menu "KVM USB device"
+
+config KVM_USB_COMPOSITE_SUPPORT
+    bool "Build the composite USB HID + CDC device"
+    default n
+    help
+        Builds support for the TinyUSB composite device (keyboard, pointer,
+        consumer control, CDC-ACM). Off by default: the firmware then behaves
+        exactly like the USB Serial/JTAG build and ignores the stored mode.
+        See docs/superpowers/specs/2026-11-25-usb-hid-device-design.md.
+
+config KVM_USB_FORCE_SERIAL
+    bool "Rescue build: always use USB Serial/JTAG"
+    default n
+    help
+        Ignores the stored USB mode and never starts TinyUSB. See Decision 6
+        of docs/superpowers/specs/2026-11-25-usb-hid-device-design.md.
+
+config KVM_USB_COMPOSITE_PID
+    hex "Composite device USB product ID"
+    default 0x4009
+
+config KVM_USB_ESCAPE_WINDOW_MS
+    int "Escape window before TinyUSB starts (ms)"
+    range 500 5000
+    default 1500
+    help
+        Time BOOT is sampled with USB Serial/JTAG still live (spec Decision 8).
+
+config KVM_USB_CONFIRM_MS
+    int "Mounted time that confirms a composite boot (ms)"
+    default 30000
+
+config KVM_USB_MAX_UNCONFIRMED
+    int "Unconfirmed composite boots before reverting to serial"
+    default 3
+
+config KVM_USB_REMOTE_WAKEUP
+    bool "Advertise USB remote wakeup"
+    default y
+
+endmenu
