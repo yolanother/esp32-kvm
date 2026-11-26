@@ -6,6 +6,14 @@ Ground rules for both drills:
 
 - Never erase flash. No step below uses an erase option, and `tools/firmware.ps1` never passes one. Guest bonds live in NVS and must survive every step; check that guests reconnect.
 - Quit the desktop app from the tray (**Quit and release**) before any step that opens the board's port. It owns the port.
+- `esptool.py` and `espefuse.py` (the form logged in board-bringup.md) are not on a plain PowerShell PATH. Load the ESP-IDF environment in the same PowerShell window first, the way `tools/firmware.ps1` does (the IDF is expected at `D:\esp\esp-idf-v5.5.1` or `%USERPROFILE%\esp\esp-idf-v5.5.1`; use the path that has `export.ps1`):
+
+  ```powershell
+  $env:IDF_PATH = 'D:\esp\esp-idf-v5.5.1'
+  . "$env:IDF_PATH\export.ps1"
+  ```
+
+  If a newer python on PATH breaks `export.ps1`, put the IDF python env first, as the script does: `$env:PATH = "$env:USERPROFILE\.espressif\python_env\idf5.5_py3.12_env\Scripts;$env:PATH"` before the export line (adjust the folder name to the one that exists). The equivalent `python -m esptool ...` from that env also works, but the logged commands used `esptool.py`.
 - Replace `COMn` with the board's current port. The COM number can change when the board re-enumerates.
 - Record every result, including failures and surprises, in `docs/hardware/board-bringup.md` under "Recovery status", with the date, the image SHA-256 and the exact tool output. Silence or a partial run is not a pass.
 
@@ -21,15 +29,15 @@ Image under test: the phase B image (mode store, escape window, magic strings an
 4. Run (read-only; stays in the bootloader):
 
    ```powershell
-   esptool --chip esp32s3 --port COMn --before no_reset --after no_reset chip_id
+   esptool.py --chip esp32s3 --port COMn --before no_reset --after no_reset chip_id
    ```
 
    Expected: chip identified and the output says it is staying in the bootloader.
 5. Read the security configuration (read-only, burns nothing):
 
    ```powershell
-   esptool --chip esp32s3 --port COMn --before no_reset --after no_reset get_security_info
-   espefuse --chip esp32s3 --port COMn --before no_reset summary
+   esptool.py --chip esp32s3 --port COMn --before no_reset --after no_reset get_security_info
+   espefuse.py --chip esp32s3 --port COMn --before no_reset summary
    ```
 
    Record `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE`, `DIS_DOWNLOAD_MODE` and `USB_PHY_SEL`, and the flash encryption and secure boot lines. Expected: USB download is not disabled (`DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` 0, `DIS_DOWNLOAD_MODE` 0). If it is disabled, stop: the recovery floor does not exist and no TinyUSB image may be flashed. Never run an `espefuse burn` command.
@@ -55,9 +63,9 @@ Record: the image SHA-256, the esptool hash-verified lines, and the bond check.
    ```
 
    The header has one line `usb_boot mode= reason= once= escape= abnormal= rst= stored= unconf=`. Expected now: reason 2 (NOT_BUILT) and `once=0`.
-3. Request the serial-once restart (21 bytes, leading 0 byte), by either route. `tools/firmware.ps1` writes it only as part of `flash` on a composite board, so on this serial image use one of:
+3. Request the serial-once restart (21 bytes, leading 0 byte), by either route:
+   - The script (quit the desktop app first): `pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 serial-once -Port COMn`. It writes the 21 bytes `00 4B 56 4D 2D 55 53 42 2D 53 45 52 49 41 4C 2D 4F 4E 43 45 0A` at 115200 8N1 with DTR and RTS off, and only to a port it positively identifies as a project board. Add `-DryRun` first to see the exact write without opening the port.
    - The touchscreen row **RESTART IN SERIAL MODE** (tap twice within 5 s; the footer reads `Restarting...`, or `Not in this build` if the image refuses it; record what it says).
-   - A raw write of the bytes `00 4B 56 4D 2D 55 53 42 2D 53 45 52 49 41 4C 2D 4F 4E 43 45 0A` to the port at 115200 8N1 with DTR and RTS off (the settings the script uses; `tools/firmware.ps1 flash -DryRun` with a fake composite port prints the exact write).
 4. Expected: the board restarts and comes back as `303A:1001`; the screen still says `Serial / Not in this build`. Run the dump again. Expected: `usb_boot` reason still 2 (NOT_BUILT), **`once=1`** and `rst=3` (software reset). That `once=1` is the proof the RTC flag survived `esp_restart()`.
 5. Unplug and replug normally, dump again. Expected: `once=0`.
 6. Do not induce a panic.
@@ -90,7 +98,7 @@ Revert paths use these exact names, so keep this list handy: replug three times;
 Re-enable composite (step 2) between each; after each expect a `303A:1001` serial board:
 
 1. **BOOT in the escape window.** Replug, then press BOOT within 1.5 s of plugging in (plug first, press after; pressing before power is ROM mode). Expected: serial this boot, reason `BOOT button: serial this boot`.
-2. **`tools/firmware.ps1 usb-serial`** (preview with `-DryRun` first). Expected: serial, persisted across a replug.
+2. **`tools/firmware.ps1 usb-serial`** (preview with `-DryRun` first). The script only writes to a listed project board; on a board that is already serial it still persists serial mode and reboots it. Expected: serial, persisted across a replug.
 3. **Touchscreen USE SERIAL MODE** (tap twice). Expected: serial, persisted.
 4. **Replug three times**, each within 30 s of the previous boot, with no button. Expected: serial and reason `Turned off after failed starts`.
 5. **`tools/firmware.ps1 flash`** while composite. Expected: it prints the serial-once write and the 15 s wait, the board comes back as `303A:1001`, the flash runs, and the board returns to composite mode.

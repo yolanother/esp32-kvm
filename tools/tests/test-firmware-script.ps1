@@ -5,15 +5,16 @@ $script = Join-Path $PSScriptRoot '..\firmware.ps1'
 $failures = 0
 
 function Invoke-Firmware {
-    param([string[]]$Arguments, [string]$FakePorts)
+    param([string[]]$Arguments, [string]$FakePorts, [string]$FakePortsAfter)
     if ($null -eq $FakePorts) {
         Remove-Item Env:ESP32_KVM_FAKE_PORTS -ErrorAction SilentlyContinue
     } else {
         $env:ESP32_KVM_FAKE_PORTS = $FakePorts
     }
+    if ($PSBoundParameters.ContainsKey("FakePortsAfter")) { $env:ESP32_KVM_FAKE_PORTS_AFTER = $FakePortsAfter } else { Remove-Item Env:ESP32_KVM_FAKE_PORTS_AFTER -ErrorAction SilentlyContinue }
     $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $script @Arguments 2>&1 | Out-String
     $code = $LASTEXITCODE
-    Remove-Item Env:ESP32_KVM_FAKE_PORTS -ErrorAction SilentlyContinue
+    Remove-Item Env:ESP32_KVM_FAKE_PORTS, Env:ESP32_KVM_FAKE_PORTS_AFTER -ErrorAction SilentlyContinue
     return [pscustomobject]@{ Output = $out; Code = $code }
 }
 
@@ -106,7 +107,7 @@ Assert-That ($twoComp.Output -notmatch 'app-flash') 'two composite boards print 
 $mixed = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts 'COM4:serial,COM5:composite'
 Assert-That ($mixed.Code -ne 0 -and $mixed.Output -match 'COM4' -and $mixed.Output -match 'COM5') 'serial plus composite without -Port refuses'
 $mixedPort = Invoke-Firmware -Arguments @('flash', '-DryRun', '-Port', 'COM5') -FakePorts 'COM4:serial,COM5:composite'
-Assert-That ($mixedPort.Code -eq 0 -and $mixedPort.Output -match 'serial-once' -and $mixedPort.Output -match '-p COM5 app-flash') 'explicit -Port on the composite board does the handoff'
+Assert-That ($mixedPort.Code -ne 0 -and $mixedPort.Output -notmatch "app-flash") 'explicit -Port on the composite board refuses while another board is present'
 $mixedSerialPort = Invoke-Firmware -Arguments @('flash', '-DryRun', '-Port', 'COM4') -FakePorts 'COM4:serial,COM5:composite'
 Assert-That ($mixedSerialPort.Code -eq 0 -and $mixedSerialPort.Output -notmatch 'serial-once' -and $mixedSerialPort.Output -match '-p COM4 app-flash') 'explicit -Port on the serial board flashes directly'
 
@@ -123,6 +124,36 @@ Assert-That ($usbPort.Code -eq 0 -and $usbPort.Output -match 'COM5') 'usb-serial
 $noneMsg = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts ''
 Assert-That ($noneMsg.Output -match '303A:4009') 'no-board message also names the composite id'
 
+
+
+# Fix round 1: handoff must flash only the NEW serial board; strict fake entries; serial-once action.
+$handoff = Invoke-Firmware -Arguments @('flash', '-DryRun', '-Port', 'COM5') -FakePorts 'COM5:composite' -FakePortsAfter 'COM6:serial'
+Assert-That ($handoff.Code -eq 0 -and $handoff.Output -match 'idf\.py -C firmware -p COM6 app-flash' -and $handoff.Output -notmatch '-p COM5 app-flash') 'handoff flashes the re-enumerated port (COM6), not the composite port'
+$handoffSame = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts 'COM5:composite' -FakePortsAfter 'COM5:serial'
+Assert-That ($handoffSame.Code -eq 0 -and $handoffSame.Output -match '-p COM5 app-flash') 'a board re-enumerating on the same COM number is flashed there'
+$other = Invoke-Firmware -Arguments @('flash', '-DryRun', '-Port', 'COM5') -FakePorts 'COM4:serial,COM5:composite' -FakePortsAfter 'COM4:serial'
+Assert-That ($other.Code -ne 0 -and $other.Output -match 'COM4' -and $other.Output -notmatch 'app-flash' -and $other.Output -notmatch 'serial-once magic') 'composite plus another serial board refuses the handoff and prints no write'
+$otherComp = Invoke-Firmware -Arguments @('flash', '-DryRun', '-Port', 'COM5') -FakePorts 'COM5:composite,COM6:composite'
+Assert-That ($otherComp.Code -ne 0 -and $otherComp.Output -notmatch 'app-flash') 'composite plus another composite board refuses the handoff'
+$onlyOld = Invoke-Firmware -Arguments @('flash', '-DryRun', '-Port', 'COM5') -FakePorts 'COM5:composite' -FakePortsAfter 'COM5:composite'
+Assert-That ($onlyOld.Code -ne 0 -and $onlyOld.Output -notmatch 'app-flash') 'no new serial board after the write refuses to flash'
+
+foreach ($bad in @(':composite', 'COM5:bogus', 'COM5:composite,:serial')) {
+    $badRun = Invoke-Firmware -Arguments @('ports', '-DryRun') -FakePorts $bad
+    Assert-That ($badRun.Code -ne 0 -and $badRun.Output -match 'ESP32_KVM_FAKE_PORTS') "malformed fake entry '$bad' is rejected"
+}
+
+$unlisted = Invoke-Firmware -Arguments @('usb-serial', '-DryRun', '-Port', 'COM9') -FakePorts 'COM5:composite'
+Assert-That ($unlisted.Code -ne 0 -and $unlisted.Output -notmatch 'write serial-mode') 'usb-serial refuses a port that is not a listed project board'
+$usbOnSerial = Invoke-Firmware -Arguments @('usb-serial', '-DryRun') -FakePorts 'COM4:serial'
+Assert-That ($usbOnSerial.Code -eq 0 -and $usbOnSerial.Output -match 'reboots') 'usb-serial on a serial board says it persists serial mode and reboots'
+
+$once = Invoke-Firmware -Arguments @('serial-once', '-DryRun') -FakePorts 'COM5:composite'
+Assert-That ($once.Code -eq 0 -and $once.Output -match [regex]::Escape($onceBytes) -and $once.Output -match '21 bytes' -and $once.Output -notmatch 'idf\.py' -and $once.Output -notmatch 'erase') 'serial-once -DryRun prints the 21-byte serial-once write and no idf.py'
+$onceUnlisted = Invoke-Firmware -Arguments @('serial-once', '-DryRun', '-Port', 'COM9') -FakePorts 'COM5:composite'
+Assert-That ($onceUnlisted.Code -ne 0) 'serial-once refuses an unlisted port'
+$onceTwo = Invoke-Firmware -Arguments @('serial-once', '-DryRun') -FakePorts 'COM5:composite,COM6:composite'
+Assert-That ($onceTwo.Code -ne 0 -and $onceTwo.Output -match '-Port') 'serial-once with several boards and no -Port refuses'
 
 if ($failures -gt 0) { Write-Host "$failures assertion(s) failed"; exit 1 }
 Write-Host 'All firmware script checks passed'
