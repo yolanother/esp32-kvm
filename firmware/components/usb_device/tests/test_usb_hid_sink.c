@@ -1,16 +1,17 @@
 /* Copyright (c) ESP32 KVM contributors. Use is governed by the root LICENSE.
- * Proves the state-based USB HID sink: report bytes and layout (checked
- * against the Task 2 pointer descriptor's bit totals), saturating motion
- * accumulation and clamped chunking, per-interface pump limits, consumer and
- * pointer alternation, dirty flags surviving busy or refused sends, and the
- * release_all / abandon transitions that keep the PC from holding a key. */
+ * Proves the ordered USB HID sink: report bytes and layout (checked against
+ * the Task 2 pointer descriptor's bit totals), per-stream ordering of distinct
+ * states (press and release both delivered, in order, even when applied back
+ * to back while the endpoint is busy), FIFO overflow that never reorders or
+ * leaves a key down, saturating motion and clamped chunking, per-interface
+ * pump limits, consumer/pointer alternation, retries of the same entry after a
+ * busy or refused send, and the release_all / abandon transitions. */
 #include "usb_hid_sink.h"
 #include "usb_descriptors.h"
 #include <assert.h>
-#include <limits.h>
 #include <string.h>
 
-#define MAX_CALLS 64
+#define MAX_CALLS 256
 
 typedef struct {
     uint8_t itf;
@@ -26,6 +27,8 @@ typedef struct {
     int send_attempts[2];
     int count;
     call_t calls[MAX_CALLS];
+    call_t attempts[MAX_CALLS]; /* every send attempt, accepted or not */
+    int attempt_count;
 } fake_t;
 
 static bool fake_ready(void *context, uint8_t itf)
@@ -36,6 +39,15 @@ static bool fake_ready(void *context, uint8_t itf)
     return f->ready[itf];
 }
 
+static void record(call_t *c, uint8_t itf, uint8_t report_id, const uint8_t *data, size_t len)
+{
+    c->itf = itf;
+    c->report_id = report_id;
+    c->len = len;
+    memset(c->data, 0, sizeof(c->data));
+    memcpy(c->data, data, len);
+}
+
 static bool fake_send(void *context, uint8_t itf, uint8_t report_id, const uint8_t *data, size_t len)
 {
     fake_t *f = context;
@@ -43,14 +55,11 @@ static bool fake_send(void *context, uint8_t itf, uint8_t report_id, const uint8
     assert(f->ready[itf]); /* never sent on a busy interface */
     assert(data != NULL && len <= 8);
     f->send_attempts[itf]++;
+    assert(f->attempt_count < MAX_CALLS);
+    record(&f->attempts[f->attempt_count++], itf, report_id, data, len);
     if (!f->accept[itf]) return false;
     assert(f->count < MAX_CALLS);
-    call_t *c = &f->calls[f->count++];
-    c->itf = itf;
-    c->report_id = report_id;
-    c->len = len;
-    memset(c->data, 0, sizeof(c->data));
-    memcpy(c->data, data, len);
+    record(&f->calls[f->count++], itf, report_id, data, len);
     return true;
 }
 
@@ -100,12 +109,17 @@ static kvm_router_input_t cons(uint16_t usage)
     return in;
 }
 
+static void apply(kvm_usb_hid_sink_t *s, kvm_router_input_t in) { kvm_usb_hid_sink_apply(s, &in); }
+
 static int16_t rd16(const uint8_t *p) { return (int16_t)(uint16_t)(p[0] | (p[1] << 8)); }
+
+static bool is_mouse(const call_t *c) { return c->itf == KVM_USB_ITF_POINTER && c->report_id == KVM_USB_REPORT_ID_MOUSE; }
+static bool is_consumer(const call_t *c) { return c->itf == KVM_USB_ITF_POINTER && c->report_id == KVM_USB_REPORT_ID_CONSUMER; }
+static bool is_keyboard(const call_t *c) { return c->itf == KVM_USB_ITF_KEYBOARD; }
 
 static void assert_mouse(const call_t *c, uint8_t buttons, int x, int y, int wheel, int pan)
 {
-    assert(c->itf == KVM_USB_ITF_POINTER);
-    assert(c->report_id == KVM_USB_REPORT_ID_MOUSE);
+    assert(is_mouse(c));
     assert(c->len == KVM_USB_HID_POINTER_REPORT_LEN);
     assert(c->data[0] == buttons);
     assert(rd16(c->data + 1) == x);
@@ -116,26 +130,47 @@ static void assert_mouse(const call_t *c, uint8_t buttons, int x, int y, int whe
 
 static void assert_consumer(const call_t *c, uint16_t usage)
 {
-    assert(c->itf == KVM_USB_ITF_POINTER);
-    assert(c->report_id == KVM_USB_REPORT_ID_CONSUMER);
+    assert(is_consumer(c));
     assert(c->len == KVM_USB_HID_CONSUMER_REPORT_LEN);
     assert(c->data[0] == (usage & 0xFF) && c->data[1] == (usage >> 8));
 }
 
 static void assert_keyboard(const call_t *c, const uint8_t expect[8])
 {
-    assert(c->itf == KVM_USB_ITF_KEYBOARD);
+    assert(is_keyboard(c));
     assert(c->report_id == 0);
     assert(c->len == KVM_USB_HID_KEYBOARD_REPORT_LEN);
     assert(memcmp(c->data, expect, 8) == 0);
 }
 
-static void assert_nothing_owed(const kvm_usb_hid_sink_t *s)
+/* Collects the n-th report of one stream from the accepted calls. */
+static const call_t *nth(const fake_t *f, bool (*kind)(const call_t *), int n)
 {
-    assert(!s->keys_dirty && !s->pointer_dirty && !s->consumer_dirty);
-    assert(s->dx == 0 && s->dy == 0 && s->wheel == 0 && s->pan == 0);
+    for (int i = 0; i < f->count; i++)
+        if (kind(&f->calls[i]) && n-- == 0) return &f->calls[i];
+    return NULL;
+}
+
+static int count_of(const fake_t *f, bool (*kind)(const call_t *))
+{
+    int n = 0;
+    for (int i = 0; i < f->count; i++) n += kind(&f->calls[i]) ? 1 : 0;
+    return n;
+}
+
+static void drain(kvm_usb_hid_sink_t *s, const kvm_usb_hid_port_t *p)
+{
+    int pumps = 0;
+    while (!kvm_usb_hid_sink_pump(s, p)) assert(++pumps < 200);
+}
+
+static void assert_idle(const kvm_usb_hid_sink_t *s)
+{
+    assert(s->key_count == 0 && s->pointer_count == 0 && s->consumer_count == 0);
     assert(!kvm_usb_hid_sink_pending(s));
 }
+
+static const uint8_t ZERO8[8] = { 0 };
 
 /* Minimal HID short-item walker: total Input bits per report ID (as in the descriptor suite). */
 static unsigned input_bits(const uint8_t *d, size_t len, uint8_t want_id)
@@ -171,14 +206,15 @@ static void test_init_is_idle(void)
     kvm_usb_hid_sink_t s;
     memset(&s, 0xA5, sizeof(s));
     kvm_usb_hid_sink_init(&s);
-    assert_nothing_owed(&s);
-    assert(s.buttons == 0 && s.consumer == 0);
-    for (int i = 0; i < 8; i++) assert(s.keys[i] == 0);
+    assert_idle(&s);
+    assert(s.buttons == 0 && s.consumer == 0 && memcmp(s.keys, ZERO8, 8) == 0);
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
     assert(kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 0 && f.send_attempts[0] == 0 && f.send_attempts[1] == 0);
+    assert(f.attempt_count == 0);
+    uint8_t out[7];
+    assert(!kvm_usb_hid_pointer_report(&s, out));
 }
 
 static void test_keyboard_bytes_equal_input(void)
@@ -194,7 +230,7 @@ static void test_keyboard_bytes_equal_input(void)
     uint8_t out[8];
     kvm_usb_hid_keyboard_report(&s, out);
     assert(memcmp(out, bytes, 8) == 0);
-    assert(s.keys_dirty && !s.pointer_dirty && !s.consumer_dirty);
+    assert(s.key_count == 1 && s.pointer_count == 0 && s.consumer_count == 0);
 
     fake_t f;
     fake_init(&f);
@@ -202,7 +238,34 @@ static void test_keyboard_bytes_equal_input(void)
     assert(kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 1);
     assert_keyboard(&f.calls[0], bytes);
-    assert_nothing_owed(&s);
+    assert_idle(&s);
+    kvm_usb_hid_keyboard_report(&s, out); /* empty queue: the newest state */
+    assert(memcmp(out, bytes, 8) == 0);
+}
+
+static void test_equal_states_are_not_queued(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    apply(&s, kbd(0, 0, 0));       /* equals the initial all-up */
+    apply(&s, ptr(0, 0, 0, 0, 0)); /* no change, no motion */
+    apply(&s, cons(0));
+    assert_idle(&s);
+    apply(&s, kbd(0, 4, 0));
+    apply(&s, kbd(0, 4, 0));
+    apply(&s, cons(0xE9));
+    apply(&s, cons(0xE9));
+    apply(&s, ptr(1, 0, 0, 0, 0));
+    apply(&s, ptr(1, 0, 0, 0, 0));
+    assert(s.key_count == 1 && s.consumer_count == 1 && s.pointer_count == 1);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
+    drain(&s, &p);
+    apply(&s, kbd(0, 4, 0)); /* equals the last sent state */
+    apply(&s, cons(0xE9));
+    apply(&s, ptr(1, 0, 0, 0, 0));
+    assert_idle(&s);
 }
 
 static void test_keyboard_rollover_passes_through(void)
@@ -218,75 +281,202 @@ static void test_keyboard_rollover_passes_through(void)
     uint8_t out[8];
     kvm_usb_hid_keyboard_report(&s, out);
     assert(memcmp(out, phantom, 8) == 0);
-    /* release_all after a phantom report is a real all-up. */
-    kvm_usb_hid_sink_release_all(&s);
+    kvm_usb_hid_sink_release_all(&s); /* a real all-up after a phantom report */
     kvm_usb_hid_keyboard_report(&s, out);
-    const uint8_t zero[8] = { 0 };
-    assert(memcmp(out, zero, 8) == 0);
+    assert(memcmp(out, ZERO8, 8) == 0);
+}
+
+static void test_press_release_back_to_back_while_busy(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
+    /* One BLE connection event delivers press and release together; the endpoints are busy. */
+    apply(&s, kbd(0, 0x04, 0));
+    apply(&s, kbd(0, 0, 0));
+    apply(&s, ptr(1, 0, 0, 0, 0));
+    apply(&s, ptr(0, 0, 0, 0, 0));
+    f.ready[0] = f.ready[1] = false;
+    for (int i = 0; i < 3; i++) assert(!kvm_usb_hid_sink_pump(&s, &p));
+    assert(f.attempt_count == 0);
+    f.ready[0] = f.ready[1] = true;
+    drain(&s, &p);
+    const uint8_t a[8] = { 0, 0, 0x04, 0, 0, 0, 0, 0 };
+    assert(count_of(&f, is_keyboard) == 2 && count_of(&f, is_mouse) == 2);
+    assert_keyboard(nth(&f, is_keyboard, 0), a);
+    assert_keyboard(nth(&f, is_keyboard, 1), ZERO8);
+    assert_mouse(nth(&f, is_mouse, 0), 1, 0, 0, 0, 0);
+    assert_mouse(nth(&f, is_mouse, 1), 0, 0, 0, 0, 0);
+    assert_idle(&s);
+}
+
+static void test_rapid_pairs_overflow_keeps_order_and_ends_up(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
+    f.ready[0] = false;
+    for (int i = 0; i < 20; i++) {
+        apply(&s, kbd(0, (uint8_t)(0x04 + i), 0));
+        apply(&s, kbd(0, 0, 0));
+        assert(s.key_count <= KVM_USB_HID_KEY_QUEUE_DEPTH);
+    }
+    assert(s.key_count == KVM_USB_HID_KEY_QUEUE_DEPTH);
+    f.ready[0] = true;
+    drain(&s, &p);
+    int n = count_of(&f, is_keyboard);
+    assert(n == (int)KVM_USB_HID_KEY_QUEUE_DEPTH);
+    uint8_t last_key = 0;
+    for (int i = 0; i < n; i++) {
+        const call_t *c = nth(&f, is_keyboard, i);
+        if (i % 2 == 1) assert_keyboard(c, ZERO8); /* press, release, press, release ... */
+        else {
+            assert(c->data[2] > last_key); /* presses keep their original order */
+            last_key = c->data[2];
+        }
+    }
+    assert_keyboard(nth(&f, is_keyboard, n - 1), ZERO8); /* never ends with a key down */
+    /* Once full, each later press was replaced by its own release in the newest slot:
+     * the first eight pairs arrive intact, the rest merge into the final release. */
+    assert(last_key == 0x04 + 7);
+    assert_idle(&s);
+
+    /* Same for buttons and consumer. */
+    fake_init(&f);
+    f.ready[1] = false;
+    for (int i = 0; i < 20; i++) {
+        apply(&s, ptr(1, 1, 0, 0, 0));
+        apply(&s, ptr(0, 0, 0, 0, 0));
+        apply(&s, cons((uint16_t)(0xB0 + i)));
+        apply(&s, cons(0));
+    }
+    assert(s.pointer_count == KVM_USB_HID_POINTER_QUEUE_DEPTH && s.consumer_count == KVM_USB_HID_CONSUMER_QUEUE_DEPTH);
+    f.ready[1] = true;
+    drain(&s, &p);
+    int mice = count_of(&f, is_mouse), consumers = count_of(&f, is_consumer);
+    assert(mice == (int)KVM_USB_HID_POINTER_QUEUE_DEPTH && consumers == (int)KVM_USB_HID_CONSUMER_QUEUE_DEPTH);
+    for (int i = 0; i < mice; i++) assert(nth(&f, is_mouse, i)->data[0] == (i % 2 == 0 ? 1 : 0));
+    int total_dx = 0;
+    for (int i = 0; i < mice; i++) total_dx += rd16(nth(&f, is_mouse, i)->data + 1);
+    assert(total_dx == 20); /* merging never loses motion */
+    uint16_t prev = 0;
+    for (int i = 0; i < consumers; i++) {
+        const call_t *c = nth(&f, is_consumer, i);
+        uint16_t u = (uint16_t)(c->data[0] | (c->data[1] << 8));
+        if (i % 2 == 1) assert(u == 0);
+        else { assert(u > prev); prev = u; }
+    }
+    assert_consumer(nth(&f, is_consumer, consumers - 1), 0);
+    assert_idle(&s);
+}
+
+static void test_click_is_three_ordered_reports(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
+    apply(&s, ptr(1, 0, 0, 0, 0));
+    apply(&s, ptr(1, 4, -2, 0, 0));
+    apply(&s, ptr(1, 6, -3, 1, 0));
+    apply(&s, ptr(0, 0, 0, 0, 0));
+    assert(s.pointer_count == 3);
+    drain(&s, &p);
+    assert(f.count == 3);
+    assert_mouse(&f.calls[0], 1, 0, 0, 0, 0);    /* press */
+    assert_mouse(&f.calls[1], 1, 10, -5, 1, 0);  /* motion while held */
+    assert_mouse(&f.calls[2], 0, 0, 0, 0, 0);    /* release */
+}
+
+static void test_transition_carries_its_own_motion(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
+    apply(&s, ptr(0, 3, 3, 0, 0));  /* motion before the press */
+    apply(&s, ptr(1, 2, 0, 0, 0));  /* press report with motion */
+    apply(&s, ptr(1, 5, 0, 0, 0));
+    apply(&s, ptr(0, 7, 0, 0, 0));  /* release report with motion */
+    drain(&s, &p);
+    assert(f.count == 4);
+    assert_mouse(&f.calls[0], 0, 3, 3, 0, 0);
+    assert_mouse(&f.calls[1], 1, 2, 0, 0, 0);
+    assert_mouse(&f.calls[2], 1, 5, 0, 0, 0);
+    assert_mouse(&f.calls[3], 0, 7, 0, 0, 0);
 }
 
 static void test_pointer_accumulates_three_applies_one_report(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
-    kvm_router_input_t a = ptr(0x01, 10, -5, 1, 0);
-    kvm_router_input_t b = ptr(0x01, 20, -6, 2, -1);
-    kvm_router_input_t c = ptr(0x03, -3, 1, 0, -2);
-    kvm_usb_hid_sink_apply(&s, &a);
-    kvm_usb_hid_sink_apply(&s, &b);
-    kvm_usb_hid_sink_apply(&s, &c);
-    assert(s.dx == 27 && s.dy == -10 && s.wheel == 3 && s.pan == -3 && s.buttons == 0x03);
-
+    apply(&s, ptr(0, 10, -5, 1, 0));
+    apply(&s, ptr(0, 20, -6, 2, -1));
+    apply(&s, ptr(0, -3, 1, 0, -2));
+    assert(s.pointer_count == 1);
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
     assert(kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 1);
-    assert_mouse(&f.calls[0], 0x03, 27, -10, 3, -3);
-    assert_nothing_owed(&s);
-    assert(s.buttons == 0x03); /* buttons are held state, not consumed */
+    assert_mouse(&f.calls[0], 0, 27, -10, 3, -3);
+    assert_idle(&s);
+}
+
+static void test_motion_that_cancels_out_is_dropped(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    apply(&s, ptr(0, 5, 0, 0, 0));
+    apply(&s, ptr(0, -5, 0, 0, 0));
+    assert_idle(&s);
 }
 
 static void test_pointer_report_byte_layout(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
-    kvm_router_input_t in = ptr(0xFF, 0x1234, -2, -128, 127);
-    kvm_usb_hid_sink_apply(&s, &in);
+    apply(&s, ptr(0xFF, 0x1234, -2, -128, 127));
+    assert(s.buttons == 0x1F); /* padding bits masked on apply */
     uint8_t out[7];
     memset(out, 0xEE, sizeof(out));
     assert(kvm_usb_hid_pointer_report(&s, out));
     const uint8_t expect[7] = { 0x1F, 0x34, 0x12, 0xFE, 0xFF, 0x81, 0x7F };
-    assert(memcmp(out, expect, 7) == 0); /* padding bits masked; wheel -128 clamped to -127 */
-    assert(s.wheel == -1 && s.dx == 0 && s.dy == 0 && s.pan == 0);
-    assert(s.pointer_dirty); /* the wheel remainder is still owed */
+    assert(memcmp(out, expect, 7) == 0); /* wheel -128 clamped to -127 */
+    assert(s.pointer_count == 1);        /* the wheel remainder is still queued */
     assert(kvm_usb_hid_pointer_report(&s, out));
     assert(out[0] == 0x1F && rd16(out + 1) == 0 && rd16(out + 3) == 0 && (int8_t)out[5] == -1 && out[6] == 0);
-    assert(!s.pointer_dirty);
+    assert_idle(&s);
     memset(out, 0xEE, sizeof(out));
-    assert(!kvm_usb_hid_pointer_report(&s, out)); /* nothing owed */
+    assert(!kvm_usb_hid_pointer_report(&s, out));
     for (int i = 0; i < 7; i++) assert(out[i] == 0);
-    assert(s.buttons == 0xFF);
+    apply(&s, ptr(0x3F, 0, 0, 0, 0)); /* a change in padding bits only is no change */
+    assert_idle(&s);
 }
 
 static void test_clamp_40000_over_two_pumps(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
-    kvm_router_input_t a = ptr(0, 20000, -20000, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &a);
-    kvm_usb_hid_sink_apply(&s, &a);
+    apply(&s, ptr(0, 20000, -20000, 0, 0));
+    apply(&s, ptr(0, 20000, -20000, 0, 0));
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    assert(!kvm_usb_hid_sink_pump(&s, &p)); /* remainder pending */
+    assert(!kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 1);
     assert_mouse(&f.calls[0], 0, 32767, -32767, 0, 0);
-    assert(s.dx == 7233 && s.dy == -7233 && s.pointer_dirty && kvm_usb_hid_sink_pending(&s));
+    assert(kvm_usb_hid_sink_pending(&s));
     assert(kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 2);
     assert_mouse(&f.calls[1], 0, 7233, -7233, 0, 0);
-    assert_nothing_owed(&s);
+    assert_idle(&s);
     assert(kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 2);
 }
@@ -295,26 +485,24 @@ static void test_int16_min_delta_is_clamped(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
-    kvm_router_input_t a = ptr(0, INT16_MIN, INT16_MIN, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &a);
+    apply(&s, ptr(0, INT16_MIN, INT16_MIN, 0, 0));
     uint8_t out[7];
     assert(kvm_usb_hid_pointer_report(&s, out));
     assert(rd16(out + 1) == -32767 && rd16(out + 3) == -32767);
-    assert(s.dx == -1 && s.dy == -1 && s.pointer_dirty);
+    assert(kvm_usb_hid_pointer_report(&s, out));
+    assert(rd16(out + 1) == -1 && rd16(out + 3) == -1);
+    assert_idle(&s);
 }
 
 static void test_wheel_saturation(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
-    kvm_router_input_t up = ptr(0, 0, 0, 127, -128);
-    for (int i = 0; i < 3; i++) kvm_usb_hid_sink_apply(&s, &up);
-    assert(s.wheel == 381 && s.pan == -384);
+    for (int i = 0; i < 3; i++) apply(&s, ptr(0, 0, 0, 127, -128));
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    int pumps = 0;
-    while (!kvm_usb_hid_sink_pump(&s, &p)) assert(++pumps < 10);
+    drain(&s, &p);
     assert(f.count == 4);
     assert_mouse(&f.calls[0], 0, 0, 0, 127, -127);
     assert_mouse(&f.calls[1], 0, 0, 0, 127, -127);
@@ -323,31 +511,28 @@ static void test_wheel_saturation(void)
 
     /* The int16 accumulators saturate instead of wrapping. */
     kvm_usb_hid_sink_init(&s);
-    for (int i = 0; i < 300; i++) kvm_usb_hid_sink_apply(&s, &up);
-    assert(s.wheel == INT16_MAX && s.pan == INT16_MIN);
-    kvm_router_input_t down = ptr(0, 0, 0, -1, 1);
-    kvm_usb_hid_sink_apply(&s, &down);
-    assert(s.wheel == INT16_MAX - 1 && s.pan == INT16_MIN + 1);
+    for (int i = 0; i < 300; i++) apply(&s, ptr(0, 0, 0, 127, -128));
+    assert(s.pointer_count == 1);
+    const kvm_usb_hid_pointer_entry_t *e = &s.pointer_queue[s.pointer_head];
+    assert(e->wheel == INT16_MAX && e->pan == INT16_MIN);
+    apply(&s, ptr(0, 0, 0, -1, 1));
+    assert(e->wheel == INT16_MAX - 1 && e->pan == INT16_MIN + 1);
 }
 
 static void test_motion_accumulators_saturate(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
-    s.dx = INT32_MAX - 10;
-    s.dy = INT32_MIN + 10;
-    s.pointer_dirty = true;
-    kvm_router_input_t big = ptr(0, 32767, -32768, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &big);
-    kvm_usb_hid_sink_apply(&s, &big);
-    assert(s.dx == INT32_MAX && s.dy == INT32_MIN);
+    for (int i = 0; i < 70000; i++) apply(&s, ptr(0, 32767, -32768, 0, 0));
+    assert(s.pointer_count == 1);
+    const kvm_usb_hid_pointer_entry_t *e = &s.pointer_queue[s.pointer_head];
+    assert(e->dx == INT32_MAX && e->dy == INT32_MIN);
     uint8_t out[7];
     assert(kvm_usb_hid_pointer_report(&s, out));
     assert(rd16(out + 1) == 32767 && rd16(out + 3) == -32767);
-    assert(s.dx == INT32_MAX - 32767 && s.dy == INT32_MIN + 32767);
-    kvm_router_input_t back = ptr(0, -5, 5, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &back);
-    assert(s.dx == INT32_MAX - 32772 && s.dy == INT32_MIN + 32772);
+    assert(e->dx == INT32_MAX - 32767 && e->dy == INT32_MIN + 32767);
+    apply(&s, ptr(0, -5, 5, 0, 0));
+    assert(e->dx == INT32_MAX - 32772 && e->dy == INT32_MIN + 32772);
 }
 
 static void test_consumer_press_then_release_with_busy_first_pump(void)
@@ -357,42 +542,41 @@ static void test_consumer_press_then_release_with_busy_first_pump(void)
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t press = cons(0x00E9), release = cons(0);
-    kvm_usb_hid_sink_apply(&s, &press);
+    apply(&s, cons(0x00E9));
     f.ready[1] = false;
     assert(!kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 0 && f.send_attempts[1] == 0 && f.ready_calls[1] == 1);
-    assert(s.consumer_dirty);
+    assert(f.attempt_count == 0 && f.ready_calls[1] == 1);
     f.ready[1] = true;
     assert(kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 1);
     assert_consumer(&f.calls[0], 0x00E9);
-    kvm_usb_hid_sink_apply(&s, &release);
+    apply(&s, cons(0));
     f.ready[1] = false;
     assert(!kvm_usb_hid_sink_pump(&s, &p));
     f.ready[1] = true;
     assert(kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 2);
     assert_consumer(&f.calls[1], 0);
-    assert_nothing_owed(&s);
+    assert_idle(&s);
 }
 
-static void test_consumer_coalesces_to_latest_state(void)
+static void test_consumer_tap_while_busy_delivers_both(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t press = cons(0x00CD), release = cons(0);
-    kvm_usb_hid_sink_apply(&s, &press);
     f.ready[1] = false;
+    apply(&s, cons(0x00CD));
     assert(!kvm_usb_hid_sink_pump(&s, &p));
-    kvm_usb_hid_sink_apply(&s, &release); /* applied while the endpoint is busy */
+    apply(&s, cons(0)); /* release applied while the endpoint is busy */
+    assert(!kvm_usb_hid_sink_pump(&s, &p));
     f.ready[1] = true;
-    assert(kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 1);
-    assert_consumer(&f.calls[0], 0); /* the release is never lost */
+    drain(&s, &p);
+    assert(f.count == 2);
+    assert_consumer(&f.calls[0], 0x00CD);
+    assert_consumer(&f.calls[1], 0);
 }
 
 static void test_alternation_pointer_and_consumer(void)
@@ -402,20 +586,16 @@ static void test_alternation_pointer_and_consumer(void)
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t m = ptr(0, 5, 6, 0, 0), c = cons(0x00B5);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &c);
+    apply(&s, ptr(0, 5, 6, 0, 0));
+    apply(&s, cons(0x00B5));
     assert(!kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 1); /* one report per interface per call */
     assert(kvm_usb_hid_sink_pump(&s, &p));
     assert(f.count == 2);
-    bool saw_mouse = false, saw_consumer = false;
-    for (int i = 0; i < 2; i++) {
-        if (f.calls[i].report_id == KVM_USB_REPORT_ID_MOUSE) { assert_mouse(&f.calls[i], 0, 5, 6, 0, 0); saw_mouse = true; }
-        else { assert_consumer(&f.calls[i], 0x00B5); saw_consumer = true; }
-    }
-    assert(saw_mouse && saw_consumer);
-    assert_nothing_owed(&s);
+    assert(count_of(&f, is_mouse) == 1 && count_of(&f, is_consumer) == 1);
+    assert_mouse(nth(&f, is_mouse, 0), 0, 5, 6, 0, 0);
+    assert_consumer(nth(&f, is_consumer, 0), 0x00B5);
+    assert_idle(&s);
 }
 
 static void test_alternation_under_continuous_motion(void)
@@ -425,27 +605,20 @@ static void test_alternation_under_continuous_motion(void)
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t m = ptr(0, 1, 0, 0, 0);
-    kvm_router_input_t c1 = cons(0x00E9), c0 = cons(0);
     /* Motion arrives before every pump; consumer press and release must still get through. */
-    kvm_usb_hid_sink_apply(&s, &c1);
+    apply(&s, cons(0x00E9));
     for (int i = 0; i < 6; i++) {
-        kvm_usb_hid_sink_apply(&s, &m);
-        if (i == 2) kvm_usb_hid_sink_apply(&s, &c0);
+        apply(&s, ptr(0, 1, 0, 0, 0));
+        if (i == 2) apply(&s, cons(0));
         kvm_usb_hid_sink_pump(&s, &p);
     }
-    int consumers = 0, mice = 0;
-    uint16_t last_usage = 0xFFFF;
-    for (int i = 0; i < f.count; i++) {
-        if (f.calls[i].report_id == KVM_USB_REPORT_ID_CONSUMER) { consumers++; last_usage = (uint16_t)(f.calls[i].data[0] | (f.calls[i].data[1] << 8)); }
-        else mice++;
-    }
-    assert(consumers == 2 && last_usage == 0);
-    assert(mice >= 3);
-    while (!kvm_usb_hid_sink_pump(&s, &p)) {}
+    assert(count_of(&f, is_consumer) == 2);
+    assert_consumer(nth(&f, is_consumer, 0), 0x00E9);
+    assert_consumer(nth(&f, is_consumer, 1), 0);
+    assert(count_of(&f, is_mouse) >= 3);
+    drain(&s, &p);
     int total_dx = 0;
-    for (int i = 0; i < f.count; i++)
-        if (f.calls[i].report_id == KVM_USB_REPORT_ID_MOUSE) total_dx += rd16(f.calls[i].data + 1);
+    for (int i = 0; i < count_of(&f, is_mouse); i++) total_dx += rd16(nth(&f, is_mouse, i)->data + 1);
     assert(total_dx == 6); /* no motion lost or duplicated */
 }
 
@@ -456,20 +629,18 @@ static void test_one_report_per_interface_per_call(void)
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t k = kbd(0, 0x04, 0), m = ptr(1, 1, 1, 0, 0), c = cons(0x00E2);
-    kvm_usb_hid_sink_apply(&s, &k);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &c);
+    apply(&s, kbd(0, 0x04, 0));
+    apply(&s, kbd(0, 0x04, 0x05));
+    apply(&s, ptr(1, 1, 1, 0, 0));
+    apply(&s, cons(0x00E2));
     assert(!kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 2);
-    assert(f.calls[0].itf == KVM_USB_ITF_KEYBOARD);
-    assert(f.calls[1].itf == KVM_USB_ITF_POINTER);
-    assert(f.send_attempts[0] == 1 && f.send_attempts[1] == 1);
+    assert(f.count == 2 && f.send_attempts[0] == 1 && f.send_attempts[1] == 1);
+    assert(is_keyboard(&f.calls[0]) && f.calls[1].itf == KVM_USB_ITF_POINTER);
     assert(kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 3 && f.calls[2].itf == KVM_USB_ITF_POINTER);
+    assert(f.count == 4 && is_keyboard(&f.calls[2]) && f.calls[3].itf == KVM_USB_ITF_POINTER);
 }
 
-static void test_busy_ready_leaves_dirty(void)
+static void test_busy_ready_leaves_entries_queued(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
@@ -477,21 +648,19 @@ static void test_busy_ready_leaves_dirty(void)
     fake_init(&f);
     f.ready[0] = f.ready[1] = false;
     kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t k = kbd(0x01, 0x04, 0), m = ptr(1, 9, 0, 0, 0), c = cons(0x00E2);
-    kvm_usb_hid_sink_apply(&s, &k);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &c);
+    apply(&s, kbd(0x01, 0x04, 0));
+    apply(&s, ptr(1, 9, 0, 0, 0));
+    apply(&s, cons(0x00E2));
     for (int i = 0; i < 3; i++) assert(!kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 0 && f.send_attempts[0] == 0 && f.send_attempts[1] == 0);
-    assert(s.keys_dirty && s.pointer_dirty && s.consumer_dirty && s.dx == 9);
-    /* Keyboard becomes ready alone: only interface 0 sends. */
-    f.ready[0] = true;
+    assert(f.attempt_count == 0);
+    assert(s.key_count == 1 && s.pointer_count == 1 && s.consumer_count == 1);
+    f.ready[0] = true; /* keyboard alone becomes ready */
     assert(!kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 1 && f.calls[0].itf == KVM_USB_ITF_KEYBOARD);
-    assert(!s.keys_dirty && s.pointer_dirty && s.consumer_dirty);
+    assert(f.count == 1 && is_keyboard(&f.calls[0]));
+    assert(s.key_count == 0 && s.pointer_count == 1 && s.consumer_count == 1);
 }
 
-static void test_send_false_leaves_dirty_and_motion(void)
+static void test_send_false_retries_the_same_entry(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
@@ -499,91 +668,95 @@ static void test_send_false_leaves_dirty_and_motion(void)
     fake_init(&f);
     f.accept[0] = f.accept[1] = false;
     kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t k = kbd(0, 0x04, 0x05), m = ptr(2, 40000 / 2, 0, 3, 0), c = cons(0x00E9);
-    kvm_usb_hid_sink_apply(&s, &k);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &c);
-    assert(!kvm_usb_hid_sink_pump(&s, &p));
-    assert(!kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.send_attempts[0] == 2 && f.send_attempts[1] == 2 && f.count == 0);
-    assert(s.keys_dirty && s.pointer_dirty && s.consumer_dirty);
-    assert(s.dx == 40000 && s.wheel == 6); /* a refused chunk is not consumed */
-    f.accept[0] = f.accept[1] = true;
-    int pumps = 0;
-    while (!kvm_usb_hid_sink_pump(&s, &p)) assert(++pumps < 10);
-    int total = 0, wheel = 0;
-    for (int i = 0; i < f.count; i++)
-        if (f.calls[i].report_id == KVM_USB_REPORT_ID_MOUSE) { total += rd16(f.calls[i].data + 1); wheel += (int8_t)f.calls[i].data[5]; }
-    assert(total == 40000 && wheel == 6);
-    assert_nothing_owed(&s);
-}
-
-static void test_release_with_remaining_motion_carries_new_buttons(void)
-{
-    kvm_usb_hid_sink_t s;
-    kvm_usb_hid_sink_init(&s);
-    fake_t f;
-    fake_init(&f);
-    kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t drag = ptr(1, 20000, 0, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &drag);
-    kvm_usb_hid_sink_apply(&s, &drag);
-    assert(!kvm_usb_hid_sink_pump(&s, &p));
-    assert_mouse(&f.calls[0], 1, 32767, 0, 0, 0);
-    kvm_router_input_t up = ptr(0, 0, 0, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &up);
-    assert(kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 2);
-    assert_mouse(&f.calls[1], 0, 7233, 0, 0, 0); /* remainder goes out with the release */
-    assert_nothing_owed(&s);
-}
-
-static void test_button_change_without_motion_is_sent(void)
-{
-    kvm_usb_hid_sink_t s;
-    kvm_usb_hid_sink_init(&s);
-    fake_t f;
-    fake_init(&f);
-    kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t down = ptr(1, 3, 0, 0, 0), up = ptr(0, 0, 0, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &down);
-    assert(kvm_usb_hid_sink_pump(&s, &p));
-    kvm_usb_hid_sink_apply(&s, &up);
-    assert(s.pointer_dirty && kvm_usb_hid_sink_pending(&s));
-    assert(kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 2);
-    assert_mouse(&f.calls[1], 0, 0, 0, 0, 0);
-}
-
-static void test_release_all_sends_all_up(void)
-{
-    kvm_usb_hid_sink_t s;
-    kvm_usb_hid_sink_init(&s);
-    fake_t f;
-    fake_init(&f);
-    kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t k = kbd(0x02, 0x04, 0x05), m = ptr(3, 30000, -30000, 5, 5), c = cons(0x00E9);
-    kvm_usb_hid_sink_apply(&s, &k);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &c);
-    kvm_usb_hid_sink_release_all(&s);
-    assert(s.keys_dirty && s.pointer_dirty && s.consumer_dirty);
-    assert(s.dx == 0 && s.dy == 0 && s.wheel == 0 && s.pan == 0 && s.buttons == 0 && s.consumer == 0);
-    assert(kvm_usb_hid_sink_pending(&s));
-    int pumps = 0;
-    while (!kvm_usb_hid_sink_pump(&s, &p)) assert(++pumps < 5);
-    assert(f.count == 3);
-    const uint8_t zero[8] = { 0 };
-    int kb = 0, mouse = 0, consumer = 0;
-    for (int i = 0; i < f.count; i++) {
-        if (f.calls[i].itf == KVM_USB_ITF_KEYBOARD) { assert_keyboard(&f.calls[i], zero); kb++; }
-        else if (f.calls[i].report_id == KVM_USB_REPORT_ID_MOUSE) { assert_mouse(&f.calls[i], 0, 0, 0, 0, 0); mouse++; }
-        else { assert_consumer(&f.calls[i], 0); consumer++; }
+    const uint8_t a[8] = { 0, 0, 0x04, 0, 0, 0, 0, 0 };
+    apply(&s, kbd(0, 0x04, 0));
+    apply(&s, kbd(0, 0, 0));
+    apply(&s, ptr(2, 20000, 0, 3, 0));
+    apply(&s, ptr(2, 20000, 0, 3, 0));
+    apply(&s, ptr(0, 0, 0, 0, 0));
+    for (int i = 0; i < 4; i++) assert(!kvm_usb_hid_sink_pump(&s, &p));
+    assert(f.count == 0 && f.send_attempts[0] == 4 && f.send_attempts[1] == 4);
+    for (int i = 0; i < f.attempt_count; i++) {
+        const call_t *c = &f.attempts[i];
+        if (is_keyboard(c)) assert_keyboard(c, a);            /* always the press, never skipped */
+        else assert_mouse(c, 2, 20000, 0, 3, 0);              /* always the press transition */
     }
-    assert(kb == 1 && mouse == 1 && consumer == 1);
-    assert_nothing_owed(&s);
+    assert(s.key_count == 2 && s.pointer_count == 3);
+    f.accept[0] = f.accept[1] = true;
+    drain(&s, &p);
+    assert(count_of(&f, is_keyboard) == 2);
+    assert_keyboard(nth(&f, is_keyboard, 0), a);
+    assert_keyboard(nth(&f, is_keyboard, 1), ZERO8);
+    assert(count_of(&f, is_mouse) == 3);
+    assert_mouse(nth(&f, is_mouse, 0), 2, 20000, 0, 3, 0);
+    assert_mouse(nth(&f, is_mouse, 1), 2, 20000, 0, 3, 0);
+    assert_mouse(nth(&f, is_mouse, 2), 0, 0, 0, 0, 0);
+    assert_idle(&s);
+}
+
+static void test_refused_chunk_is_not_consumed(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
+    apply(&s, ptr(0, 20000, 0, 0, 0));
+    apply(&s, ptr(0, 20000, 0, 0, 0));
+    f.accept[1] = false;
+    assert(!kvm_usb_hid_sink_pump(&s, &p));
+    assert(s.pointer_queue[s.pointer_head].dx == 40000);
+    f.accept[1] = true;
+    drain(&s, &p);
+    assert(f.count == 2);
+    assert_mouse(&f.calls[0], 0, 32767, 0, 0, 0);
+    assert_mouse(&f.calls[1], 0, 7233, 0, 0, 0);
+}
+
+static void test_drag_release_keeps_motion_under_held_button(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
+    apply(&s, ptr(1, 20000, 0, 0, 0));
+    apply(&s, ptr(1, 20000, 0, 0, 0));
+    apply(&s, ptr(1, 20000, 0, 0, 0));
+    apply(&s, ptr(0, 0, 0, 0, 0));
+    drain(&s, &p);
+    assert(f.count == 4);
+    assert_mouse(&f.calls[0], 1, 20000, 0, 0, 0); /* press with its own motion */
+    assert_mouse(&f.calls[1], 1, 32767, 0, 0, 0); /* held motion, chunked */
+    assert_mouse(&f.calls[2], 1, 7233, 0, 0, 0);
+    assert_mouse(&f.calls[3], 0, 0, 0, 0, 0);     /* release after every held chunk */
+}
+
+static void test_release_all_sends_only_the_zero_state(void)
+{
+    kvm_usb_hid_sink_t s;
+    kvm_usb_hid_sink_init(&s);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
+    f.ready[0] = f.ready[1] = false;
+    apply(&s, kbd(0x02, 0x04, 0));
+    apply(&s, kbd(0x02, 0x04, 0x05));
+    apply(&s, ptr(3, 30000, -30000, 5, 5));
+    apply(&s, ptr(1, 30000, -30000, 5, 5));
+    apply(&s, cons(0x00E9));
+    apply(&s, cons(0x00EA));
+    assert(!kvm_usb_hid_sink_pump(&s, &p));
+    kvm_usb_hid_sink_release_all(&s);
+    assert(s.key_count == 1 && s.pointer_count == 1 && s.consumer_count == 1);
+    assert(s.buttons == 0 && s.consumer == 0 && memcmp(s.keys, ZERO8, 8) == 0);
+    f.ready[0] = f.ready[1] = true;
+    drain(&s, &p);
+    assert(f.count == 3);
+    assert_keyboard(nth(&f, is_keyboard, 0), ZERO8);
+    assert_mouse(nth(&f, is_mouse, 0), 0, 0, 0, 0, 0);
+    assert_consumer(nth(&f, is_consumer, 0), 0);
+    assert_idle(&s);
 }
 
 static void test_release_all_resends_when_already_zero(void)
@@ -596,29 +769,9 @@ static void test_release_all_resends_when_already_zero(void)
     for (int round = 1; round <= 2; round++) {
         kvm_usb_hid_sink_release_all(&s);
         kvm_usb_hid_sink_release_all(&s); /* idempotent: still one report each */
-        while (!kvm_usb_hid_sink_pump(&s, &p)) {}
+        drain(&s, &p);
         assert(f.count == 3 * round);
     }
-}
-
-static void test_release_all_while_busy_then_ready(void)
-{
-    kvm_usb_hid_sink_t s;
-    kvm_usb_hid_sink_init(&s);
-    fake_t f;
-    fake_init(&f);
-    kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t k = kbd(0, 0x04, 0);
-    kvm_usb_hid_sink_apply(&s, &k);
-    assert(kvm_usb_hid_sink_pump(&s, &p));
-    f.ready[0] = f.ready[1] = false;
-    kvm_usb_hid_sink_release_all(&s);
-    assert(!kvm_usb_hid_sink_pump(&s, &p));
-    f.ready[0] = f.ready[1] = true;
-    while (!kvm_usb_hid_sink_pump(&s, &p)) {}
-    const uint8_t zero[8] = { 0 };
-    assert(f.count == 4);
-    assert_keyboard(&f.calls[1], zero);
 }
 
 static void test_release_all_apply_interleavings(void)
@@ -628,55 +781,46 @@ static void test_release_all_apply_interleavings(void)
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    /* Motion applied before release_all is dropped; motion after it accumulates from zero. */
-    kvm_router_input_t m = ptr(1, 100, 100, 1, 1);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_release_all(&s);
-    kvm_router_input_t m2 = ptr(0, 7, -7, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &m2);
-    kvm_router_input_t k = kbd(0, 0x1E, 0);
-    kvm_usb_hid_sink_apply(&s, &k); /* new keyboard state after release_all wins */
-    while (!kvm_usb_hid_sink_pump(&s, &p)) {}
     const uint8_t one[8] = { 0, 0, 0x1E, 0, 0, 0, 0, 0 };
-    int mouse = 0;
-    for (int i = 0; i < f.count; i++) {
-        if (f.calls[i].itf == KVM_USB_ITF_KEYBOARD) assert_keyboard(&f.calls[i], one);
-        else if (f.calls[i].report_id == KVM_USB_REPORT_ID_MOUSE) { assert_mouse(&f.calls[i], 0, 7, -7, 0, 0); mouse++; }
-        else assert_consumer(&f.calls[i], 0);
-    }
-    assert(mouse == 1 && f.count == 3);
+    /* Queued input before release_all is dropped; input after it follows the zero state. */
+    apply(&s, ptr(1, 100, 100, 1, 1));
+    kvm_usb_hid_sink_release_all(&s);
+    apply(&s, ptr(0, 7, -7, 0, 0));
+    apply(&s, kbd(0, 0x1E, 0));
+    drain(&s, &p);
+    assert(f.count == 5);
+    assert_keyboard(nth(&f, is_keyboard, 0), ZERO8);
+    assert_keyboard(nth(&f, is_keyboard, 1), one);
+    assert_mouse(nth(&f, is_mouse, 0), 0, 0, 0, 0, 0);
+    assert_mouse(nth(&f, is_mouse, 1), 0, 7, -7, 0, 0);
+    assert_consumer(nth(&f, is_consumer, 0), 0);
 
-    /* release_all, apply, release_all again before any pump: all-up is the final state. */
-    f.count = 0;
+    /* release_all, apply, release_all again before any pump: only the zero states remain. */
+    fake_init(&f);
     kvm_usb_hid_sink_release_all(&s);
-    kvm_router_input_t k2 = kbd(0x01, 0x04, 0x05), c = cons(0x00E9), m3 = ptr(2, 50, 0, 0, 0);
-    kvm_usb_hid_sink_apply(&s, &k2);
-    kvm_usb_hid_sink_apply(&s, &c);
-    kvm_usb_hid_sink_apply(&s, &m3);
+    apply(&s, kbd(0x01, 0x04, 0x05));
+    apply(&s, cons(0x00E9));
+    apply(&s, ptr(2, 50, 0, 0, 0));
     kvm_usb_hid_sink_release_all(&s);
-    while (!kvm_usb_hid_sink_pump(&s, &p)) {}
-    const uint8_t zero[8] = { 0 };
+    drain(&s, &p);
     assert(f.count == 3);
-    for (int i = 0; i < f.count; i++) {
-        if (f.calls[i].itf == KVM_USB_ITF_KEYBOARD) assert_keyboard(&f.calls[i], zero);
-        else if (f.calls[i].report_id == KVM_USB_REPORT_ID_MOUSE) assert_mouse(&f.calls[i], 0, 0, 0, 0, 0);
-        else assert_consumer(&f.calls[i], 0);
-    }
+    assert_keyboard(nth(&f, is_keyboard, 0), ZERO8);
+    assert_mouse(nth(&f, is_mouse, 0), 0, 0, 0, 0, 0);
+    assert_consumer(nth(&f, is_consumer, 0), 0);
 
     /* A pump between release_all and the next apply delivers the all-up first. */
-    f.count = 0;
-    kvm_usb_hid_sink_apply(&s, &k2);
+    fake_init(&f);
+    const uint8_t k2[8] = { 0x01, 0, 0x04, 0x05, 0, 0, 0, 0 };
+    apply(&s, kbd(0x01, 0x04, 0x05));
     assert(kvm_usb_hid_sink_pump(&s, &p));
     kvm_usb_hid_sink_release_all(&s);
     assert(!kvm_usb_hid_sink_pump(&s, &p));
-    kvm_usb_hid_sink_apply(&s, &k);
-    while (!kvm_usb_hid_sink_pump(&s, &p)) {}
-    const uint8_t k2_bytes[8] = { 0x01, 0, 0x04, 0x05, 0, 0, 0, 0 };
-    int kb = 0;
-    const uint8_t *expect[3] = { k2_bytes, zero, one };
-    for (int i = 0; i < f.count; i++)
-        if (f.calls[i].itf == KVM_USB_ITF_KEYBOARD) { assert(kb < 3); assert_keyboard(&f.calls[i], expect[kb]); kb++; }
-    assert(kb == 3);
+    apply(&s, kbd(0, 0x1E, 0));
+    drain(&s, &p);
+    assert(count_of(&f, is_keyboard) == 3);
+    assert_keyboard(nth(&f, is_keyboard, 0), k2);
+    assert_keyboard(nth(&f, is_keyboard, 1), ZERO8);
+    assert_keyboard(nth(&f, is_keyboard, 2), one);
 }
 
 static void test_abandon_sends_nothing(void)
@@ -686,44 +830,42 @@ static void test_abandon_sends_nothing(void)
     fake_t f;
     fake_init(&f);
     kvm_usb_hid_port_t p = port_of(&f);
-    kvm_router_input_t k = kbd(0x02, 0x04, 0), m = ptr(1, 40000 / 2, 0, 1, 1), c = cons(0x00E9);
-    kvm_usb_hid_sink_apply(&s, &k);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &m);
-    kvm_usb_hid_sink_apply(&s, &c);
+    apply(&s, kbd(0x02, 0x04, 0));
+    apply(&s, ptr(1, 20000, 0, 1, 1));
+    apply(&s, ptr(1, 20000, 0, 1, 1));
+    apply(&s, cons(0x00E9));
     kvm_usb_hid_sink_release_all(&s);
     kvm_usb_hid_sink_abandon(&s);
-    assert_nothing_owed(&s);
-    assert(s.buttons == 0 && s.consumer == 0);
-    for (int i = 0; i < 8; i++) assert(s.keys[i] == 0);
+    assert_idle(&s);
+    assert(s.buttons == 0 && s.consumer == 0 && memcmp(s.keys, ZERO8, 8) == 0);
     assert(kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 0 && f.send_attempts[0] == 0 && f.send_attempts[1] == 0);
-    /* After abandon, new input is delivered normally. */
-    kvm_usb_hid_sink_apply(&s, &k);
+    assert(f.attempt_count == 0);
+    apply(&s, kbd(0x02, 0x04, 0)); /* after abandon, new input is delivered normally */
     assert(kvm_usb_hid_sink_pump(&s, &p));
-    assert(f.count == 1 && f.calls[0].itf == KVM_USB_ITF_KEYBOARD);
+    assert(f.count == 1 && is_keyboard(&f.calls[0]));
 }
 
-static void test_pending_reflects_flags_and_motion(void)
+static void test_pending_reflects_queues(void)
 {
     kvm_usb_hid_sink_t s;
     kvm_usb_hid_sink_init(&s);
+    fake_t f;
+    fake_init(&f);
+    kvm_usb_hid_port_t p = port_of(&f);
     assert(!kvm_usb_hid_sink_pending(&s));
-    s.keys_dirty = true;
+    apply(&s, kbd(0, 4, 0));
     assert(kvm_usb_hid_sink_pending(&s));
-    s.keys_dirty = false;
-    s.pointer_dirty = true;
+    drain(&s, &p);
+    apply(&s, ptr(0, 0, 0, 0, 1));
     assert(kvm_usb_hid_sink_pending(&s));
-    s.pointer_dirty = false;
-    s.consumer_dirty = true;
+    drain(&s, &p);
+    apply(&s, cons(1));
     assert(kvm_usb_hid_sink_pending(&s));
-    s.consumer_dirty = false;
-    s.pan = 1;
-    assert(kvm_usb_hid_sink_pending(&s));
-    s.pan = 0;
-    s.buttons = 3; /* held state alone owes nothing */
-    s.consumer = 5;
-    s.keys[2] = 4;
+    drain(&s, &p);
+    apply(&s, ptr(3, 0, 0, 0, 0));
+    drain(&s, &p);
+    /* Held state alone owes nothing. */
+    assert(s.buttons == 3 && s.consumer == 1 && s.keys[2] == 4);
     assert(!kvm_usb_hid_sink_pending(&s));
 }
 
@@ -736,22 +878,20 @@ static void test_null_and_unknown_inputs(void)
     kvm_router_input_t bad = kbd(1, 2, 3);
     bad.kind = (kvm_router_input_kind_t)99;
     kvm_usb_hid_sink_apply(&s, &bad);
-    assert_nothing_owed(&s);
+    assert_idle(&s);
     assert(!kvm_usb_hid_sink_pending(NULL));
     kvm_usb_hid_sink_release_all(NULL);
     kvm_usb_hid_sink_abandon(NULL);
     kvm_usb_hid_sink_init(NULL);
 
-    kvm_router_input_t k = kbd(0, 4, 0);
-    kvm_usb_hid_sink_apply(&s, &k);
+    apply(&s, kbd(0, 4, 0));
     assert(!kvm_usb_hid_sink_pump(&s, NULL));
     kvm_usb_hid_port_t no_send = { NULL, NULL, NULL };
     assert(!kvm_usb_hid_sink_pump(&s, &no_send));
-    assert(s.keys_dirty);
-    /* NULL ready means always ready. */
+    assert(s.key_count == 1);
     fake_t f;
     fake_init(&f);
-    kvm_usb_hid_port_t no_ready = { NULL, fake_send, &f };
+    kvm_usb_hid_port_t no_ready = { NULL, fake_send, &f }; /* NULL ready means always ready */
     assert(kvm_usb_hid_sink_pump(&s, &no_ready));
     assert(f.count == 1);
     assert(kvm_usb_hid_sink_pump(NULL, &no_ready));
@@ -762,28 +902,33 @@ int main(void)
     test_layout_matches_descriptors();
     test_init_is_idle();
     test_keyboard_bytes_equal_input();
+    test_equal_states_are_not_queued();
     test_keyboard_rollover_passes_through();
+    test_press_release_back_to_back_while_busy();
+    test_rapid_pairs_overflow_keeps_order_and_ends_up();
+    test_click_is_three_ordered_reports();
+    test_transition_carries_its_own_motion();
     test_pointer_accumulates_three_applies_one_report();
+    test_motion_that_cancels_out_is_dropped();
     test_pointer_report_byte_layout();
     test_clamp_40000_over_two_pumps();
     test_int16_min_delta_is_clamped();
     test_wheel_saturation();
     test_motion_accumulators_saturate();
     test_consumer_press_then_release_with_busy_first_pump();
-    test_consumer_coalesces_to_latest_state();
+    test_consumer_tap_while_busy_delivers_both();
     test_alternation_pointer_and_consumer();
     test_alternation_under_continuous_motion();
     test_one_report_per_interface_per_call();
-    test_busy_ready_leaves_dirty();
-    test_send_false_leaves_dirty_and_motion();
-    test_release_with_remaining_motion_carries_new_buttons();
-    test_button_change_without_motion_is_sent();
-    test_release_all_sends_all_up();
+    test_busy_ready_leaves_entries_queued();
+    test_send_false_retries_the_same_entry();
+    test_refused_chunk_is_not_consumed();
+    test_drag_release_keeps_motion_under_held_button();
+    test_release_all_sends_only_the_zero_state();
     test_release_all_resends_when_already_zero();
-    test_release_all_while_busy_then_ready();
     test_release_all_apply_interleavings();
     test_abandon_sends_nothing();
-    test_pending_reflects_flags_and_motion();
+    test_pending_reflects_queues();
     test_null_and_unknown_inputs();
     return 0;
 }
