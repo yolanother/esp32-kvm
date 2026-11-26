@@ -29,11 +29,15 @@ config KVM_USB_ESCAPE_WINDOW_MS
 
 config KVM_USB_CONFIRM_MS
     int "Mounted time that confirms a composite boot (ms)"
+    range 5000 600000
     default 30000
 
 config KVM_USB_MAX_UNCONFIRMED
     int "Unconfirmed composite boots before reverting to serial"
+    range 1 255
     default 3
+    help
+        Stored in the u8 NVS key "unconf"; 0 would revert every boot.
 
 config KVM_USB_REMOTE_WAKEUP
     bool "Advertise USB remote wakeup"

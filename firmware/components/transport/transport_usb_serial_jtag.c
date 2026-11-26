@@ -21,7 +21,9 @@
  * host session does not affect it. The same rules gate the input-device list
  * behind the entry, whose confirmed forget is the worker's only other central
  * call; the stored names it lists come from doubtech_hid_central_stored().
- * Reconnecting stored devices is the central's own schedule. */
+ * Reconnecting stored devices is the central's own schedule.
+ * Every host read also feeds the two USB mode magic matchers (serial once,
+ * serial mode); a match releases everything, resets the core and restarts. */
 #include "transport_usb_serial_jtag.h"
 #include "transport_core.h"
 #include "transport_hub.h"
@@ -32,6 +34,8 @@
 #include "display_labels.h"
 #include "doubtech_hid.h"
 #include "doubtech_hid_central.h"
+#include "usb_boot.h"
+#include "usb_mode.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -499,6 +503,9 @@ static void usb_worker(void *context)
     uint64_t last_health_ms = 0;
     bool ready_sampled = false;
     kvm_transport_slot_t slots[KVM_ROUTER_MAX_SLOTS] = {0};
+    kvm_usb_magic_t serial_once_magic, serial_mode_magic;
+    kvm_usb_magic_init(&serial_once_magic, KVM_USB_MAGIC_SERIAL_ONCE, sizeof(KVM_USB_MAGIC_SERIAL_ONCE) - 1);
+    kvm_usb_magic_init(&serial_mode_magic, KVM_USB_MAGIC_SERIAL_MODE, sizeof(KVM_USB_MAGIC_SERIAL_MODE) - 1);
     for (;;) {
         uint32_t button_bits = 0;
         (void)xTaskNotifyWait(0, UINT32_MAX, &button_bits, 0);
@@ -635,6 +642,21 @@ static void usb_worker(void *context)
         int read = link->read(link->context, bytes, sizeof(bytes), wait);
         size_t host_bytes = 0;
         if (read > 0) {
+            /* USB mode magic (spec Decision 9), active in every build and mode;
+             * no session needed. Each matcher keeps its own state, so the
+             * diagnostics matcher below still sees every read unchanged. */
+            bool serial_mode = kvm_usb_magic_feed(&serial_mode_magic, bytes, (size_t)read);
+            bool serial_once = kvm_usb_magic_feed(&serial_once_magic, bytes, (size_t)read);
+            if (serial_mode || serial_once) {
+                kvm_hub_worker_release(&hub_worker);
+                kvm_router_emergency_release(&router);
+                kvm_transport_core_reset(&core);
+                /* Neither returns, except a refused request (never for serial). */
+                if (serial_mode) kvm_usb_reboot_with_mode(KVM_USB_MODE_SERIAL_JTAG);
+                else kvm_usb_reboot_serial_once();
+                was_connected = false;
+                continue;
+            }
             if (kvm_transport_diagnostics_requested(bytes, (size_t)read)) {
                 kvm_router_emergency_release(&router);
                 kvm_transport_core_reset(&core);

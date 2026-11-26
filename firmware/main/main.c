@@ -4,12 +4,14 @@
  * session, READY encrypted guest, explicit switch, and explicit arm. The
  * Waveshare panel starts only with the explicitly validated board profile.
  * Start order: doubtech_hid_start here owns the NimBLE host; the input-device
- * central starts later from the USB worker, once doubtech_hid_host_synced(). */
+ * central starts later from the USB worker, once doubtech_hid_host_synced().
+ * The USB boot mode is decided between NVS init and the USB transport start. */
 #include "esp_log.h"
 #include "doubtech_hid.h"
 #include "display.h"
 #include "display_labels.h"
 #include "transport_usb_serial_jtag.h"
+#include "usb_boot.h"
 
 /* Advertises as "DoubTech HID"; the NULL bond namespace keeps the shipped firmware's kvm_bonds table so paired computers stay paired. */
 static const doubtech_hid_config_t hid_config = {
@@ -28,6 +30,10 @@ void app_main(void)
     if (hid_result != ESP_OK) ESP_LOGE("esp32-kvm", "HID startup failed: %d", hid_result);
     esp_err_t labels_result = kvm_display_labels_init();
     if (labels_result != ESP_OK) ESP_LOGE("esp32-kvm", "Display label storage failed: %d", labels_result);
+    /* USB mode for this boot (after NVS init in doubtech_hid_start, before any
+       USB driver). Composite support is not built yet: this is always serial
+       (NOT_BUILT), without waiting or touching NVS, and USJ starts as before. */
+    (void)kvm_usb_boot_decide();
     esp_err_t usb_result = kvm_transport_usb_serial_jtag_start();
     if (usb_result != ESP_OK) ESP_LOGE("esp32-kvm", "USB startup failed: %d", usb_result);
 #if CONFIG_KVM_DISPLAY_WAVESHARE_TOUCH_154_VERIFIED
