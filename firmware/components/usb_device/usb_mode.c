@@ -2,6 +2,7 @@
  * Implements the pure USB boot-mode decision (spec Decision 7) and the magic
  * string matcher. Deliberately free of ESP-IDF includes so it runs on the host. */
 #include "usb_mode.h"
+#include <stdio.h>
 #include <string.h>
 
 static kvm_usb_boot_decision_t serial(kvm_usb_reason_t reason)
@@ -28,6 +29,16 @@ kvm_usb_boot_decision_t kvm_usb_mode_decide(const kvm_usb_boot_inputs_t *in)
         return d;
     }
     return serial(KVM_USB_REASON_DEFAULT);
+}
+
+int kvm_usb_boot_describe(const kvm_usb_boot_snapshot_t *s, char *out, size_t cap)
+{
+    if (s == NULL || out == NULL || cap == 0) return 0;
+    int n = snprintf(out, cap, "mode=%d reason=%d once=%d escape=%d abnormal=%d rst=%d stored=%u unconf=%u",
+                     (int)s->decision.mode, (int)s->decision.reason, s->inputs.serial_once ? 1 : 0,
+                     s->inputs.escape_held ? 1 : 0, s->inputs.abnormal_reset ? 1 : 0, s->reset_reason,
+                     (unsigned)s->inputs.stored_mode, (unsigned)s->inputs.unconfirmed);
+    return n < 0 ? 0 : n;
 }
 
 /* Single source of truth: the decision itself, with the escape button up. */

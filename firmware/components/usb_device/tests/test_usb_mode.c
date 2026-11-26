@@ -453,6 +453,51 @@ static void test_magic_general_patterns(void)
     }
 }
 
+/* The boot snapshot line is the drill's evidence (task 9): it must carry the
+ * inputs the decision used, notably once=1 on a NOT_BUILT image. */
+static void test_boot_describe(void)
+{
+    kvm_usb_boot_snapshot_t s;
+    memset(&s, 0, sizeof(s));
+    s.inputs.serial_once = true;
+    s.inputs.max_unconfirmed = 3;
+    s.inputs.stored_mode = 0;
+    s.decision = kvm_usb_mode_decide(&s.inputs); /* not built: NOT_BUILT */
+    s.reset_reason = 3;
+    char line[128];
+    int n = kvm_usb_boot_describe(&s, line, sizeof(line));
+    const char *want = "mode=0 reason=2 once=1 escape=0 abnormal=0 rst=3 stored=0 unconf=0";
+    CHECK(strcmp(line, want) == 0);
+    CHECK(n == (int)strlen(want));
+
+    s.inputs.composite_built = true;
+    s.inputs.serial_once = false;
+    s.inputs.abnormal_reset = true;
+    s.inputs.stored_mode = 1;
+    s.inputs.unconfirmed = 2;
+    s.decision = kvm_usb_mode_decide(&s.inputs);
+    s.reset_reason = 4;
+    n = kvm_usb_boot_describe(&s, line, sizeof(line));
+    CHECK(strcmp(line, "mode=0 reason=6 once=0 escape=0 abnormal=1 rst=4 stored=1 unconf=2") == 0);
+
+    s.inputs.abnormal_reset = false;
+    s.inputs.escape_held = true;
+    s.decision = kvm_usb_mode_decide(&s.inputs);
+    s.reset_reason = 3;
+    (void)kvm_usb_boot_describe(&s, line, sizeof(line));
+    CHECK(strcmp(line, "mode=0 reason=5 once=0 escape=1 abnormal=0 rst=3 stored=1 unconf=2") == 0);
+
+    /* Truncation always leaves a terminated string; bad arguments write nothing. */
+    char small[8];
+    memset(small, 'x', sizeof(small));
+    n = kvm_usb_boot_describe(&s, small, sizeof(small));
+    CHECK(n > (int)sizeof(small) && small[sizeof(small) - 1] == '\0' && strncmp(small, "mode=0 ", 7) == 0);
+    CHECK(kvm_usb_boot_describe(NULL, line, sizeof(line)) == 0);
+    CHECK(kvm_usb_boot_describe(&s, NULL, 16) == 0);
+    line[0] = 'x';
+    CHECK(kvm_usb_boot_describe(&s, line, 0) == 0 && line[0] == 'x');
+}
+
 int main(void)
 {
     test_priority();
@@ -462,6 +507,7 @@ int main(void)
     test_magic();
     test_magic_not_triggered_by_frames();
     test_magic_general_patterns();
+    test_boot_describe();
     printf("test_usb_mode: all checks passed\n");
     return 0;
 }

@@ -43,6 +43,22 @@ typedef struct {
 /** Applies the spec priority table; NULL input yields serial with DEFAULT. */
 kvm_usb_boot_decision_t kvm_usb_mode_decide(const kvm_usb_boot_inputs_t *in);
 
+/** What one boot decided and from which facts: the decision as applied (after
+ *  any NVS fallback), the inputs it actually used, and the raw reset reason
+ *  (esp_reset_reason_t value). Feeds the log, the diagnostics dump, the screen
+ *  and STATUS. */
+typedef struct {
+    kvm_usb_boot_decision_t decision;
+    kvm_usb_boot_inputs_t inputs;
+    int reset_reason;
+} kvm_usb_boot_snapshot_t;
+
+/** Formats s as "mode=M reason=R once=0|1 escape=0|1 abnormal=0|1 rst=N
+ *  stored=S unconf=U" (snprintf semantics: always terminated when cap > 0,
+ *  returns the untruncated length). NULL s or out, or cap 0, writes nothing
+ *  and returns 0. */
+int kvm_usb_boot_describe(const kvm_usb_boot_snapshot_t *s, char *out, size_t cap);
+
 /** True only when, ignoring escape_held, the decision would be composite.
  *  Derived from kvm_usb_mode_decide, so the two can never disagree. */
 bool kvm_usb_mode_needs_window(const kvm_usb_boot_inputs_t *in);

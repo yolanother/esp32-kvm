@@ -624,6 +624,10 @@ static void usb_worker(void *context)
             continue;
         }
         if (!was_connected) {
+            /* A new connection starts with empty magic matchers: a partial
+               match left by an earlier host never completes with this one. */
+            kvm_usb_magic_init(&serial_once_magic, KVM_USB_MAGIC_SERIAL_ONCE, sizeof(KVM_USB_MAGIC_SERIAL_ONCE) - 1);
+            kvm_usb_magic_init(&serial_mode_magic, KVM_USB_MAGIC_SERIAL_MODE, sizeof(KVM_USB_MAGIC_SERIAL_MODE) - 1);
             (void)kvm_transport_core_init(&core, "esp32-kvm-s3", esp_app_get_description()->version,
                                           new_session(), send_binary, NULL);
             kvm_transport_core_bind_router(&core, &router, now_ms, NULL);

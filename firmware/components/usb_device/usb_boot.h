@@ -3,7 +3,9 @@
  * "serial once" flag, the reset-reason check, the escape window and the boot
  * decision applied to the NVS mode store, plus the worker's reboot helpers.
  * With CONFIG_KVM_USB_COMPOSITE_SUPPORT=n the decision is always serial
- * (NOT_BUILT), never waits, never reads or writes NVS and never touches GPIO0. */
+ * (NOT_BUILT), never waits, never reads or writes NVS and never touches GPIO0;
+ * the boot snapshot still records the inputs (once=1 after a serial-once
+ * restart), which is the drill's proof that the RTC flag survived. */
 #ifndef ESP32_KVM_USB_BOOT_H
 #define ESP32_KVM_USB_BOOT_H
 
@@ -18,7 +20,8 @@ bool kvm_usb_take_serial_once(void);
 /** Sets the one-shot flag; it survives esp_restart() but not a power cycle. */
 void kvm_usb_set_serial_once(void);
 
-/** True for PANIC, INT_WDT, TASK_WDT, WDT, BROWNOUT and CPU_LOCKUP resets. */
+/** True for PANIC, INT_WDT, TASK_WDT, WDT, BROWNOUT, CPU_LOCKUP and
+ *  PWR_GLITCH resets (the last two are never reported by the S3 port). */
 bool kvm_usb_reset_abnormal(void);
 
 /** Gathers the boot facts, runs the escape window (GPIO0 sampled every 10 ms,
@@ -36,18 +39,24 @@ bool kvm_usb_reset_abnormal(void);
  *  there); the BOOT escape itself does not depend on it. */
 kvm_usb_boot_decision_t kvm_usb_boot_decide(void);
 
-/** The decision of this boot (serial / DEFAULT before kvm_usb_boot_decide has
- *  run). Written once in app_main before the tasks that read it start. */
-kvm_usb_boot_decision_t kvm_usb_boot_last(void);
+/** This boot's snapshot: the decision as applied plus the inputs it used
+ *  (serial_once, escape_held, abnormal_reset, stored_mode, unconfirmed) and the
+ *  esp_reset_reason() value, for the screen, STATUS and the diagnostics dump.
+ *  Before kvm_usb_boot_decide has run: serial / DEFAULT, all inputs 0 and
+ *  reset_reason -1. Written once in app_main before the tasks that read it
+ *  start. kvm_usb_boot_decide logs the same facts (kvm_usb_boot_describe). */
+kvm_usb_boot_snapshot_t kvm_usb_boot_last(void);
 
 /** Worker only, after it has done the emergency release (router, hub, HID
  *  sink) and reset the transport core: sets the serial-once flag, waits 100 ms
  *  so queued release reports can leave, and restarts. Does not return. */
 void kvm_usb_reboot_serial_once(void);
 
-/** Worker only, same preconditions. SERIAL: persists mode 0 and clears unconf
- *  (if the mode write fails the serial-once flag is set instead, so the next
- *  boot is still serial), then restarts. COMPOSITE: refused (returns, nothing
+/** Worker only, same preconditions. SERIAL: in a build with composite support
+ *  or the rescue build, persists mode 0 and clears unconf (if the mode write
+ *  fails the serial-once flag is set instead, so the next boot is still
+ *  serial); in a build without either it writes nothing (Decision 6: the key is
+ *  ignored completely); then restarts in every build. COMPOSITE: refused (returns, nothing
  *  written) unless the build has composite support and is not the rescue
  *  build; otherwise clears unconf, then persists mode 1, and restarts; if a
  *  write fails it returns without restarting. Any other value is SERIAL. */

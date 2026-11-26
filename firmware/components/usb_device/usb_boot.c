@@ -41,8 +41,9 @@ typedef struct {
 /* Not initialized at any boot: survives esp_restart(), random after power-on. */
 static RTC_NOINIT_ATTR kvm_usb_serial_once_t serial_once_flag;
 
-static kvm_usb_boot_decision_t last_decision = {
-    KVM_USB_MODE_SERIAL_JTAG, KVM_USB_REASON_DEFAULT, false, false,
+static kvm_usb_boot_snapshot_t last_snapshot = {
+    .decision = { KVM_USB_MODE_SERIAL_JTAG, KVM_USB_REASON_DEFAULT, false, false },
+    .reset_reason = -1,
 };
 static bool decided;
 
@@ -62,19 +63,28 @@ void kvm_usb_set_serial_once(void)
     flag->inverse = (uint32_t)~SERIAL_ONCE_MAGIC;
 }
 
-bool kvm_usb_reset_abnormal(void)
+/* PWR_GLITCH is included because it can only make a boot serial; the S3 port
+ * (esp_system/port/soc/esp32s3/reset_reason.c) reports neither it nor
+ * CPU_LOCKUP today, so on this chip both cases are dormant. */
+static bool reason_abnormal(esp_reset_reason_t reason)
 {
-    switch (esp_reset_reason()) {
+    switch (reason) {
     case ESP_RST_PANIC:
     case ESP_RST_INT_WDT:
     case ESP_RST_TASK_WDT:
     case ESP_RST_WDT:
     case ESP_RST_BROWNOUT:
     case ESP_RST_CPU_LOCKUP:
+    case ESP_RST_PWR_GLITCH:
         return true;
     default:
         return false;
     }
+}
+
+bool kvm_usb_reset_abnormal(void)
+{
+    return reason_abnormal(esp_reset_reason());
 }
 
 /* Samples BOOT for the escape window; true means "serial for this boot". */
@@ -106,12 +116,13 @@ static bool escape_window(void)
 
 kvm_usb_boot_decision_t kvm_usb_boot_decide(void)
 {
-    if (decided) return last_decision;
+    if (decided) return last_snapshot.decision;
     kvm_usb_boot_inputs_t in = {0};
     in.composite_built = KVM_USB_BUILT;
     in.force_serial = KVM_USB_FORCED;
     in.serial_once = kvm_usb_take_serial_once(); /* one-shot: consumed on every boot */
-    in.abnormal_reset = kvm_usb_reset_abnormal();
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    in.abnormal_reset = reason_abnormal(reset_reason);
     in.max_unconfirmed = (uint8_t)CONFIG_KVM_USB_MAX_UNCONFIRMED;
     /* A build that cannot start composite ignores the store completely. */
     if (in.composite_built && !in.force_serial) {
@@ -140,16 +151,19 @@ kvm_usb_boot_decision_t kvm_usb_boot_decide(void)
             d.count_attempt = false;
         }
     }
-    last_decision = d;
+    last_snapshot.decision = d;
+    last_snapshot.inputs = in;
+    last_snapshot.reset_reason = (int)reset_reason;
     decided = true;
-    ESP_LOGI(TAG, "USB boot: mode=%d reason=%d stored=%u unconf=%u", (int)d.mode, (int)d.reason,
-             (unsigned)in.stored_mode, (unsigned)in.unconfirmed);
+    char line[128];
+    (void)kvm_usb_boot_describe(&last_snapshot, line, sizeof(line));
+    ESP_LOGI(TAG, "USB boot: %s", line);
     return d;
 }
 
-kvm_usb_boot_decision_t kvm_usb_boot_last(void)
+kvm_usb_boot_snapshot_t kvm_usb_boot_last(void)
 {
-    return last_decision;
+    return last_snapshot;
 }
 
 static void restart_after_release(void)
@@ -180,6 +194,11 @@ void kvm_usb_reboot_with_mode(kvm_usb_mode_t mode)
             return;
         }
         ESP_LOGW(TAG, "Restarting in composite USB mode");
+    } else if (!KVM_USB_BUILT && !KVM_USB_FORCED) {
+        /* Spec Decision 6: an image without composite support ignores the key
+         * completely, so it never creates the kvm_usb namespace. The restart
+         * is still done, so the host sees the same response in every build. */
+        ESP_LOGW(TAG, "Serial mode requested; this build is always serial, restarting");
     } else {
         esp_err_t err = kvm_usb_mode_store_set_mode(KVM_USB_MODE_SERIAL_JTAG);
         if (err != ESP_OK) {

@@ -9,6 +9,7 @@
 #include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "usb_boot.h"
 #define TRACE_SIZE 16384
 static char trace[TRACE_SIZE];
 static char snapshot[TRACE_SIZE];
@@ -61,11 +62,18 @@ bool kvm_transport_diagnostics_requested(const uint8_t *bytes, size_t length)
 void kvm_transport_diagnostics_dump_to(const kvm_transport_link_t *link)
 {
     if (!link || !link->write) return;
-    char identity[160];
+    char identity[256];
+    char usb_boot[128];
     const esp_app_desc_t *app = esp_app_get_description();
+    /* The USB boot facts sit in the header, not only in the ring, so a long
+     * uptime that wraps the 16 KB trace still shows them (task 9 drill). */
+    kvm_usb_boot_snapshot_t boot = kvm_usb_boot_last();
+    (void)kvm_usb_boot_describe(&boot, usb_boot, sizeof(usb_boot));
     int identity_length = snprintf(identity, sizeof(identity),
-        "\nKVM-TRACE-BEGIN\nbuild=%s %s uptime_ms=%lld trace_bytes=%u\n",
-        app->date, app->time, (long long)(esp_timer_get_time() / 1000), (unsigned)count);
+        "\nKVM-TRACE-BEGIN\nbuild=%s %s uptime_ms=%lld trace_bytes=%u\nusb_boot %s\n",
+        app->date, app->time, (long long)(esp_timer_get_time() / 1000), (unsigned)count, usb_boot);
+    if (identity_length < 0) identity_length = 0;
+    if ((size_t)identity_length >= sizeof(identity)) identity_length = (int)sizeof(identity) - 1;
     portENTER_CRITICAL(&lock);
     size_t length = count;
     size_t start = (position + TRACE_SIZE - count) % TRACE_SIZE;
