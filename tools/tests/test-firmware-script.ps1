@@ -73,6 +73,57 @@ Assert-That ($noPy.Code -eq 0 -and $noPy.Output -notmatch 'python env first') 'b
 Remove-Item Env:ESP32_KVM_IDF_PYTHON_ROOT -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force $pyRoot -ErrorAction SilentlyContinue
 
+# Composite board (spec Decisions 9 and 12): serial-once handoff before app-flash.
+$onceBytes = '00 4B 56 4D 2D 55 53 42 2D 53 45 52 49 41 4C 2D 4F 4E 43 45 0A'
+$modeBytes = '00 4B 56 4D 2D 55 53 42 2D 53 45 52 49 41 4C 2D 4D 4F 44 45 0A'
+
+$cports = Invoke-Firmware -Arguments @('ports', '-DryRun') -FakePorts 'COM5:composite,COM4:serial'
+Assert-That ($cports.Code -eq 0) 'ports -DryRun with mixed modes exits 0'
+Assert-That ($cports.Output -match '(?m)^COM5\s+303A:4009\s+composite\b') 'ports lists COM5 as composite with its PID'
+Assert-That ($cports.Output -match '(?m)^COM4\s+303A:1001\s+serial\b') 'ports lists COM4 as serial'
+$plain = Invoke-Firmware -Arguments @('ports', '-DryRun') -FakePorts 'COM9'
+Assert-That ($plain.Output -match '(?m)^COM9\s+303A:1001\s+serial\b') 'a bare fake port name is a serial board'
+
+$comp = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts 'COM5:composite'
+Assert-That ($comp.Code -eq 0) 'flash -DryRun with only a composite board exits 0'
+Assert-That ($comp.Output -match 'serial-once' -and $comp.Output -match [regex]::Escape($onceBytes) -and $comp.Output -match '21 bytes') 'composite flash prints the 21-byte serial-once magic write'
+Assert-That ($comp.Output -match 'COM5' -and $comp.Output -match '115200') 'magic write names the port and 115200'
+Assert-That ($comp.Output -match '(?i)wait.*15 s') 'composite flash prints the 15 s wait for a serial board'
+Assert-That ($comp.Output -match 'idf\.py -C firmware -p COM5 app-flash') 'composite flash then runs the unchanged app-flash line'
+Assert-That ($comp.Output -notmatch 'erase' -and $comp.Output -notmatch $eraseRegex) 'composite flash has no erase option'
+$compOrder = ($comp.Output.IndexOf('serial-once') -lt $comp.Output.IndexOf('app-flash'))
+Assert-That $compOrder 'the magic write is printed before app-flash'
+
+$compFull = Invoke-Firmware -Arguments @('flash', '-Full', '-DryRun') -FakePorts 'COM5:composite'
+Assert-That ($compFull.Code -eq 0 -and $compFull.Output -match '\sflash(\s|$)' -and $compFull.Output -notmatch 'app-flash' -and $compFull.Output -notmatch 'erase') 'composite -Full keeps the flash target and never erases'
+
+$serialOnly = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts 'COM4:serial'
+Assert-That ($serialOnly.Output -notmatch 'serial-once' -and $serialOnly.Output -match 'app-flash') 'a serial board gets no magic write'
+
+$twoComp = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts 'COM5:composite,COM6:composite'
+Assert-That ($twoComp.Code -ne 0 -and $twoComp.Output -match 'COM5' -and $twoComp.Output -match 'COM6' -and $twoComp.Output -match '-Port') 'two composite boards without -Port refuse and name the ports'
+Assert-That ($twoComp.Output -notmatch 'app-flash') 'two composite boards print no flash line'
+$mixed = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts 'COM4:serial,COM5:composite'
+Assert-That ($mixed.Code -ne 0 -and $mixed.Output -match 'COM4' -and $mixed.Output -match 'COM5') 'serial plus composite without -Port refuses'
+$mixedPort = Invoke-Firmware -Arguments @('flash', '-DryRun', '-Port', 'COM5') -FakePorts 'COM4:serial,COM5:composite'
+Assert-That ($mixedPort.Code -eq 0 -and $mixedPort.Output -match 'serial-once' -and $mixedPort.Output -match '-p COM5 app-flash') 'explicit -Port on the composite board does the handoff'
+$mixedSerialPort = Invoke-Firmware -Arguments @('flash', '-DryRun', '-Port', 'COM4') -FakePorts 'COM4:serial,COM5:composite'
+Assert-That ($mixedSerialPort.Code -eq 0 -and $mixedSerialPort.Output -notmatch 'serial-once' -and $mixedSerialPort.Output -match '-p COM4 app-flash') 'explicit -Port on the serial board flashes directly'
+
+$usb = Invoke-Firmware -Arguments @('usb-serial', '-DryRun') -FakePorts 'COM5:composite'
+Assert-That ($usb.Code -eq 0 -and $usb.Output -match 'serial-mode' -and $usb.Output -match [regex]::Escape($modeBytes) -and $usb.Output -match '21 bytes') 'usb-serial -DryRun prints the 21-byte serial-mode magic write'
+Assert-That ($usb.Output -notmatch 'idf\.py' -and $usb.Output -notmatch 'erase') 'usb-serial runs no idf.py and no erase'
+$usbTwo = Invoke-Firmware -Arguments @('usb-serial', '-DryRun') -FakePorts 'COM5:composite,COM6:composite'
+Assert-That ($usbTwo.Code -ne 0 -and $usbTwo.Output -match '-Port') 'usb-serial with several boards and no -Port refuses'
+$usbNone = Invoke-Firmware -Arguments @('usb-serial', '-DryRun') -FakePorts ''
+Assert-That ($usbNone.Code -ne 0) 'usb-serial with no board exits non-zero'
+$usbPort = Invoke-Firmware -Arguments @('usb-serial', '-DryRun', '-Port', 'COM5') -FakePorts 'COM4:serial,COM5:composite'
+Assert-That ($usbPort.Code -eq 0 -and $usbPort.Output -match 'COM5') 'usb-serial -Port picks the named board'
+
+$noneMsg = Invoke-Firmware -Arguments @('flash', '-DryRun') -FakePorts ''
+Assert-That ($noneMsg.Output -match '303A:4009') 'no-board message also names the composite id'
+
+
 if ($failures -gt 0) { Write-Host "$failures assertion(s) failed"; exit 1 }
 Write-Host 'All firmware script checks passed'
 exit 0

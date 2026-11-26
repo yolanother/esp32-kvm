@@ -10,6 +10,10 @@ The capture service saves the host cursor position when guest capture arms. Expl
 
 The capture worker exits on `WM_QUIT` and unhooks. Service destruction waits at most 250 ms for a stalled worker, with the gate already local; process termination also removes that process's low-level hooks. Cursor restoration requires a running process and accessible desktop. If the process is killed, restart reconciliation must restore cursor state using a separately persisted snapshot; this is not implemented here.
 
+## USB mode recovery (board side)
+
+Separate from the host-side gate above: the board can run its USB device as serial (`303A:1001`, the default) or as a composite HID plus CDC device (interim `303A:4009`), and composite must never cost the owner the ability to reflash. Serial is the default; composite needs a touchscreen action and a build with composite support. Paths back to serial, none of which erases flash: replug three times within 30 s each; press BOOT within the 1.5 s escape window after plugging in; touchscreen **USE SERIAL MODE** or **RESTART IN SERIAL MODE** (USB MODE row of INPUT DEVICES, needs a paired guest); `tools/firmware.ps1 usb-serial`; BOOT held while plugging in (ROM download mode); a rescue build with `CONFIG_KVM_USB_FORCE_SERIAL=y`. `tools/firmware.ps1 flash` on a composite board writes a one-shot serial-once magic string and waits for the serial board before flashing. The board-side decision order is in `docs/superpowers/specs/2026-11-25-usb-hid-device-design.md` (Decisions 6 to 10), the README Recovery section lists the steps, and `docs/hardware/usb-recovery-drill.md` holds the owner drills. All of it is unverified on hardware until those drills are run and recorded in `docs/hardware/board-bringup.md`.
+
 ## Verification
 
 - `cargo test --offline -p esp32-kvm-platform-windows --test recovery`: fake-clock actor and pump stalls, stale-pump arm guard, system transition, and both-Ctrl emergency.

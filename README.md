@@ -139,6 +139,8 @@ The script loads ESP-IDF, runs `idf.py -C firmware set-target esp32s3` only when
 4. `-Full` runs `idf.py flash` instead and also writes the bootloader, partition table and OTA data. Use it only when those must change: the first flash of a blank board, or after the partition table (`firmware/partitions.csv`) or bootloader changed. It still never erases flash, and it does not write the NVS partition (offset `0x9000`), so bonds survive it too.
 5. Restart the desktop app. It starts a fresh USB session; the board reports `Local` with input disarmed.
 
+`ports` also lists a board in USB composite mode (VID 303A, the allow-listed PID, interface `MI_02`) and prints each board's mode, `serial` or `composite`. `flash` on a composite-only board first writes the serial-once magic string (`"\0KVM-USB-SERIAL-ONCE\n"`, 21 bytes) to its port, waits up to 15 seconds for the board to return as `303A:1001`, then runs the same `app-flash`. Two composite boards, or a composite and a serial board, need `-Port`. `-DryRun` prints these steps without doing them. This path is covered by dry-run tests only; no board has run it.
+
 The live `ports` listing and the busy check before `flash` open the port and may reset the board (BLE links drop if so). Both ran on the owner's board on 2026-11-24 with the desktop app stopped: `ports` reported `COM4  303A:1001  free (opens exclusively)`, and `flash -Port COM4` completed. Automatic port selection (no `-Port`) had a bug on that run: with exactly one board it tried to open a port called `C`. It is fixed in `tools/firmware.ps1` and covered by `tools/tests/test-firmware-script.ps1`, and has been checked only as a dry run since the fix.
 
 In-app update: the desktop app has no firmware-update screen today. The building blocks are in the repository (`update-core` preflight, the host actor's `prepare_update`, `update-runner` for app-only flashing, and `tools/package_release.py`), but nothing in the app calls them. Packaging a release, its manifest and its remaining gates are in [docs/Designs/release](docs/Designs/release/README.md) and [the update preflight](docs/Designs/update/host-update-preflight.md). Use `tools/firmware.ps1` to install firmware.
@@ -215,15 +217,26 @@ Select where input goes with the chord Left Ctrl + Left Alt + 1, 2 or 3 (guest),
 
 ### Recovery
 
-If a flash is interrupted or the board no longer enumerates, do not retry blindly and do not erase flash. The documented manual route is to hold the BOOT button while connecting USB, then release it, to enter ROM download mode; see [the bring-up log](docs/hardware/board-bringup.md). That sequence has not been repeatably verified on this board, so do not rely on it as a tested procedure. Software-side local-control recovery (the capture gate, both-Ctrl emergency release, watchers) is described in [docs/Designs/recovery](docs/Designs/recovery/README.md).
+If a flash is interrupted or the board no longer enumerates, do not retry blindly and do not erase flash. The documented manual route is to hold the BOOT button while connecting USB, then release it, to enter ROM download mode; see [the bring-up log](docs/hardware/board-bringup.md). That sequence has not been repeatably verified on this board, so do not rely on it as a tested procedure. The owner drill that is meant to prove it is [docs/hardware/usb-recovery-drill.md](docs/hardware/usb-recovery-drill.md).
+
+**USB HID mode recovery (designed, not yet run on a board).** The board starts in serial mode (`303A:1001`) unless composite USB HID mode was turned on from the touchscreen, and only an image built with composite support honors that setting. If a composite board stops being usable, in this order of effort (spec: `docs/superpowers/specs/2026-11-25-usb-hid-device-design.md`, Decisions 6 to 10):
+
+1. **Replug three times**, each within 30 seconds of the previous boot, with no button: the third start is forced back to serial mode and the screen says the USB HID mode was turned off after failed starts.
+2. **Escape window:** plug in, then press BOOT within about 1.5 seconds. That boot is serial and the USB MODE screen offers to keep it. Pressing BOOT before power is ROM download mode instead (item 4).
+3. **Touchscreen:** INPUT DEVICES, 4th row **USB MODE** (shown only with a paired guest), then **USE SERIAL MODE** (persists) or **RESTART IN SERIAL MODE** (one boot), each tapped twice to confirm.
+4. **BOOT + plug:** hold BOOT while plugging in, release; the chip enters ROM download mode as `303A:1001` whatever the app is doing. Flash from there with `tools/firmware.ps1 flash -Port COMn`.
+5. **Script:** `pwsh -NoProfile -ExecutionPolicy Bypass -File tools/firmware.ps1 usb-serial` writes the serial-mode magic string and persists serial mode (add `-DryRun` to preview it). With the board in composite mode the same script's `flash` first writes the serial-once magic, waits up to 15 seconds for `303A:1001`, then runs the usual `app-flash`.
+6. **Rescue build:** an image built with `CONFIG_KVM_USB_FORCE_SERIAL=y` ignores the stored mode and never starts TinyUSB; flash it from ROM mode (item 4).
+
+None of this erases flash. Run the drills in [docs/hardware/usb-recovery-drill.md](docs/hardware/usb-recovery-drill.md) before relying on any of it. Software-side local-control recovery (the capture gate, both-Ctrl emergency release, watchers) is described in [docs/Designs/recovery](docs/Designs/recovery/README.md).
 
 ### Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
 | `COMn is busy. Quit the ESP32 KVM desktop app (it owns the port) and try again.` | Another program has the serial port. Exit the desktop app from its tray icon and close serial monitors, then retry. |
-| `No board with USB id 303A:1001 found.` | The board is not enumerating. Use a data cable, replug, check Device Manager, or pass `-Port COMn` if you know the port. See Recovery if it never appears. |
-| `Several boards with USB id 303A:1001 found` | Pass `-Port COMn`. |
+| `No board with USB id 303A:1001 or 303A:4009 found.` | The board is not enumerating. Use a data cable, replug, check Device Manager, or pass `-Port COMn` if you know the port. See Recovery if it never appears. |
+| `Several boards found: ...` | Pass `-Port COMn`. |
 | `ESP-IDF not found. Set IDF_PATH or install ESP-IDF v5.5.1 at D:\esp\esp-idf-v5.5.1.` | Install v5.5.1 or set `IDF_PATH` to a folder that contains `export.ps1`. |
 | Build fails, or old `sdkconfig` values appear | Re-run the build once. If you edited `firmware/sdkconfig.defaults`, delete the generated, git-ignored `firmware/sdkconfig` and build again. |
 | Local GATT trace stopped logging after the Kconfig rename | The symbols were renamed from `CONFIG_KVM_HID_*` to `CONFIG_DOUBTECH_HID_*`. A local `sdkconfig` with the old names is migrated automatically through `firmware/main/sdkconfig.rename`; check with `grep DOUBTECH_HID firmware/sdkconfig`. |
